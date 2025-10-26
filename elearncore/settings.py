@@ -31,6 +31,10 @@ INSTALLED_APPS = [
     # internal apps
     'accounts.apps.AccountsConfig',
     'api.apps.ApiConfig',
+    'content.apps.ContentConfig',
+    'forum.apps.ForumConfig',
+    'agentic.apps.AgenticConfig',
+    'messsaging.apps.MesssagingConfig',
 
     # Third party apps
     'corsheaders',
