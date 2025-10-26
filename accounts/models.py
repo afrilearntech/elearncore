@@ -5,7 +5,8 @@ from django.contrib.auth.models import AbstractBaseUser, PermissionsMixin
 from django.db import models
 from django.utils import timezone
 
-from elearncore.sysutils.constants import UserRole
+from django.conf import settings
+from elearncore.sysutils.constants import UserRole, StudentLevel
 
 from .manager import AccountManager
 
@@ -63,3 +64,62 @@ class OTP(TimestampedModel):
 
     def __str__(self):
         return self.phone + ' - ' + str(self.otp)
+    
+
+# Geography and School structure
+class County(TimestampedModel):
+    name = models.CharField(max_length=100, unique=True)
+
+    def __str__(self) -> str:
+        return self.name
+
+
+class District(TimestampedModel):
+    county = models.ForeignKey(County, on_delete=models.CASCADE, related_name="districts")
+    name = models.CharField(max_length=100)
+
+    class Meta:
+        unique_together = ("county", "name")
+
+    def __str__(self) -> str:
+        return f"{self.name} ({self.county.name})"
+
+
+class School(TimestampedModel):
+    district = models.ForeignKey(District, on_delete=models.CASCADE, related_name="schools")
+    name = models.CharField(max_length=150)
+
+    class Meta:
+        unique_together = ("district", "name")
+
+    def __str__(self) -> str:
+        return self.name
+
+
+# Profiles
+class Student(TimestampedModel):
+    user = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="student")
+    school = models.ForeignKey(School, on_delete=models.SET_NULL, null=True, blank=True, related_name="students")
+    grade = models.CharField(max_length=20, choices=[(lvl.value, lvl.value) for lvl in StudentLevel], default=StudentLevel.OTHER.value)
+
+    def __str__(self) -> str:
+        return f"Student: {self.user.name}"
+
+
+class Teacher(TimestampedModel):
+    user = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="teacher")
+    school = models.ForeignKey('accounts.School', on_delete=models.SET_NULL, null=True, blank=True, related_name="teachers")
+    # subject relationship handled as M2M from content.Subject to Teacher to allow multi-subjects
+
+    def __str__(self) -> str:
+        return f"Teacher: {self.user.name}"
+
+
+class Parent(TimestampedModel):
+    user = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="parent")
+    wards = models.ManyToManyField(Student, related_name="guardians", blank=True)
+
+    def __str__(self) -> str:
+        return f"Parent: {self.user.name}"
+
+
