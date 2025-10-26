@@ -1,9 +1,14 @@
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 
-# from .viewsets import *  # ViewSets can be registered to the router below when available
+from .viewsets import SubjectViewSet, TopicViewSet, PeriodViewSet, LessonResourceViewSet, TakeLessonViewSet
 
 router = DefaultRouter()
+router.register(r'subjects', SubjectViewSet, basename='subject')
+router.register(r'topics', TopicViewSet, basename='topic')
+router.register(r'periods', PeriodViewSet, basename='period')
+router.register(r'lessons', LessonResourceViewSet, basename='lesson')
+router.register(r'taken-lessons', TakeLessonViewSet, basename='takelesson')
 
 urlpatterns = [
 	path('', include(router.urls)),
