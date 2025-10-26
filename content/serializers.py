@@ -11,7 +11,7 @@ from .models import (
 class SubjectSerializer(serializers.ModelSerializer):
 	class Meta:
 		model = Subject
-		fields = ['id', 'name', 'grade', 'description', 'teachers', 'created_at', 'updated_at']
+		fields = ['id', 'name', 'grade', 'description', 'thumbnail', 'teachers', 'created_at', 'updated_at']
 		read_only_fields = ['created_at', 'updated_at']
 
 
@@ -30,10 +30,11 @@ class PeriodSerializer(serializers.ModelSerializer):
 
 
 class LessonResourceSerializer(serializers.ModelSerializer):
+	created_by = serializers.PrimaryKeyRelatedField(read_only=True)
 	class Meta:
 		model = LessonResource
 		fields = [
-			'id', 'subject', 'topic', 'period', 'title', 'description', 'type', 'status', 'resource_url',
+			'id', 'subject', 'topic', 'period', 'title', 'description', 'type', 'status', 'resource_url', 'created_by',
 			'created_at', 'updated_at'
 		]
 		read_only_fields = ['created_at', 'updated_at']
