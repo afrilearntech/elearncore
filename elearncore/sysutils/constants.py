@@ -40,3 +40,28 @@ class QType(Enum):
     SHORT_ANSWER = "SHORT_ANSWER"
     ESSAY = "ESSAY"
     FILL_IN_THE_BLANK = "FILL_IN_THE_BLANK"
+
+
+class Status(Enum):
+    """Content moderation/publication status"""
+    DRAFT = "DRAFT"
+    PENDING = "PENDING"
+    APPROVED = "APPROVED"
+    REJECTED = "REJECTED"
+    REVIEW_REQUESTED = "REVIEW_REQUESTED"
+
+
+class Month(Enum):
+    """Months of the year as 1-12 to support academic periods"""
+    JANUARY = 1
+    FEBRUARY = 2
+    MARCH = 3
+    APRIL = 4
+    MAY = 5
+    JUNE = 6
+    JULY = 7
+    AUGUST = 8
+    SEPTEMBER = 9
+    OCTOBER = 10
+    NOVEMBER = 11
+    DECEMBER = 12
