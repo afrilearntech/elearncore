@@ -12,6 +12,8 @@ load_dotenv()
 # SECURITY WARNING: keep the secret key used in production secret!
 SECRET_KEY = os.getenv('DJANGO_SECRET_KEY')
 
+ENVIRONMENT = os.getenv('ENVIRONMENT', 'LOCAL').upper()
+
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
@@ -41,6 +43,8 @@ INSTALLED_APPS = [
     'rest_framework',
     'knox',
     'drf_spectacular',
+    'django_filters',
+    'storages',
 ]
 
 MIDDLEWARE = [
@@ -77,12 +81,24 @@ WSGI_APPLICATION = 'elearncore.wsgi.application'
 # Database
 # https://docs.djangoproject.com/en/5.2/ref/settings/#databases
 
-DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
+if ENVIRONMENT in ["LIVE", "PRODUCTION", "PROD"]:
+    DATABASES = {
+        'default': {
+            'ENGINE': 'django.db.backends.postgresql',
+            'NAME': os.getenv('DB_NAME', ''),
+            'USER': os.getenv('DB_USER', ''),
+            'PASSWORD': os.getenv('DB_PASSWORD', ''),
+            'HOST': os.getenv('DB_HOST', ''),
+            'PORT': os.getenv('DB_PORT', '5432'),
+        }
     }
-}
+else:
+    DATABASES = {
+        'default': {
+            'ENGINE': 'django.db.backends.sqlite3',
+            'NAME': BASE_DIR / 'db.sqlite3',
+        }
+    }
 
 
 # Password validation
@@ -142,6 +158,11 @@ REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': [
         'knox.auth.TokenAuthentication',
     ],
+    'DEFAULT_FILTER_BACKENDS': [
+        'django_filters.rest_framework.DjangoFilterBackend',
+        'rest_framework.filters.SearchFilter',
+        'rest_framework.filters.OrderingFilter',
+    ],
     'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
 }
 # knox - make token non-expiry
@@ -154,7 +175,11 @@ SPECTACULAR_SETTINGS = {
     'TITLE': 'Liberia eLearn API',
     'DESCRIPTION': 'API Documentation for Liberia eLearn',
     'VERSION': '1.0.0',
-    'SERVE_INCLUDE_SCHEMA': False,
+    'SERVE_INCLUDE_SCHEMA': True,
+    'COMPONENT_SPLIT_REQUEST': True,
+    'SECURITY': [
+        {'TokenAuth': []},
+    ],
 }
 
 # django cors headers settings
@@ -176,3 +201,35 @@ SENDER_ID = os.getenv('SMS_SENDER_ID') # 11 characters max
 
 # Get the key from .env file
 ARKESEL_API_KEY = os.getenv('ARKESEL_SMS_API_KEY')
+
+
+# S3 storage (Production)
+if ENVIRONMENT in ["LIVE", "PRODUCTION", "PROD"]:
+    AWS_ACCESS_KEY_ID = os.getenv('AWS_ACCESS_KEY_ID', '')
+    AWS_SECRET_ACCESS_KEY = os.getenv('AWS_SECRET_ACCESS_KEY', '')
+    AWS_STORAGE_BUCKET_NAME = os.getenv('AWS_STORAGE_BUCKET_NAME', '')
+    AWS_S3_REGION_NAME = os.getenv('AWS_S3_REGION_NAME', None)
+    AWS_S3_ENDPOINT_URL = os.getenv('AWS_S3_ENDPOINT_URL', None)
+    AWS_QUERYSTRING_AUTH = False
+    AWS_DEFAULT_ACL = None
+    AWS_S3_FILE_OVERWRITE = False
+
+    # Optional custom domain if using CloudFront (leave blank to use AWS default)
+    AWS_S3_CUSTOM_DOMAIN = os.getenv('AWS_S3_CUSTOM_DOMAIN', None)
+
+    if AWS_S3_CUSTOM_DOMAIN:
+        MEDIA_URL = f"https://{AWS_S3_CUSTOM_DOMAIN}/media/"
+        STATIC_URL = f"https://{AWS_S3_CUSTOM_DOMAIN}/static/"
+    else:
+        # Fallback to bucket domain
+        _s3_base = f"https://{AWS_STORAGE_BUCKET_NAME}.s3.amazonaws.com"
+        MEDIA_URL = f"{_s3_base}/media/"
+        STATIC_URL = f"{_s3_base}/static/"
+
+    DEFAULT_FILE_STORAGE = 'storages.backends.s3boto3.S3Boto3Storage'
+    STATICFILES_STORAGE = 'storages.backends.s3boto3.S3StaticStorage'
+
+    # Location prefixes inside the bucket
+    AWS_LOCATION = ''
+    AWS_MEDIA_LOCATION = 'media'
+    AWS_STATIC_LOCATION = 'static'
