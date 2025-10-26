@@ -12,6 +12,8 @@ from content.models import (
 from content.serializers import (
 	SubjectSerializer, TopicSerializer, PeriodSerializer, LessonResourceSerializer, TakeLessonSerializer,
 )
+from agentic.models import AIRecommendation, AIAbuseReport
+from agentic.serializers import AIRecommendationSerializer, AIAbuseReportSerializer
 
 
 # ----- Permissions -----
@@ -148,4 +150,39 @@ class TakeLessonViewSet(viewsets.ModelViewSet):
 		if student:
 			return qs.filter(student=student)
 		return TakeLesson.objects.none()
+
+
+class AIRecommendationViewSet(viewsets.ReadOnlyModelViewSet):
+	queryset = AIRecommendation.objects.select_related('student__user', 'lesson')
+	serializer_class = AIRecommendationSerializer
+	permission_classes = [permissions.IsAuthenticated]
+	filter_backends = [filters.SearchFilter, filters.OrderingFilter]
+	search_fields = ['message', 'lesson__title', 'student__user__name']
+	ordering_fields = ['created_at']
+
+	def get_queryset(self):
+		qs = super().get_queryset()
+		user = self.request.user
+		student = getattr(user, 'student', None)
+		if student:
+			return qs.filter(student=student)
+		if user and getattr(user, 'role', None) in {UserRole.ADMIN.value, UserRole.CONTENTVALIDATOR.value, UserRole.TEACHER.value}:
+			return qs
+		return AIRecommendation.objects.none()
+
+
+class AIAbuseReportViewSet(viewsets.ReadOnlyModelViewSet):
+	queryset = AIAbuseReport.objects.select_related('forum')
+	serializer_class = AIAbuseReportSerializer
+	permission_classes = [permissions.IsAuthenticated]
+	filter_backends = [filters.SearchFilter, filters.OrderingFilter]
+	search_fields = ['tag', 'description', 'sample_msg']
+	ordering_fields = ['created_at']
+
+	def get_queryset(self):
+		qs = super().get_queryset()
+		user = self.request.user
+		if user and getattr(user, 'role', None) in {UserRole.ADMIN.value, UserRole.CONTENTVALIDATOR.value}:
+			return qs
+		return AIAbuseReport.objects.none()
 
