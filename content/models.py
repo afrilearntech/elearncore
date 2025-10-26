@@ -23,6 +23,7 @@ class Subject(TimestampedModel):
 	name = models.CharField(max_length=120)
 	grade = models.CharField(max_length=20, choices=[(lvl.value, lvl.value) for lvl in StudentLevel])
 	description = models.TextField(blank=True, default="")
+	thumbnail = models.ImageField(upload_to='thumbnails/subjects/', null=True, blank=True)
 
 	# Allow teachers to be linked to one or more subjects
 	teachers = models.ManyToManyField('accounts.Teacher', related_name='subjects', blank=True)
@@ -64,6 +65,7 @@ class LessonResource(TimestampedModel):
 	type = models.CharField(max_length=20, choices=[(t.value, t.value) for t in ContentTypeEnum])
 	status = models.CharField(max_length=30, choices=[(s.value, s.value) for s in StatusEnum], default=StatusEnum.DRAFT.value)
 	resource_url = models.URLField(max_length=500)
+	created_by = models.ForeignKey('accounts.User', on_delete=models.SET_NULL, null=True, blank=True, related_name='created_lessons')
 
 	def __str__(self) -> str:
 		return self.title
