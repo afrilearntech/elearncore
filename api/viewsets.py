@@ -26,7 +26,8 @@ from content.serializers import (
 from agentic.models import AIRecommendation, AIAbuseReport
 from agentic.serializers import AIRecommendationSerializer, AIAbuseReportSerializer
 from knox.models import AuthToken
-from accounts.models import User, Student, Teacher, Parent
+from accounts.models import User, Student, Teacher, Parent, School, County, District
+from accounts.serializers import SchoolLookupSerializer, CountyLookupSerializer, DistrictLookupSerializer
 
 
 # ----- Permissions -----
@@ -278,7 +279,10 @@ class OnboardingViewSet(viewsets.ViewSet):
 		user: User = request.user
 		dob_raw = request.data.get('dob')
 		gender = request.data.get('gender')
-		school_name = request.data.get('institution_name')
+		# Backward compat: accept either 'school_name' or legacy 'institution_name'; prefer explicit 'school_id' when available
+		school_name = request.data.get('school_name') or request.data.get('institution_name')
+		school_id = request.data.get('school_id')
+		district_id = request.data.get('district_id')
 		grade = request.data.get('grade')
 
 		if dob_raw:
@@ -294,14 +298,50 @@ class OnboardingViewSet(viewsets.ViewSet):
 			s = user.student
 			if grade:
 				s.grade = str(grade)
-			if school_name:
-				s.institution_name = str(school_name)[:255]
-			s.save(update_fields=['grade', 'institution_name', 'updated_at'])
+			# Resolve school assignment
+			school_obj = None
+			if school_id:
+				school_obj = School.objects.filter(id=school_id).first()
+				if not school_obj:
+					return Response({"detail": "Invalid school_id."}, status=400)
+			elif school_name:
+				qs = School.objects.all()
+				if district_id:
+					qs = qs.filter(district_id=district_id)
+				qs = qs.filter(name__iexact=school_name)
+				count = qs.count()
+				if count == 1:
+					school_obj = qs.first()
+				elif count == 0:
+					return Response({"detail": "School not found. Provide a valid school_id or also include district_id with school_name."}, status=404)
+				else:
+					return Response({"detail": "Multiple schools match this name. Provide a school_id or also include district_id."}, status=400)
+			if school_obj:
+				s.school = school_obj
+			s.save(update_fields=['grade', 'school', 'updated_at'])
 		elif user.role == UserRole.TEACHER.value and hasattr(user, 'teacher'):
 			t = user.teacher
-			if school_name:
-				t.institution_name = str(school_name)[:255]
-				t.save(update_fields=['institution_name', 'updated_at'])
+			# Resolve school assignment
+			school_obj = None
+			if school_id:
+				school_obj = School.objects.filter(id=school_id).first()
+				if not school_obj:
+					return Response({"detail": "Invalid school_id."}, status=400)
+			elif school_name:
+				qs = School.objects.all()
+				if district_id:
+					qs = qs.filter(district_id=district_id)
+				qs = qs.filter(name__iexact=school_name)
+				count = qs.count()
+				if count == 1:
+					school_obj = qs.first()
+				elif count == 0:
+					return Response({"detail": "School not found. Provide a valid school_id or also include district_id with school_name."}, status=404)
+				else:
+					return Response({"detail": "Multiple schools match this name. Provide a school_id or also include district_id."}, status=400)
+			if school_obj:
+				t.school = school_obj
+			t.save(update_fields=['school', 'updated_at'])
 
 		return Response({"detail": "Saved"})
 
@@ -519,4 +559,87 @@ class DashboardViewSet(viewsets.ViewSet):
 		}
 		cache.set(cache_key, data, timeout=120)  # 2 minutes
 		return Response(data)
+
+
+class LookupPagination(filters.BaseFilterBackend):
+	pass
+
+from rest_framework.pagination import PageNumberPagination
+
+class LookupPagination(PageNumberPagination):
+	page_size = 20
+	page_size_query_param = 'page_size'
+	max_page_size = 100
+
+
+class SchoolLookupViewSet(viewsets.ReadOnlyModelViewSet):
+	queryset = School.objects.select_related('district__county').all()
+	serializer_class = SchoolLookupSerializer
+	permission_classes = [permissions.AllowAny]
+	filter_backends = [filters.SearchFilter, filters.OrderingFilter]
+	search_fields = ['name', 'district__name', 'district__county__name']
+	ordering_fields = ['name', 'created_at']
+	pagination_class = LookupPagination
+
+	@method_decorator(cache_page(60 * 10), name='list')
+	def dispatch(self, *args, **kwargs):
+		return super().dispatch(*args, **kwargs)
+
+	def get_queryset(self):
+		qs = super().get_queryset()
+		q = (self.request.query_params.get('q') or '').strip()
+		district_id = self.request.query_params.get('district_id')
+		county_id = self.request.query_params.get('county_id')
+		if district_id:
+			qs = qs.filter(district_id=district_id)
+		if county_id:
+			qs = qs.filter(district__county_id=county_id)
+		if q:
+			qs = qs.filter(name__icontains=q)
+		return qs
+
+
+class CountyLookupViewSet(viewsets.ReadOnlyModelViewSet):
+	queryset = County.objects.all()
+	serializer_class = CountyLookupSerializer
+	permission_classes = [permissions.AllowAny]
+	filter_backends = [filters.SearchFilter, filters.OrderingFilter]
+	search_fields = ['name']
+	ordering_fields = ['name']
+	pagination_class = LookupPagination
+
+	@method_decorator(cache_page(60 * 10), name='list')
+	def dispatch(self, *args, **kwargs):
+		return super().dispatch(*args, **kwargs)
+
+	def get_queryset(self):
+		qs = super().get_queryset()
+		q = (self.request.query_params.get('q') or '').strip()
+		if q:
+			qs = qs.filter(name__icontains=q)
+		return qs
+
+
+class DistrictLookupViewSet(viewsets.ReadOnlyModelViewSet):
+	queryset = District.objects.select_related('county').all()
+	serializer_class = DistrictLookupSerializer
+	permission_classes = [permissions.AllowAny]
+	filter_backends = [filters.SearchFilter, filters.OrderingFilter]
+	search_fields = ['name', 'county__name']
+	ordering_fields = ['name']
+	pagination_class = LookupPagination
+
+	@method_decorator(cache_page(60 * 10), name='list')
+	def dispatch(self, *args, **kwargs):
+		return super().dispatch(*args, **kwargs)
+
+	def get_queryset(self):
+		qs = super().get_queryset()
+		q = (self.request.query_params.get('q') or '').strip()
+		county_id = self.request.query_params.get('county_id')
+		if county_id:
+			qs = qs.filter(county_id=county_id)
+		if q:
+			qs = qs.filter(name__icontains=q)
+		return qs
 
