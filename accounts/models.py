@@ -33,6 +33,9 @@ class User(AbstractBaseUser, PermissionsMixin):
     is_superuser = models.BooleanField(default=False)
     phone_verified = models.BooleanField(default=False)
     email_verified = models.BooleanField(default=False)
+    # onboarding extras
+    dob = models.DateField(null=True, blank=True)
+    gender = models.CharField(max_length=20, null=True, blank=True)
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -98,28 +101,28 @@ class School(TimestampedModel):
 
 # Profiles
 class Student(TimestampedModel):
-    user = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="student")
+    profile = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="student")
     school = models.ForeignKey(School, on_delete=models.SET_NULL, null=True, blank=True, related_name="students")
     grade = models.CharField(max_length=20, choices=[(lvl.value, lvl.value) for lvl in StudentLevel], default=StudentLevel.OTHER.value)
 
     def __str__(self) -> str:
-        return f"Student: {self.user.name}"
+        return f"Student: {self.profile.name}"
 
 
 class Teacher(TimestampedModel):
-    user = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="teacher")
+    profile = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="teacher")
     school = models.ForeignKey('accounts.School', on_delete=models.SET_NULL, null=True, blank=True, related_name="teachers")
     # subject relationship handled as M2M from content.Subject to Teacher to allow multi-subjects
 
     def __str__(self) -> str:
-        return f"Teacher: {self.user.name}"
+        return f"Teacher: {self.profile.name}"
 
 
 class Parent(TimestampedModel):
-    user = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="parent")
+    profile = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="parent")
     wards = models.ManyToManyField(Student, related_name="guardians", blank=True)
 
     def __str__(self) -> str:
-        return f"Parent: {self.user.name}"
+        return f"Parent: {self.profile.name}"
 
 
