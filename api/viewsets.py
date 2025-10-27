@@ -3,6 +3,8 @@ from typing import Iterable
 from rest_framework import permissions, viewsets, status, filters
 from rest_framework.decorators import action
 from rest_framework.response import Response
+from django.views.decorators.cache import cache_page
+from django.utils.decorators import method_decorator
 
 from elearncore.sysutils.constants import UserRole, Status as StatusEnum
 
@@ -59,6 +61,12 @@ class SubjectViewSet(viewsets.ModelViewSet):
 	search_fields = ['name', 'description']
 	ordering_fields = ['name', 'created_at']
 
+	# Cache list & retrieve for short periods (safe/public reads)
+	@method_decorator(cache_page(60 * 5), name='list')
+	@method_decorator(cache_page(60 * 10), name='retrieve')
+	def dispatch(self, *args, **kwargs):
+		return super().dispatch(*args, **kwargs)
+
 
 class TopicViewSet(viewsets.ModelViewSet):
 	queryset = Topic.objects.select_related('subject').all()
@@ -68,6 +76,11 @@ class TopicViewSet(viewsets.ModelViewSet):
 	search_fields = ['name']
 	ordering_fields = ['name', 'created_at']
 
+	@method_decorator(cache_page(60 * 5), name='list')
+	@method_decorator(cache_page(60 * 10), name='retrieve')
+	def dispatch(self, *args, **kwargs):
+		return super().dispatch(*args, **kwargs)
+
 
 class PeriodViewSet(viewsets.ModelViewSet):
 	queryset = Period.objects.all()
@@ -76,6 +89,8 @@ class PeriodViewSet(viewsets.ModelViewSet):
 	search_fields = ['name']
 	ordering_fields = ['start_month', 'end_month', 'created_at']
 
+	@method_decorator(cache_page(60 * 15), name='list')
+	@method_decorator(cache_page(60 * 15), name='retrieve')
 	def get_permissions(self):
 		if self.request.method in permissions.SAFE_METHODS:
 			return [permissions.IsAuthenticatedOrReadOnly()]
@@ -88,6 +103,11 @@ class LessonResourceViewSet(viewsets.ModelViewSet):
 	filter_backends = [filters.SearchFilter, filters.OrderingFilter]
 	search_fields = ['title', 'description']
 	ordering_fields = ['created_at', 'updated_at', 'title']
+
+	@method_decorator(cache_page(60 * 2), name='list')
+	@method_decorator(cache_page(60 * 5), name='retrieve')
+	def dispatch(self, *args, **kwargs):
+		return super().dispatch(*args, **kwargs)
 
 	def get_permissions(self):
 		if self.action in ['approve', 'reject', 'request_changes']:
