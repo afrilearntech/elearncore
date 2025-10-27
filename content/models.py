@@ -71,6 +71,11 @@ class LessonResource(TimestampedModel):
 	def __str__(self) -> str:
 		return self.title
 
+	class Meta:
+		indexes = [
+			models.Index(fields=["subject", "created_at"]),
+		]
+
 
 class TakeLesson(TimestampedModel):
 	student = models.ForeignKey('accounts.Student', on_delete=models.CASCADE, related_name='taken_lessons')
@@ -78,6 +83,10 @@ class TakeLesson(TimestampedModel):
 
 	class Meta:
 		unique_together = ("student", "lesson")
+		indexes = [
+			models.Index(fields=["student", "created_at"]),
+			models.Index(fields=["lesson", "student"]),
+		]
 
 	def __str__(self) -> str:
 		return f"{getattr(self.student.profile, 'name', 'Student')} -> {self.lesson.title}"
@@ -90,9 +99,17 @@ class GeneralAssessment(TimestampedModel):
 	instructions = models.TextField(blank=True, default="")
 	marks = models.FloatField(default=0.0)
 	due_at = models.DateTimeField(null=True, blank=True)
+	# Optional grade scoping; when null, assessment is global
+	grade = models.CharField(max_length=20, choices=[(lvl.value, lvl.value) for lvl in StudentLevel], null=True, blank=True)
 
 	def __str__(self) -> str:
 		return self.title
+
+	class Meta:
+		indexes = [
+			models.Index(fields=["due_at"]),
+			models.Index(fields=["grade", "due_at"]),
+		]
 
 
 class GeneralAssessmentGrade(TimestampedModel):
@@ -117,6 +134,12 @@ class LessonAssessment(TimestampedModel):
 
 	def __str__(self) -> str:
 		return self.title
+
+	class Meta:
+		indexes = [
+			models.Index(fields=["due_at"]),
+			models.Index(fields=["lesson", "due_at"]),
+		]
 
 
 class LessonAssessmentGrade(TimestampedModel):
