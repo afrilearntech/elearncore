@@ -63,7 +63,7 @@ def build_student_activity(student: Student) -> Dict:
     data = {
         "student": {
             "id": student.id,
-            "name": getattr(student.user, 'name', ''),
+            "name": getattr(student.profile, 'name', ''),
             "grade": student.grade,
         },
         "lessons_taken": [
