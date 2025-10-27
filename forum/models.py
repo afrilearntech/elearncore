@@ -25,7 +25,7 @@ class ForumMembership(TimestampedModel):
 		unique_together = ("forum", "student")
 
 	def __str__(self) -> str:
-		return f"{self.student.user.name} @ {self.forum.name}"
+		return f"{self.student.profile.name} @ {self.forum.name}"
 
 
 class Chat(TimestampedModel):
