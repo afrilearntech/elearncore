@@ -9,14 +9,17 @@ from django.utils.dateparse import parse_date
 from django.utils import timezone
 from datetime import timedelta
 from django.db import models
+from django.db.models import Q
 from django.db.models.functions import TruncDate
 
 from elearncore.sysutils.constants import UserRole, Status as StatusEnum
 
 from content.models import (
 	Subject, Topic, Period, LessonResource, TakeLesson, LessonAssessment,
-	GeneralAssessment,
+	GeneralAssessment, GeneralAssessmentGrade, LessonAssessmentGrade,
 )
+from forum.models import Chat
+from django.core.cache import cache
 from content.serializers import (
 	SubjectSerializer, TopicSerializer, PeriodSerializer, LessonResourceSerializer, TakeLessonSerializer,
 )
@@ -336,6 +339,12 @@ class DashboardViewSet(viewsets.ViewSet):
 		if not student:
 			return Response({"detail": "Student profile required."}, status=403)
 
+		# Per-user cache (short TTL)
+		cache_key = f"dashboard:{user.id}"
+		cached = cache.get(cache_key)
+		if cached:
+			return Response(cached)
+
 		now = timezone.now()
 		in_7 = now + timedelta(days=7)
 
@@ -380,6 +389,7 @@ class DashboardViewSet(viewsets.ViewSet):
 		upcoming_general_qs = (
 			GeneralAssessment.objects
 			.filter(due_at__gte=now, due_at__lte=in_7)
+			.filter(Q(grade__isnull=True) | Q(grade=student.grade))
 			.exclude(grades__student=student)
 			.order_by('due_at')
 		)
@@ -457,6 +467,41 @@ class DashboardViewSet(viewsets.ViewSet):
 				'hours_left': hours_left,
 			})
 
+		# Recent activities: combine last items from lessons taken, grades, and forum chats
+		recent: List[dict] = []
+		# Last taken lessons
+		for tl in taken_qs.select_related('lesson__subject').order_by('-created_at')[:5]:
+			recent.append({
+				'type': 'lesson',
+				'label': f"Completed {tl.lesson.title}",
+				'course': tl.lesson.subject.name,
+				'created_at': tl.created_at.isoformat(),
+			})
+		# Last grades
+		for g in LessonAssessmentGrade.objects.select_related('lesson_assessment__lesson').filter(student=student).order_by('-created_at')[:5]:
+			recent.append({
+				'type': 'grade',
+				'label': f"Scored {g.score} in {g.lesson_assessment.title}",
+				'created_at': g.created_at.isoformat(),
+			})
+		for g in GeneralAssessmentGrade.objects.select_related('assessment').filter(student=student).order_by('-created_at')[:5]:
+			recent.append({
+				'type': 'grade',
+				'label': f"Scored {g.score} in {g.assessment.title}",
+				'created_at': g.created_at.isoformat(),
+			})
+		# Forum chats in forums where the student is a member
+		forum_chats = Chat.objects.select_related('forum', 'sender').filter(forum__memberships__student=student).order_by('-created_at')[:5]
+		for ch in forum_chats:
+			recent.append({
+				'type': 'chat',
+				'label': f"{ch.sender.name}: {ch.content[:40]}",
+				'forum': ch.forum.name,
+				'created_at': ch.created_at.isoformat(),
+			})
+		recent.sort(key=lambda x: x.get('created_at', ''), reverse=True)
+		recent = recent[:10]
+
 		data = {
 			'assignments_due_this_week': assignments_due_this_week,
 			'quick_stats': {
@@ -470,7 +515,8 @@ class DashboardViewSet(viewsets.ViewSet):
 				'points_this_month': points_this_month,
 			},
 			'continue_learning': continue_learning,
-			'recent_activities': [],
+			'recent_activities': recent,
 		}
+		cache.set(cache_key, data, timeout=120)  # 2 minutes
 		return Response(data)
 
