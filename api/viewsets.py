@@ -1,6 +1,7 @@
 from typing import Iterable, Dict, List
 
-from rest_framework import permissions, viewsets, status, filters
+from rest_framework import permissions, viewsets, status, filters, serializers
+from drf_spectacular.utils import extend_schema, OpenApiResponse
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from django.views.decorators.cache import cache_page
@@ -28,6 +29,7 @@ from agentic.serializers import AIRecommendationSerializer, AIAbuseReportSeriali
 from knox.models import AuthToken
 from accounts.models import User, Student, Teacher, Parent, School, County, District
 from accounts.serializers import SchoolLookupSerializer, CountyLookupSerializer, DistrictLookupSerializer
+from .serializers import ProfileSetupSerializer, UserRoleSerializer, AboutUserSerializer, LinkChildSerializer
 
 
 # ----- Permissions -----
@@ -94,6 +96,8 @@ class TopicViewSet(viewsets.ModelViewSet):
 		return super().dispatch(*args, **kwargs)
 
 
+@method_decorator(cache_page(60 * 15), name='list')
+@method_decorator(cache_page(60 * 15), name='retrieve')
 class PeriodViewSet(viewsets.ModelViewSet):
 	queryset = Period.objects.all()
 	serializer_class = PeriodSerializer
@@ -101,8 +105,6 @@ class PeriodViewSet(viewsets.ModelViewSet):
 	search_fields = ['name']
 	ordering_fields = ['start_month', 'end_month', 'created_at']
 
-	@method_decorator(cache_page(60 * 15), name='list')
-	@method_decorator(cache_page(60 * 15), name='retrieve')
 	def get_permissions(self):
 		if self.request.method in permissions.SAFE_METHODS:
 			return [permissions.IsAuthenticatedOrReadOnly()]
@@ -226,7 +228,9 @@ class OnboardingViewSet(viewsets.ViewSet):
 	- aboutyou: set personal details and optional institution/grade
 	- linkchild: link a student to a parent profile
 	"""
+	serializer_class = serializers.Serializer
 
+	@extend_schema(request=ProfileSetupSerializer, responses={201: OpenApiResponse(description="Token and user payload")})
 	@action(detail=False, methods=['post'], permission_classes=[permissions.AllowAny])
 	def profilesetup(self, request):
 		data = request.data
@@ -254,6 +258,7 @@ class OnboardingViewSet(viewsets.ViewSet):
 			"user": {"id": user.id, "name": user.name, "phone": user.phone, "email": user.email, "role": user.role},
 		}, status=201)
 
+	@extend_schema(request=UserRoleSerializer)
 	@action(detail=False, methods=['post'], permission_classes=[permissions.IsAuthenticated])
 	def userrole(self, request):
 		role = (request.data.get('role') or '').strip().upper()
@@ -274,13 +279,14 @@ class OnboardingViewSet(viewsets.ViewSet):
 
 		return Response({"role": user.role})
 
+	@extend_schema(request=AboutUserSerializer)
 	@action(detail=False, methods=['post'], permission_classes=[permissions.IsAuthenticated])
 	def aboutuser(self, request):
 		user: User = request.user
 		dob_raw = request.data.get('dob')
 		gender = request.data.get('gender')
-		# Backward compat: accept either 'school_name' or legacy 'institution_name'; prefer explicit 'school_id' when available
-		school_name = request.data.get('school_name') or request.data.get('institution_name')
+		# School resolution: prefer explicit 'school_id'; fallback to 'school_name'
+		school_name = request.data.get('school_name')
 		school_id = request.data.get('school_id')
 		district_id = request.data.get('district_id')
 		grade = request.data.get('grade')
@@ -345,6 +351,7 @@ class OnboardingViewSet(viewsets.ViewSet):
 
 		return Response({"detail": "Saved"})
 
+	@extend_schema(request=LinkChildSerializer)
 	@action(detail=False, methods=['post'], permission_classes=[permissions.IsAuthenticated])
 	def linkchild(self, request):
 		user: User = request.user
@@ -372,6 +379,7 @@ class OnboardingViewSet(viewsets.ViewSet):
 
 class DashboardViewSet(viewsets.ViewSet):
 	permission_classes = [permissions.IsAuthenticated]
+	serializer_class = serializers.Serializer
 
 	def list(self, request):
 		user: User = request.user
