@@ -148,6 +148,30 @@ STATICFILES_DIRS = [
 MEDIA_URL = '/assets/'
 MEDIA_ROOT = BASE_DIR / "assets"
 
+# Caching
+if os.getenv('REDIS_URL') and ENVIRONMENT in ["LIVE", "PRODUCTION", "PROD"]:
+    CACHES = {
+        'default': {
+            'BACKEND': 'django_redis.cache.RedisCache',
+            'LOCATION': os.getenv('REDIS_URL'),
+            'OPTIONS': {
+                'CLIENT_CLASS': 'django_redis.client.DefaultClient',
+                'PASSWORD': os.getenv('REDIS_PASSWORD', None),
+                'CONNECTION_POOL_KWARGS': {'max_connections': 50, 'retry_on_timeout': True},
+            },
+            'KEY_PREFIX': 'elearncore',
+            'TIMEOUT': int(os.getenv('CACHE_DEFAULT_TIMEOUT', '300')),
+        }
+    }
+else:
+    CACHES = {
+        'default': {
+            'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
+            'LOCATION': 'elearncore-local',
+            'TIMEOUT': 300,
+        }
+    }
+
 # Default primary key field type
 # https://docs.djangoproject.com/en/5.2/ref/settings/#default-auto-field
 
