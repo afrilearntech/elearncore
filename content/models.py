@@ -66,6 +66,7 @@ class LessonResource(TimestampedModel):
 	status = models.CharField(max_length=30, choices=[(s.value, s.value) for s in StatusEnum], default=StatusEnum.DRAFT.value)
 	resource_url = models.URLField(max_length=500)
 	created_by = models.ForeignKey('accounts.User', on_delete=models.SET_NULL, null=True, blank=True, related_name='created_lessons')
+	duration_minutes = models.PositiveIntegerField(null=True, blank=True, help_text="Estimated duration in minutes")
 
 	def __str__(self) -> str:
 		return self.title
@@ -79,7 +80,7 @@ class TakeLesson(TimestampedModel):
 		unique_together = ("student", "lesson")
 
 	def __str__(self) -> str:
-		return f"{self.student.user.name} -> {self.lesson.title}"
+		return f"{getattr(self.student.profile, 'name', 'Student')} -> {self.lesson.title}"
 
 
 # Assessments
@@ -88,6 +89,7 @@ class GeneralAssessment(TimestampedModel):
 	given_by = models.ForeignKey('accounts.Teacher', on_delete=models.SET_NULL, null=True, related_name='general_assessments')
 	instructions = models.TextField(blank=True, default="")
 	marks = models.FloatField(default=0.0)
+	due_at = models.DateTimeField(null=True, blank=True)
 
 	def __str__(self) -> str:
 		return self.title
@@ -102,7 +104,7 @@ class GeneralAssessmentGrade(TimestampedModel):
 		unique_together = ("assessment", "student")
 
 	def __str__(self) -> str:
-		return f"{self.student.user.name}: {self.score} / {self.assessment.marks}"
+		return f"{getattr(self.student.profile, 'name', 'Student')}: {self.score} / {self.assessment.marks}"
 
 
 class LessonAssessment(TimestampedModel):
@@ -111,6 +113,7 @@ class LessonAssessment(TimestampedModel):
 	title = models.CharField(max_length=200)
 	instructions = models.TextField(blank=True, default="")
 	marks = models.FloatField(default=0.0)
+	due_at = models.DateTimeField(null=True, blank=True)
 
 	def __str__(self) -> str:
 		return self.title
@@ -125,7 +128,7 @@ class LessonAssessmentGrade(TimestampedModel):
 		unique_together = ("lesson_assessment", "student")
 
 	def __str__(self) -> str:
-		return f"{self.student.user.name}: {self.score} / {self.lesson_assessment.marks}"
+		return f"{getattr(self.student.profile, 'name', 'Student')}: {self.score} / {self.lesson_assessment.marks}"
 
 
 class Question(TimestampedModel):
