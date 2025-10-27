@@ -34,6 +34,35 @@ class SchoolSerializer(serializers.ModelSerializer):
 		read_only_fields = ['created_at', 'updated_at']
 
 
+class CountyLookupSerializer(serializers.ModelSerializer):
+	class Meta:
+		model = County
+		fields = ['id', 'name']
+		read_only_fields = ['id', 'name']
+
+
+class DistrictLookupSerializer(serializers.ModelSerializer):
+	county_id = serializers.IntegerField(source='county.id', read_only=True)
+	county_name = serializers.CharField(source='county.name', read_only=True)
+
+	class Meta:
+		model = District
+		fields = ['id', 'name', 'county_id', 'county_name']
+		read_only_fields = ['id', 'name', 'county_id', 'county_name']
+
+
+class SchoolLookupSerializer(serializers.ModelSerializer):
+	district_id = serializers.IntegerField(source='district.id', read_only=True)
+	district_name = serializers.CharField(source='district.name', read_only=True)
+	county_id = serializers.IntegerField(source='district.county.id', read_only=True)
+	county_name = serializers.CharField(source='district.county.name', read_only=True)
+
+	class Meta:
+		model = School
+		fields = ['id', 'name', 'district_id', 'district_name', 'county_id', 'county_name']
+		read_only_fields = ['id', 'name', 'district_id', 'district_name', 'county_id', 'county_name']
+
+
 class StudentSerializer(serializers.ModelSerializer):
 	class Meta:
 		model = Student
