@@ -54,19 +54,19 @@ class SchoolAdmin(admin.ModelAdmin):
 
 @admin.register(Student)
 class StudentAdmin(admin.ModelAdmin):
-	list_display = ("id", "user", "school", "grade", "created_at")
+	list_display = ("id", "profile", "school", "grade", "created_at")
 	list_filter = ("grade", "school")
-	search_fields = ("user__name", "user__phone")
+	search_fields = ("profile__name", "profile__phone")
 
 
 @admin.register(Teacher)
 class TeacherAdmin(admin.ModelAdmin):
-	list_display = ("id", "user", "school", "created_at")
+	list_display = ("id", "profile", "school", "created_at")
 	list_filter = ("school",)
-	search_fields = ("user__name", "user__phone")
+	search_fields = ("profile__name", "profile__phone")
 
 
 @admin.register(Parent)
 class ParentAdmin(admin.ModelAdmin):
-	list_display = ("id", "user", "created_at")
-	search_fields = ("user__name", "user__phone")
+	list_display = ("id", "profile", "created_at")
+	search_fields = ("profile__name", "profile__phone")
