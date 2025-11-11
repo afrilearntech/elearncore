@@ -148,6 +148,30 @@ STATICFILES_DIRS = [
 MEDIA_URL = '/assets/'
 MEDIA_ROOT = BASE_DIR / "assets"
 
+# Use Spaces if DO_SPACES_BUCKET is provided; otherwise fall back to local MEDIA settings above.
+if os.getenv('DO_SPACES_BUCKET'):
+    DEFAULT_FILE_STORAGE = 'storages.backends.s3boto3.S3Boto3Storage'
+
+    AWS_ACCESS_KEY_ID = os.getenv('DO_SPACES_KEY') or os.getenv('AWS_ACCESS_KEY_ID')
+    AWS_SECRET_ACCESS_KEY = os.getenv('DO_SPACES_SECRET') or os.getenv('AWS_SECRET_ACCESS_KEY')
+    AWS_STORAGE_BUCKET_NAME = os.getenv('DO_SPACES_BUCKET')
+    AWS_S3_REGION_NAME = os.getenv('DO_SPACES_REGION', 'nyc3')
+    AWS_S3_ENDPOINT_URL = os.getenv('DO_SPACES_ENDPOINT', f'https://{AWS_S3_REGION_NAME}.digitaloceanspaces.com')
+    AWS_S3_CUSTOM_DOMAIN = os.getenv('DO_SPACES_CUSTOM_DOMAIN')  # optional CDN/custom domain
+
+    # Public media files by default; change to None/'' for private files
+    AWS_DEFAULT_ACL = 'public-read'
+    AWS_S3_OBJECT_PARAMETERS = {
+        'CacheControl': 'max-age=86400',
+    }
+
+    # MEDIA_URL: prefer custom CDN domain if provided, otherwise use Spaces endpoint + bucket
+    if AWS_S3_CUSTOM_DOMAIN:
+        MEDIA_URL = f'https://{AWS_S3_CUSTOM_DOMAIN}/'
+    else:
+        MEDIA_URL = f'{AWS_S3_ENDPOINT_URL}/{AWS_STORAGE_BUCKET_NAME}/'
+
+
 # Caching
 if os.getenv('REDIS_URL') and ENVIRONMENT in ["LIVE", "PRODUCTION", "PROD"]:
     CACHES = {
