@@ -10,8 +10,8 @@ from django.utils.dateparse import parse_date
 from django.utils import timezone
 from datetime import timedelta
 from django.db import models
-from django.db.models import Q
-from django.db.models.functions import TruncDate
+from django.db.models import Q, Count, Window, F
+from django.db.models.functions import TruncDate, DenseRank
 
 from elearncore.sysutils.constants import UserRole, Status as StatusEnum
 
@@ -550,6 +550,88 @@ class DashboardViewSet(viewsets.ViewSet):
 		recent.sort(key=lambda x: x.get('created_at', ''), reverse=True)
 		recent = recent[:10]
 
+		# the number of courses completed by the student in their grade as a percentage of total courses in that grade
+		overall_progress = (round((completed_courses / total_courses) * 100)) if total_courses > 0 else 0
+
+		# Student ranking badge: prefer Top 20 in any assessment; otherwise engagement rank among grade peers
+		student_ranking = {'show': False}
+
+		# Try lesson assessments first (rank within each assessment by score desc)
+		lesson_top = (
+			LessonAssessmentGrade.objects
+			.filter(lesson_assessment__lesson__subject__grade=student.grade)
+			.annotate(rank=Window(expression=DenseRank(), partition_by=[F('lesson_assessment')], order_by=F('score').desc()))
+			.filter(student=student, rank__lte=20)
+			.select_related('lesson_assessment__lesson__subject')
+			.order_by('rank', '-created_at')
+			.first()
+		)
+
+		general_top = (
+			GeneralAssessmentGrade.objects
+			.filter(Q(assessment__grade__isnull=True) | Q(assessment__grade=student.grade))
+			.annotate(rank=Window(expression=DenseRank(), partition_by=[F('assessment')], order_by=F('score').desc()))
+			.filter(student=student, rank__lte=20)
+			.select_related('assessment')
+			.order_by('rank', '-created_at')
+			.first()
+		)
+
+		best = None
+		if lesson_top and general_top:
+			best = lesson_top if lesson_top.rank <= general_top.rank else general_top
+		elif lesson_top:
+			best = lesson_top
+		elif general_top:
+			best = general_top
+
+		if best is not None:
+			if hasattr(best, 'lesson_assessment'):
+				subj = getattr(best.lesson_assessment.lesson.subject, 'name', 'Subject')
+				title = 'Top Performer'
+				subtitle = f"{student.grade} {subj}"
+				rank_val = int(best.rank)
+				student_ranking = {
+					'show': True,
+					'type': 'assessment_top20',
+					'title': title,
+					'subtitle': subtitle,
+					'rank': rank_val,
+				}
+			else:
+				ass_title = getattr(best.assessment, 'title', 'Assessment')
+				title = 'Top Performer'
+				subtitle = f"{student.grade} - {ass_title}"
+				rank_val = int(best.rank)
+				student_ranking = {
+					'show': True,
+					'type': 'assessment_top20',
+					'title': title,
+					'subtitle': subtitle,
+					'rank': rank_val,
+				}
+		else:
+			# Engagement rank: compare total taken lessons within same grade
+			my_taken = taken_qs.count()
+			if my_taken > 0:
+				better = (
+					TakeLesson.objects
+					.filter(student__grade=student.grade)
+					.values('student')
+					.annotate(c=Count('id'))
+					.filter(c__gt=my_taken)
+					.count()
+				)
+				rank_val = int(better) + 1
+				if rank_val <= 20:
+					student_ranking = {
+						'show': True,
+						'type': 'engagement_top20',
+						'title': 'Top Performer',
+						'subtitle': f"{student.grade} Learners",
+						'rank': rank_val,
+					}
+
 		data = {
 			'assignments_due_this_week': assignments_due_this_week,
 			'quick_stats': {
@@ -557,6 +639,8 @@ class DashboardViewSet(viewsets.ViewSet):
 				'completed_courses': completed_courses,
 				'in_progress_courses': in_progress_courses,
 			},
+			'overall_progress_percent': overall_progress,
+			'student_ranking': student_ranking,
 			'upcoming': upcoming,
 			'streaks': {
 				'current_study_streak_days': cur,
