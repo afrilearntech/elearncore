@@ -1,7 +1,7 @@
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 
-from .viewsets import SubjectViewSet, TopicViewSet, PeriodViewSet, LessonResourceViewSet, TakeLessonViewSet, AIRecommendationViewSet, AIAbuseReportViewSet, OnboardingViewSet, DashboardViewSet, SchoolLookupViewSet, CountyLookupViewSet, DistrictLookupViewSet
+from .viewsets import SubjectViewSet, TopicViewSet, PeriodViewSet, LessonResourceViewSet, TakeLessonViewSet, AIRecommendationViewSet, AIAbuseReportViewSet, OnboardingViewSet, DashboardViewSet, SchoolLookupViewSet, CountyLookupViewSet, DistrictLookupViewSet, LoginViewSet
 
 router = DefaultRouter()
 router.register(r'subjects', SubjectViewSet, basename='subject')
@@ -16,6 +16,7 @@ router.register(r'dashboard', DashboardViewSet, basename='dashboard')
 router.register(r'lookup/schools', SchoolLookupViewSet, basename='school-lookup')
 router.register(r'lookup/counties', CountyLookupViewSet, basename='county-lookup')
 router.register(r'lookup/districts', DistrictLookupViewSet, basename='district-lookup')
+router.register(r'auth', LoginViewSet, basename='auth')
 
 urlpatterns = [
 	path('', include(router.urls)),

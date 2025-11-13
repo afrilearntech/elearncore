@@ -1,4 +1,4 @@
-from typing import Iterable, Dict, List
+from typing import Iterable, Dict, List, Set
 
 from rest_framework import permissions, viewsets, status, filters, serializers
 from drf_spectacular.utils import extend_schema, OpenApiResponse
@@ -376,23 +376,39 @@ class OnboardingViewSet(viewsets.ViewSet):
 		request.user.parent.wards.add(student)
 		return Response({"detail": "Child linked."})
 
+
+class LoginViewSet(viewsets.ViewSet):
+	permission_classes = [permissions.AllowAny]
+	serializer_class = serializers.Serializer
+
 	@extend_schema(request=LoginSerializer, responses={200: OpenApiResponse(description="Token and user payload")})
-	@action(detail=False, methods=['post'], permission_classes=[permissions.AllowAny])
+	@action(detail=False, methods=['post'], url_path='student')
 	def studentlogin(self, request):
+		'''Student login endpoint.\n
+		[identifier]: email or phone \n
+		[password]: user's password
+		'''
 		return self._login_with_role(request, allowed_roles={UserRole.STUDENT.value})
 
 	@extend_schema(request=LoginSerializer, responses={200: OpenApiResponse(description="Token and user payload")})
-	@action(detail=False, methods=['post'], permission_classes=[permissions.AllowAny])
+	@action(detail=False, methods=['post'], url_path='content')
 	def contentlogin(self, request):
+		'''Content creator, validator, and teacher login endpoint.\n
+		[identifier]: email or phone \n
+		[password]: user's password'''
 		allowed = {UserRole.CONTENTCREATOR.value, UserRole.CONTENTVALIDATOR.value, UserRole.TEACHER.value}
 		return self._login_with_role(request, allowed_roles=allowed)
 
 	@extend_schema(request=LoginSerializer, responses={200: OpenApiResponse(description="Token and user payload")})
-	@action(detail=False, methods=['post'], permission_classes=[permissions.AllowAny])
+	@action(detail=False, methods=['post'], url_path='admin')
 	def adminlogin(self, request):
+		'''Admin login endpoint.\n
+		[identifier]: email or phone \n
+		[password]: user's password
+		'''
 		return self._login_with_role(request, allowed_roles={UserRole.ADMIN.value})
 
-	def _login_with_role(self, request, allowed_roles: set[str]):
+	def _login_with_role(self, request, allowed_roles: Set[str]):
 		identifier = str(request.data.get('identifier') or '').strip()
 		password = request.data.get('password')
 		if not identifier or not password:
