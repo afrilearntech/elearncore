@@ -32,3 +32,8 @@ class LinkChildSerializer(serializers.Serializer):
         if not attrs.get('student_email') and not attrs.get('student_phone'):
             raise serializers.ValidationError('Provide either student_email or student_phone.')
         return attrs
+
+
+class LoginSerializer(serializers.Serializer):
+    identifier = serializers.CharField(help_text="Phone or Email")
+    password = serializers.CharField(write_only=True, min_length=6)

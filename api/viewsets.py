@@ -29,7 +29,7 @@ from agentic.serializers import AIRecommendationSerializer, AIAbuseReportSeriali
 from knox.models import AuthToken
 from accounts.models import User, Student, Teacher, Parent, School, County, District
 from accounts.serializers import SchoolLookupSerializer, CountyLookupSerializer, DistrictLookupSerializer
-from .serializers import ProfileSetupSerializer, UserRoleSerializer, AboutUserSerializer, LinkChildSerializer
+from .serializers import ProfileSetupSerializer, UserRoleSerializer, AboutUserSerializer, LinkChildSerializer, LoginSerializer
 
 
 # ----- Permissions -----
@@ -375,6 +375,49 @@ class OnboardingViewSet(viewsets.ViewSet):
 
 		request.user.parent.wards.add(student)
 		return Response({"detail": "Child linked."})
+
+	@extend_schema(request=LoginSerializer, responses={200: OpenApiResponse(description="Token and user payload")})
+	@action(detail=False, methods=['post'], permission_classes=[permissions.AllowAny])
+	def studentlogin(self, request):
+		return self._login_with_role(request, allowed_roles={UserRole.STUDENT.value})
+
+	@extend_schema(request=LoginSerializer, responses={200: OpenApiResponse(description="Token and user payload")})
+	@action(detail=False, methods=['post'], permission_classes=[permissions.AllowAny])
+	def contentlogin(self, request):
+		allowed = {UserRole.CONTENTCREATOR.value, UserRole.CONTENTVALIDATOR.value, UserRole.TEACHER.value}
+		return self._login_with_role(request, allowed_roles=allowed)
+
+	@extend_schema(request=LoginSerializer, responses={200: OpenApiResponse(description="Token and user payload")})
+	@action(detail=False, methods=['post'], permission_classes=[permissions.AllowAny])
+	def adminlogin(self, request):
+		return self._login_with_role(request, allowed_roles={UserRole.ADMIN.value})
+
+	def _login_with_role(self, request, allowed_roles: set[str]):
+		identifier = str(request.data.get('identifier') or '').strip()
+		password = request.data.get('password')
+		if not identifier or not password:
+			return Response({"detail": "identifier and password are required."}, status=400)
+
+		# Find by phone or email
+		user = None
+		if '@' in identifier:
+			user = User.objects.filter(email__iexact=identifier).first()
+		else:
+			user = User.objects.filter(phone=identifier).first()
+		if not user:
+			return Response({"detail": "Invalid credentials."}, status=400)
+		if not user.is_active or getattr(user, 'deleted', False):
+			return Response({"detail": "Account disabled."}, status=403)
+		if not user.check_password(password):
+			return Response({"detail": "Invalid credentials."}, status=400)
+		if user.role not in allowed_roles:
+			return Response({"detail": "Insufficient role for this login."}, status=403)
+
+		token = AuthToken.objects.create(user)[1]
+		return Response({
+			"token": token,
+			"user": {"id": user.id, "name": user.name, "phone": user.phone, "email": user.email, "role": user.role},
+		})
 
 
 class DashboardViewSet(viewsets.ViewSet):
