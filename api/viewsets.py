@@ -28,7 +28,10 @@ from agentic.models import AIRecommendation, AIAbuseReport
 from agentic.serializers import AIRecommendationSerializer, AIAbuseReportSerializer
 from knox.models import AuthToken
 from accounts.models import User, Student, Teacher, Parent, School, County, District
-from accounts.serializers import SchoolLookupSerializer, CountyLookupSerializer, DistrictLookupSerializer
+from accounts.serializers import (
+	SchoolLookupSerializer, CountyLookupSerializer, DistrictLookupSerializer,
+	CountySerializer, DistrictSerializer, SchoolSerializer,
+)
 from .serializers import ProfileSetupSerializer, UserRoleSerializer, AboutUserSerializer, LinkChildSerializer, LoginSerializer
 
 
@@ -64,6 +67,13 @@ class CanModerateContent(permissions.BasePermission):
 
 	def has_permission(self, request, view):
 		return _user_role_in(request.user, self.allowed_roles)
+
+
+class IsAdminRole(permissions.BasePermission):
+	"""Allow only ADMIN role users."""
+
+	def has_permission(self, request, view):
+		return _user_role_in(request.user, {UserRole.ADMIN.value})
 
 
 # ----- ViewSets -----
@@ -793,4 +803,23 @@ class DistrictLookupViewSet(viewsets.ReadOnlyModelViewSet):
 		if q:
 			qs = qs.filter(name__icontains=q)
 		return qs
+
+
+# ---------- Admin CRUD for Geography ----------
+class AdminCountyViewSet(viewsets.ModelViewSet):
+	queryset = County.objects.all().order_by('name')
+	serializer_class = CountySerializer
+	permission_classes = [permissions.IsAuthenticated, IsAdminRole, permissions.IsAdminUser]
+
+
+class AdminDistrictViewSet(viewsets.ModelViewSet):
+	queryset = District.objects.select_related('county').all().order_by('name')
+	serializer_class = DistrictSerializer
+	permission_classes = [permissions.IsAuthenticated, IsAdminRole, permissions.IsAdminUser]
+
+
+class AdminSchoolViewSet(viewsets.ModelViewSet):
+	queryset = School.objects.select_related('district__county').all().order_by('name')
+	serializer_class = SchoolSerializer
+	permission_classes = [permissions.IsAuthenticated, IsAdminRole, permissions.IsAdminUser]
 
