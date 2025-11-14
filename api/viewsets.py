@@ -418,7 +418,7 @@ class LoginViewSet(viewsets.ViewSet):
 		'''
 		return self._login_with_role(request, allowed_roles={UserRole.ADMIN.value})
 
-	def _login_with_role(self, request, allowed_roles: Set[str]):
+	def _login_with_role(self, request, allowed_roles: Set[str], stdprofile=None):
 		identifier = str(request.data.get('identifier') or '').strip()
 		password = request.data.get('password')
 		if not identifier or not password:
@@ -442,7 +442,7 @@ class LoginViewSet(viewsets.ViewSet):
 		token = AuthToken.objects.create(user)[1]
 		return Response({
 			"token": token,
-			"user": {"id": user.id, "name": user.name, "phone": user.phone, "email": user.email, "role": user.role},
+			"user": {"id": user.id, "name": user.name, "phone": user.phone, "email": user.email, "role": user.role, "stdprofile": stdprofile},
 		})
 
 
