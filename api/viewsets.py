@@ -398,7 +398,11 @@ class LoginViewSet(viewsets.ViewSet):
 		[identifier]: email or phone \n
 		[password]: user's password
 		'''
-		return self._login_with_role(request, allowed_roles={UserRole.STUDENT.value})
+		return self._login_with_role(
+			request,
+			allowed_roles={UserRole.STUDENT.value},
+			forbidden_msg="Only students can use this endpoint.",
+		)
 
 	@extend_schema(request=LoginSerializer, responses={200: OpenApiResponse(description="Token and user payload")})
 	@action(detail=False, methods=['post'], url_path='content')
@@ -418,7 +422,7 @@ class LoginViewSet(viewsets.ViewSet):
 		'''
 		return self._login_with_role(request, allowed_roles={UserRole.ADMIN.value})
 
-	def _login_with_role(self, request, allowed_roles: Set[str], stdprofile=None):
+	def _login_with_role(self, request, allowed_roles: Set[str], stdprofile=False, forbidden_msg: str | None = None):
 		identifier = str(request.data.get('identifier') or '').strip()
 		password = request.data.get('password')
 		if not identifier or not password:
@@ -437,12 +441,42 @@ class LoginViewSet(viewsets.ViewSet):
 		if not user.check_password(password):
 			return Response({"detail": "Invalid credentials."}, status=400)
 		if user.role not in allowed_roles:
-			return Response({"detail": "Insufficient role for this login."}, status=403)
+			msg = forbidden_msg or "Insufficient role for this login."
+			return Response({"detail": msg}, status=403)
 
 		token = AuthToken.objects.create(user)[1]
+
+		student_payload = None
+		if user.role == UserRole.STUDENT.value and hasattr(user, 'student') and user.student:
+			s = user.student
+			school_payload = None
+			if getattr(s, 'school_id', None):
+				sch = s.school
+				# Build a lightweight school snapshot to avoid a full serializer dependency
+				district_name = getattr(getattr(sch, 'district', None), 'name', None)
+				county_id = getattr(getattr(sch, 'district', None), 'county_id', None)
+				county_name = None
+				if getattr(sch, 'district', None) and getattr(sch.district, 'county', None):
+					county_name = getattr(sch.district.county, 'name', None)
+				school_payload = {
+					'id': sch.id,
+					'name': getattr(sch, 'name', None),
+					'district_id': getattr(sch, 'district_id', None),
+					'district_name': district_name,
+					'county_id': county_id,
+					'county_name': county_name,
+				}
+
+			student_payload = {
+				'id': s.id,
+				'grade': getattr(s, 'grade', None),
+				'school': school_payload,
+			}
+
 		return Response({
 			"token": token,
-			"user": {"id": user.id, "name": user.name, "phone": user.phone, "email": user.email, "role": user.role, "stdprofile": stdprofile},
+			"user": {"id": user.id, "name": user.name, "phone": user.phone, "email": user.email, "role": user.role},
+			**({"student": student_payload} if student_payload else {}),
 		})
 
 
