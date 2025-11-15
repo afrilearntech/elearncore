@@ -24,6 +24,7 @@ class Subject(TimestampedModel):
 	grade = models.CharField(max_length=20, choices=[(lvl.value, lvl.value) for lvl in StudentLevel])
 	description = models.TextField(blank=True, default="")
 	thumbnail = models.ImageField(upload_to='thumbnails/subjects/', null=True, blank=True)
+	created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='created_subjects')
 
 	# Allow teachers to be linked to one or more subjects
 	teachers = models.ManyToManyField('accounts.Teacher', related_name='subjects', blank=True)

@@ -91,6 +91,65 @@ class SubjectViewSet(viewsets.ModelViewSet):
 	def dispatch(self, *args, **kwargs):
 		return super().dispatch(*args, **kwargs)
 
+	def perform_create(self, serializer):
+		# Set created_by to the authenticated user creating the subject
+		serializer.save(created_by=self.request.user)
+
+	@action(detail=False, methods=['get'], url_path='mysubjects', permission_classes=[permissions.IsAuthenticated])
+	def mysubjects(self, request):
+		"""Return subjects the student has touched, with progress percent.
+		Progress = distinct lessons taken in subject / total lessons in subject.
+		"""
+		user: User = request.user
+		student = getattr(user, 'student', None)
+		if not student:
+			return Response({"detail": "Student profile required."}, status=403)
+
+		# Lessons taken by this student, grouped by subject
+		taken_counts = (
+			TakeLesson.objects
+			.filter(student=student)
+			.values('lesson__subject_id')
+			.annotate(taken=Count('lesson_id', distinct=True))
+		)
+		subject_ids = [row['lesson__subject_id'] for row in taken_counts]
+		if not subject_ids:
+			return Response([])
+
+		# Total lessons per subject (only for touched subjects)
+		total_counts_qs = (
+			LessonResource.objects
+			.filter(subject_id__in=subject_ids)
+			.values('subject_id')
+			.annotate(total=Count('id'))
+		)
+		total_by_subject = {row['subject_id']: row['total'] for row in total_counts_qs}
+		taken_by_subject = {row['lesson__subject_id']: row['taken'] for row in taken_counts}
+
+		subjects = Subject.objects.filter(id__in=subject_ids).only('id', 'name', 'grade')
+		payload = []
+		for subj in subjects:
+			total = int(total_by_subject.get(subj.id, 0))
+			taken = int(taken_by_subject.get(subj.id, 0))
+			percent = int(round((taken / total) * 100)) if total else 0
+			payload.append({
+				'id': subj.id,
+				'name': subj.name,
+				'grade': getattr(subj, 'grade', None),
+				'creator': getattr(subj.created_by, 'name', None),
+				'total_lessons': total,
+				'taken_lessons': taken,
+				'progress_percent': percent,
+			})
+
+		# Sort by name for stable output
+		payload.sort(key=lambda x: (x['name'] or '').lower())
+		return Response(payload)
+
+	
+
+
+
 
 class TopicViewSet(viewsets.ModelViewSet):
 	queryset = Topic.objects.select_related('subject').all()
@@ -753,6 +812,111 @@ class DashboardViewSet(viewsets.ViewSet):
 			'recent_activities': recent,
 		}
 		cache.set(cache_key, data, timeout=120)  # 2 minutes
+		return Response(data)
+
+	@action(detail=False, methods=['get'], url_path='assignmentsdue')
+	def assignmentsdue(self, request):
+		"""Return all pending assignments for the student due in next 15 days."""
+		user: User = request.user
+		student = getattr(user, 'student', None)
+		if not student:
+			return Response({"detail": "Student profile required."}, status=403)
+
+		now = timezone.now()
+		in_15 = now + timedelta(days=15)
+
+		# Lesson-based assignments for student's grade, not yet graded
+		lesson_qs = (
+			LessonAssessment.objects
+			.filter(lesson__subject__grade=student.grade, due_at__gte=now, due_at__lte=in_15)
+			.exclude(grades__student=student)
+			.select_related('lesson__subject')
+		)
+
+		# General assessments (platform-wide) for grade or global, not yet graded
+		general_qs = (
+			GeneralAssessment.objects
+			.filter(due_at__gte=now, due_at__lte=in_15)
+			.filter(Q(grade__isnull=True) | Q(grade=student.grade))
+			.exclude(grades__student=student)
+		)
+
+		items = []
+		for la in lesson_qs.order_by('due_at'):
+			items.append({
+				'type': 'lesson',
+				'id': la.id,
+				'title': la.title or la.lesson.title,
+				'course': getattr(getattr(la.lesson, 'subject', None), 'name', None),
+				'due_at': la.due_at.isoformat() if la.due_at else None,
+				'due_in_days': max(0, (la.due_at.date() - now.date()).days) if la.due_at else None,
+			})
+
+		for ga in general_qs.order_by('due_at'):
+			items.append({
+				'type': 'general',
+				'id': ga.id,
+				'title': ga.title,
+				'course': None,
+				'due_at': ga.due_at.isoformat() if ga.due_at else None,
+				'due_in_days': max(0, (ga.due_at.date() - now.date()).days) if ga.due_at else None,
+			})
+
+		# Sort combined list by due date ascending
+		items.sort(key=lambda x: (x['due_in_days'] is None, x['due_in_days']))
+		return Response(items)
+
+	@action(detail=False, methods=['get'], url_path='studystats')
+	def studystats(self, request):
+		"""Return aggregate study stats for the authenticated student."""
+		user: User = request.user
+		student = getattr(user, 'student', None)
+		if not student:
+			return Response({"detail": "Student profile required."}, status=403)
+
+		# Active subjects: subjects where student has taken at least one lesson
+		active_subjects = (
+			TakeLesson.objects
+			.filter(student=student)
+			.values('lesson__subject_id')
+			.distinct()
+			.count()
+		)
+
+		# Average grade across all assessments (lesson + general)
+		lesson_grades = (
+			LessonAssessmentGrade.objects
+			.filter(student=student)
+			.values_list('score', flat=True)
+		)
+		general_grades = (
+			GeneralAssessmentGrade.objects
+			.filter(student=student)
+			.values_list('score', flat=True)
+		)
+		all_scores = list(lesson_grades) + list(general_grades)
+		avg_grade = float(sum(all_scores) / len(all_scores)) if all_scores else 0.0
+
+		# Estimated study time: sum durations of distinct lessons taken
+		lesson_ids = (
+			TakeLesson.objects
+			.filter(student=student)
+			.values_list('lesson_id', flat=True)
+			.distinct()
+		)
+		study_time_minutes = (
+			LessonResource.objects
+			.filter(id__in=lesson_ids)
+			.aggregate(total=models.Sum('duration_minutes'))['total'] or 0
+		)
+		study_time_hours = round(study_time_minutes / 60.0, 2)
+
+		data = {
+			'active_subjects': active_subjects,
+			'avg_grade': avg_grade,
+			'study_time_hours': study_time_hours,
+			'badges': 0,
+		}
 		return Response(data)
 
 
