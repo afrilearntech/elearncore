@@ -65,3 +65,10 @@ class Month(Enum):
     OCTOBER = 10
     NOVEMBER = 11
     DECEMBER = 12
+
+class GameType(Enum):
+    MUSIC = "MUSIC"
+    WORD_PUZZLE = "WORD_PUZZLE"
+    SHAPE = "SHAPE"
+    COLOR = "COLOR"
+    NUMBER = "NUMBER"

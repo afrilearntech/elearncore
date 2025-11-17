@@ -4,6 +4,7 @@ from django.conf import settings
 
 from elearncore.sysutils.constants import (
 	ContentType as ContentTypeEnum,
+	GameType,
 	Status as StatusEnum,
 	StudentLevel,
 	Month,
@@ -17,6 +18,20 @@ class TimestampedModel(models.Model):
 
 	class Meta:
 		abstract = True
+
+
+class GameModel(TimestampedModel):
+	name = models.CharField(max_length=150)
+	instructions = models.TextField(blank=True, default="")
+	description = models.TextField(blank=True, default="")
+	hint = models.CharField(max_length=250, blank=True, default="")
+	correct_answer = models.CharField(max_length=150)
+	type = models.CharField(max_length=50, choices=[(gt.value, gt.value) for gt in GameType])
+	image = models.ImageField(upload_to='word_games/', null=True, blank=True)
+	created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='created_games')
+
+	def __str__(self) -> str:
+		return self.name
 
 
 class Subject(TimestampedModel):
