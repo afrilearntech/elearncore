@@ -18,11 +18,13 @@ from elearncore.sysutils.constants import UserRole, Status as StatusEnum
 from content.models import (
 	Subject, Topic, Period, LessonResource, TakeLesson, LessonAssessment,
 	GeneralAssessment, GeneralAssessmentGrade, LessonAssessmentGrade,
+	GameModel,
 )
 from forum.models import Chat
 from django.core.cache import cache
 from content.serializers import (
 	SubjectSerializer, TopicSerializer, PeriodSerializer, LessonResourceSerializer, TakeLessonSerializer,
+	GameSerializer,
 )
 from agentic.models import AIRecommendation, AIAbuseReport
 from agentic.serializers import AIRecommendationSerializer, AIAbuseReportSerializer
@@ -325,6 +327,27 @@ class AIAbuseReportViewSet(viewsets.ReadOnlyModelViewSet):
 		if user and getattr(user, 'role', None) in {UserRole.ADMIN.value, UserRole.CONTENTVALIDATOR.value}:
 			return qs
 		return AIAbuseReport.objects.none()
+
+
+class GameViewSet(viewsets.ModelViewSet):
+	"""Manage games; students can read, managers/admins can write.
+	Game Types: MUSIC, WORD_PUZZLE, SHAPE, COLOR, NUMBER
+	"""
+	queryset = GameModel.objects.select_related('created_by').all()
+	serializer_class = GameSerializer
+	filter_backends = [filters.SearchFilter, filters.OrderingFilter]
+	search_fields = ['name', 'description', 'instructions', 'hint']
+	ordering_fields = ['created_at', 'updated_at', 'name']
+
+	def get_permissions(self):
+		# Students (and anonymous) can list/retrieve, but writes are restricted
+		if self.request.method in permissions.SAFE_METHODS:
+			return [permissions.IsAuthenticatedOrReadOnly()]
+		# Only roles that can create content (incl. admin) may write
+		return [permissions.IsAuthenticated(), CanCreateContent()]
+
+	def perform_create(self, serializer):
+		serializer.save(created_by=self.request.user)
 
 
 class OnboardingViewSet(viewsets.ViewSet):

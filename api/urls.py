@@ -18,6 +18,7 @@ from .viewsets import (
 	AdminCountyViewSet,
 	AdminDistrictViewSet,
 	AdminSchoolViewSet,
+	GameViewSet,
 )
 
 router = DefaultRouter()
@@ -37,6 +38,7 @@ router.register(r'auth', LoginViewSet, basename='auth')
 router.register(r'admin/counties', AdminCountyViewSet, basename='admin-counties')
 router.register(r'admin/districts', AdminDistrictViewSet, basename='admin-districts')
 router.register(r'admin/schools', AdminSchoolViewSet, basename='admin-schools')
+router.register(r'games', GameViewSet, basename='game')
 
 urlpatterns = [
 	path('', include(router.urls)),
