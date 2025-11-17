@@ -91,6 +91,42 @@ class SubjectViewSet(viewsets.ModelViewSet):
 	def dispatch(self, *args, **kwargs):
 		return super().dispatch(*args, **kwargs)
 
+	def retrieve(self, request, *args, **kwargs):
+		"""Return subject detail plus basic aggregated stats."""
+		instance: Subject = self.get_object()
+		data = self.get_serializer(instance).data
+
+		# Total instructors linked to this subject
+		total_instructors = instance.teachers.count()
+
+		# Total lessons under this subject
+		total_lessons = LessonResource.objects.filter(subject=instance).count()
+
+		# Total distinct students who have taken at least one lesson in this course
+		total_students = (
+			TakeLesson.objects
+			.filter(lesson__subject=instance)
+			.values('student_id')
+			.distinct()
+			.count()
+		)
+
+		# Estimated duration for the subject in hours, based on lesson durations
+		total_minutes = (
+			LessonResource.objects
+			.filter(subject=instance)
+			.aggregate(total=models.Sum('duration_minutes'))['total'] or 0
+		)
+		estimated_duration_hours = round(total_minutes / 60.0, 2)
+
+		data['stats'] = {
+			'total_instructors': total_instructors,
+			'total_lessons': total_lessons,
+			'total_students': total_students,
+			'estimated_duration_hours': estimated_duration_hours,
+		}
+		return Response(data)
+
 	def perform_create(self, serializer):
 		# Set created_by to the authenticated user creating the subject
 		serializer.save(created_by=self.request.user)

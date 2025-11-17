@@ -11,7 +11,7 @@ from .models import (
 class SubjectSerializer(serializers.ModelSerializer):
 	class Meta:
 		model = Subject
-		fields = ['id', 'name', 'grade', 'description', 'thumbnail', 'teachers', 'created_at', 'updated_at', 'created_by']
+		fields = ['id', 'name', 'grade', 'description', 'objectives', 'thumbnail', 'teachers', 'created_at', 'updated_at', 'created_by']
 		read_only_fields = ['created_at', 'updated_at', 'created_by']
 
 

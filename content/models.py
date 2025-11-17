@@ -22,6 +22,7 @@ class TimestampedModel(models.Model):
 class Subject(TimestampedModel):
 	name = models.CharField(max_length=120)
 	grade = models.CharField(max_length=20, choices=[(lvl.value, lvl.value) for lvl in StudentLevel])
+	objectives = models.TextField(blank=True, default="")
 	description = models.TextField(blank=True, default="")
 	thumbnail = models.ImageField(upload_to='thumbnails/subjects/', null=True, blank=True)
 	created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='created_subjects')
@@ -60,7 +61,7 @@ class LessonResource(TimestampedModel):
 	subject = models.ForeignKey(Subject, on_delete=models.CASCADE, related_name="lesson_resources")
 	topic = models.ForeignKey(Topic, on_delete=models.SET_NULL, null=True, blank=True, related_name="lesson_resources")
 	period = models.ForeignKey(Period, on_delete=models.SET_NULL, null=True, blank=True, related_name="lesson_resources")
-
+	instructor_name = models.CharField(max_length=150, blank=True, default="")
 	title = models.CharField(max_length=200)
 	description = models.TextField(blank=True, default="")
 	type = models.CharField(max_length=20, choices=[(t.value, t.value) for t in ContentTypeEnum])
