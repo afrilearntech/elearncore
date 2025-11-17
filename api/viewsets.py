@@ -94,6 +94,7 @@ class SubjectViewSet(viewsets.ModelViewSet):
 	def retrieve(self, request, *args, **kwargs):
 		"""Return subject detail plus basic aggregated stats."""
 		instance: Subject = self.get_object()
+		print(f'Instance: {instance}')
 		data = self.get_serializer(instance).data
 
 		# Total instructors linked to this subject
@@ -333,7 +334,11 @@ class OnboardingViewSet(viewsets.ViewSet):
 	- aboutyou: set personal details and optional institution/grade
 	- linkchild: link a student to a parent profile
 	"""
-	serializer_class = serializers.Serializer
+	class DummySerializer(serializers.Serializer):
+		"""Placeholder for schema generation only."""
+		id = serializers.IntegerField(read_only=True)
+
+	serializer_class = DummySerializer
 
 	@extend_schema(request=ProfileSetupSerializer, responses={201: OpenApiResponse(description="Token and user payload")})
 	@action(detail=False, methods=['post'], permission_classes=[permissions.AllowAny])
@@ -484,7 +489,12 @@ class OnboardingViewSet(viewsets.ViewSet):
 
 class LoginViewSet(viewsets.ViewSet):
 	permission_classes = [permissions.AllowAny]
-	serializer_class = serializers.Serializer
+
+	class DummySerializer(serializers.Serializer):
+		"""Placeholder for schema generation only."""
+		id = serializers.IntegerField(read_only=True)
+
+	serializer_class = DummySerializer
 
 	@extend_schema(request=LoginSerializer, responses={200: OpenApiResponse(description="Token and user payload")})
 	@action(detail=False, methods=['post'], url_path='student')
@@ -577,7 +587,12 @@ class LoginViewSet(viewsets.ViewSet):
 
 class DashboardViewSet(viewsets.ViewSet):
 	permission_classes = [permissions.IsAuthenticated]
-	serializer_class = serializers.Serializer
+
+	class DummySerializer(serializers.Serializer):
+		"""Placeholder for schema generation only."""
+		id = serializers.IntegerField(read_only=True)
+
+	serializer_class = DummySerializer
 
 	def list(self, request):
 		user: User = request.user
