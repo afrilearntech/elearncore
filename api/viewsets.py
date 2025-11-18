@@ -1011,7 +1011,7 @@ class KidsViewSet(viewsets.ViewSet):
 	permission_classes = [permissions.IsAuthenticated]
 
 	@extend_schema(
-		description="Kids dashboard sample response",
+		description="Endpoints tailored for younger students (grades 1–3).",
 		responses={200: None},
 		examples=[
 			OpenApiExample(
@@ -1362,6 +1362,139 @@ class KidsViewSet(viewsets.ViewSet):
 			for g in games_qs
 		]
 		return Response({"games": payload})
+
+	@extend_schema(
+		description="List all assessments (general + lesson) available for the student's grade.",
+		responses={200: None},
+		examples=[
+			OpenApiExample(
+				name="KidsAssessmentsExample",
+				value={
+					"assessments": [
+						{"id": 1, "title": "Math Quick Quiz", "type": "general", "marks": 100.0},
+						{"id": 2, "title": "Lesson 3 Checkup", "type": "lesson", "lesson_id": 10, "marks": 20.0},
+					],
+				},
+			),
+		],
+	)
+	@action(detail=False, methods=['get'], url_path='assessments')
+	def assessments(self, request):
+		"""Return all assessments (general + lesson) for the student's grade."""
+		user: User = request.user
+		student = getattr(user, 'student', None)
+		if not student:
+			return Response({"detail": "Student profile required."}, status=403)
+
+		general_qs = (
+			GeneralAssessment.objects
+			.filter(models.Q(grade__isnull=True) | models.Q(grade=student.grade))
+			.order_by('title')
+		)
+		lesson_qs = (
+			LessonAssessment.objects
+			.filter(lesson__subject__grade=student.grade)
+			.select_related('lesson')
+			.order_by('title')
+		)
+
+		items = []
+		for ga in general_qs:
+			items.append({
+				"id": ga.id,
+				"title": ga.title,
+				"type": "general",
+				"marks": ga.marks,
+			})
+		for la in lesson_qs:
+			items.append({
+				"id": la.id,
+				"title": la.title,
+				"type": "lesson",
+				"lesson_id": la.lesson_id,
+				"marks": la.marks,
+			})
+
+		return Response({"assessments": items})
+
+	@extend_schema(
+		description=(
+			"Get questions and options for a specific assessment. "
+			"Pass either ?general_id=<id> or ?lesson_id=<id>."
+		),
+		responses={200: None},
+		examples=[
+			OpenApiExample(
+				name="KidsAssessmentQuestionsExample",
+				value={
+					"assessment": {"id": 1, "title": "Math Quick Quiz", "type": "general"},
+					"questions": [
+						{
+							"id": 10,
+							"type": "MULTIPLE_CHOICE",
+							"question": "What is 2 + 2?",
+							"options": [
+								{"id": 100, "value": "3"},
+								{"id": 101, "value": "4"},
+								{"id": 102, "value": "5"},
+							],
+						},
+					],
+				},
+			),
+		],
+	)
+	@action(detail=False, methods=['get'], url_path='assessment-questions')
+	def assessment_questions(self, request):
+		"""Return questions and options for a given assessment.
+
+		Use query params:
+		- general_id: for GeneralAssessment
+		- lesson_id: for LessonAssessment
+		Exactly one of these must be provided.
+		"""
+		user: User = request.user
+		student = getattr(user, 'student', None)
+		if not student:
+			return Response({"detail": "Student profile required."}, status=403)
+
+		general_id = request.query_params.get('general_id')
+		lesson_id = request.query_params.get('lesson_id')
+		if bool(general_id) == bool(lesson_id):
+			return Response({"detail": "Provide exactly one of general_id or lesson_id."}, status=400)
+
+		assessment_info = None
+		questions_qs = None
+
+		if general_id:
+			ga = GeneralAssessment.objects.filter(id=general_id).first()
+			if not ga:
+				return Response({"detail": "General assessment not found."}, status=404)
+			assessment_info = {"id": ga.id, "title": ga.title, "type": "general"}
+			questions_qs = ga.questions.all().prefetch_related('options')
+		else:
+			la = LessonAssessment.objects.filter(id=lesson_id).first()
+			if not la:
+				return Response({"detail": "Lesson assessment not found."}, status=404)
+			assessment_info = {"id": la.id, "title": la.title, "type": "lesson"}
+			questions_qs = la.questions.all().prefetch_related('options')
+
+		questions_payload = []
+		for q in questions_qs:
+			questions_payload.append({
+				"id": q.id,
+				"type": q.type,
+				"question": q.question,
+				"options": [
+					{"id": opt.id, "value": opt.value}
+					for opt in q.options.all()
+				],
+			})
+
+		return Response({
+			"assessment": assessment_info,
+			"questions": questions_payload,
+		})
 
 	@extend_schema(
 		description="All assessment grades (lesson + general) for the student.",
