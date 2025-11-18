@@ -1208,6 +1208,74 @@ class KidsViewSet(viewsets.ViewSet):
 		})
 
 	@extend_schema(
+		description="All assignments (assessments) for the student's grade.",
+		responses={200: None},
+		examples=[
+			OpenApiExample(
+				name="KidsAssignmentsExample",
+				value={
+					"assignments": [
+						{
+							"id": 1,
+							"title": "Term 1 Math Assessment",
+							"type": "general",
+							"due_at": "2025-11-20T09:00:00Z",
+						},
+						{
+							"id": 2,
+							"title": "Lesson 3 Quiz",
+							"type": "lesson",
+							"lesson_id": 10,
+							"due_at": "2025-11-22T09:00:00Z",
+						},
+					],
+				},
+			),
+		],
+	)
+	@action(detail=False, methods=['get'], url_path='assignments')
+	def assignments(self, request):
+		"""Return all assignments for the student's grade (no due-date filter)."""
+		user: User = request.user
+		student = getattr(user, 'student', None)
+		if not student:
+			return Response({"detail": "Student profile required."}, status=403)
+
+		# General assessments for grade or global
+		general_qs = (
+			GeneralAssessment.objects
+			.filter(models.Q(grade__isnull=True) | models.Q(grade=student.grade))
+			.order_by('due_at', 'title')
+		)
+
+		# Lesson assessments for lessons in this grade
+		lesson_qs = (
+			LessonAssessment.objects
+			.filter(lesson__subject__grade=student.grade)
+			.select_related('lesson')
+			.order_by('due_at', 'title')
+		)
+
+		items = []
+		for ga in general_qs:
+			items.append({
+				"id": ga.id,
+				"title": ga.title,
+				"type": "general",
+				"due_at": ga.due_at.isoformat() if ga.due_at else None,
+			})
+		for la in lesson_qs:
+			items.append({
+				"id": la.id,
+				"title": la.title,
+				"type": "lesson",
+				"lesson_id": la.lesson_id,
+				"due_at": la.due_at.isoformat() if la.due_at else None,
+			})
+
+		return Response({"assignments": items})
+
+	@extend_schema(
 		description="List quizzes (assessments) available for the student's grade.",
 		responses={200: None},
 		examples=[
