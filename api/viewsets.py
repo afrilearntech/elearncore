@@ -1141,6 +1141,160 @@ class KidsViewSet(viewsets.ViewSet):
 			'recent_activities': recent_activities,
 		})
 
+	@extend_schema(
+		description="Subjects and lessons for the student's grade (kids view).",
+		responses={200: None},
+		examples=[
+			OpenApiExample(
+				name="KidsSubjectsAndLessonsExample",
+				value={
+					"subjects": [
+						{"id": 1, "name": "Mathematics", "grade": "PRIMARY_3"},
+						{"id": 2, "name": "Science", "grade": "PRIMARY_3"},
+					],
+					"lessons": [
+						{
+							"id": 10,
+							"title": "Addition Basics",
+							"subject_id": 1,
+							"subject_name": "Mathematics",
+						},
+						{
+							"id": 11,
+							"title": "Animals Around Us",
+							"subject_id": 2,
+							"subject_name": "Science",
+						},
+					],
+				},
+			),
+		],
+	)
+	@action(detail=False, methods=['get'], url_path='subjectsandlessons')
+	def subjects_and_lessons(self, request):
+		"""Return subjects and lessons for the student's grade in a simple shape."""
+		user: User = request.user
+		student = getattr(user, 'student', None)
+		if not student:
+			return Response({"detail": "Student profile required."}, status=403)
+
+		# Subjects for the student's grade
+		subjects_qs = Subject.objects.filter(grade=student.grade).order_by('name')
+		subjects_payload = [
+			{"id": s.id, "name": s.name, "grade": s.grade}
+			for s in subjects_qs
+		]
+
+		# Lessons for the student's grade (via subject)
+		lessons_qs = (
+			LessonResource.objects
+			.filter(subject__grade=student.grade)
+			.select_related('subject')
+			.order_by('subject__name', 'title')
+		)
+		lessons_payload = [
+			{
+				"id": l.id,
+				"title": l.title,
+				"subject_id": l.subject_id,
+				"subject_name": getattr(l.subject, 'name', None),
+			}
+			for l in lessons_qs
+		]
+
+		return Response({
+			"subjects": subjects_payload,
+			"lessons": lessons_payload,
+		})
+
+	@extend_schema(
+		description="List quizzes (assessments) available for the student's grade.",
+		responses={200: None},
+		examples=[
+			OpenApiExample(
+				name="KidsQuizzesExample",
+				value={
+					"quizzes": [
+						{"id": 1, "title": "Math Quick Quiz", "type": "general", "due_at": "2025-11-20T09:00:00Z"},
+						{"id": 2, "title": "Lesson 3 Checkup", "type": "lesson", "lesson_id": 10, "due_at": "2025-11-22T09:00:00Z"},
+					],
+				},
+			),
+		],
+	)
+	@action(detail=False, methods=['get'], url_path='quizzes')
+	def quizzes(self, request):
+		"""Return quizzes (general + lesson assessments) for the student's grade."""
+		user: User = request.user
+		student = getattr(user, 'student', None)
+		if not student:
+			return Response({"detail": "Student profile required."}, status=403)
+
+		# General assessments for grade or global
+		general_qs = (
+			GeneralAssessment.objects
+			.filter(models.Q(grade__isnull=True) | models.Q(grade=student.grade))
+			.order_by('due_at', 'title')
+		)
+
+		# Lesson assessments via lessons in student's grade
+		lesson_qs = (
+			LessonAssessment.objects
+			.filter(lesson__subject__grade=student.grade)
+			.select_related('lesson')
+			.order_by('due_at', 'title')
+		)
+
+		payload = []
+		for ga in general_qs:
+			payload.append({
+				"id": ga.id,
+				"title": ga.title,
+				"type": "general",
+				"due_at": ga.due_at.isoformat() if ga.due_at else None,
+			})
+		for la in lesson_qs:
+			payload.append({
+				"id": la.id,
+				"title": la.title,
+				"type": "lesson",
+				"lesson_id": la.lesson_id,
+				"due_at": la.due_at.isoformat() if la.due_at else None,
+			})
+
+		return Response({"quizzes": payload})
+
+	@extend_schema(
+		description="List games available for the student's grade.",
+		responses={200: None},
+		examples=[
+			OpenApiExample(
+				name="KidsGamesExample",
+				value={
+					"games": [
+						{"id": 1, "name": "Color Match", "type": "COLOR"},
+						{"id": 2, "name": "Number Hunt", "type": "NUMBER"},
+					],
+				},
+			),
+		],
+	)
+	@action(detail=False, methods=['get'], url_path='games')
+	def games(self, request):
+		"""Return games for the student's grade (currently all games)."""
+		user: User = request.user
+		student = getattr(user, 'student', None)
+		if not student:
+			return Response({"detail": "Student profile required."}, status=403)
+
+		# GameModel currently has no grade field, so return all.
+		games_qs = GameModel.objects.all().order_by('name')
+		payload = [
+			{"id": g.id, "name": g.name, "type": g.type}
+			for g in games_qs
+		]
+		return Response({"games": payload})
+
 
 class LookupPagination(filters.BaseFilterBackend):
 	pass
