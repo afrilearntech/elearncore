@@ -1363,6 +1363,86 @@ class KidsViewSet(viewsets.ViewSet):
 		]
 		return Response({"games": payload})
 
+	@extend_schema(
+		description="All assessment grades (lesson + general) for the student.",
+		responses={200: None},
+		examples=[
+			OpenApiExample(
+				name="KidsGradesExample",
+				value={
+					"lesson_grades": [
+						{
+							"id": 1,
+							"lesson_assessment_id": 5,
+							"lesson_title": "Addition Basics Quiz",
+							"score": 85.0,
+							"marks": 100.0,
+							"created_at": "2025-11-18T09:00:00Z",
+						},
+					],
+					"general_grades": [
+						{
+							"id": 2,
+							"assessment_id": 3,
+							"assessment_title": "Term 1 Assessment",
+							"score": 78.0,
+							"marks": 100.0,
+							"created_at": "2025-11-17T14:30:00Z",
+						},
+					],
+				},
+			),
+		],
+	)
+	@action(detail=False, methods=['get'], url_path='grades')
+	def grades(self, request):
+		"""Return lesson assessment grades and general assessment grades for the student."""
+		user: User = request.user
+		student = getattr(user, 'student', None)
+		if not student:
+			return Response({"detail": "Student profile required."}, status=403)
+
+		lesson_qs = (
+			LessonAssessmentGrade.objects
+			.filter(student=student)
+			.select_related('lesson_assessment')
+			.order_by('-created_at')
+		)
+		general_qs = (
+			GeneralAssessmentGrade.objects
+			.filter(student=student)
+			.select_related('assessment')
+			.order_by('-created_at')
+		)
+
+		lesson_payload = [
+			{
+				"id": g.id,
+				"lesson_assessment_id": g.lesson_assessment_id,
+				"lesson_title": getattr(g.lesson_assessment, 'title', None),
+				"score": g.score,
+				"marks": getattr(g.lesson_assessment, 'marks', None),
+				"created_at": g.created_at.isoformat(),
+			}
+			for g in lesson_qs
+		]
+		general_payload = [
+			{
+				"id": g.id,
+				"assessment_id": g.assessment_id,
+				"assessment_title": getattr(g.assessment, 'title', None),
+				"score": g.score,
+				"marks": getattr(g.assessment, 'marks', None),
+				"created_at": g.created_at.isoformat(),
+			}
+			for g in general_qs
+		]
+
+		return Response({
+			"lesson_grades": lesson_payload,
+			"general_grades": general_payload,
+		})
+
 
 class LookupPagination(filters.BaseFilterBackend):
 	pass
