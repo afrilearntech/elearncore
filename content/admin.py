@@ -4,7 +4,7 @@ from .models import (
 	Subject, Topic, Period, LessonResource, TakeLesson,
 	GeneralAssessment, GeneralAssessmentGrade,
 	LessonAssessment, LessonAssessmentGrade,
-	Question, Option,
+	Question, Option, GameModel,
 )
 
 
@@ -76,3 +76,10 @@ class QuestionAdmin(admin.ModelAdmin):
 @admin.register(Option)
 class OptionAdmin(admin.ModelAdmin):
 	list_display = ("id", "question", "value", "created_at")
+
+
+@admin.register(GameModel)
+class GameModelAdmin(admin.ModelAdmin):
+	list_display = ("id", "name", "type", 'grade', "created_by", "created_at")
+	list_filter = ("type", "grade")
+	search_fields = ("name", "description", "instructions")

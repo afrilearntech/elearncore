@@ -24,6 +24,7 @@ class GameModel(TimestampedModel):
 	name = models.CharField(max_length=150)
 	instructions = models.TextField(blank=True, default="")
 	description = models.TextField(blank=True, default="")
+	grade = models.CharField(max_length=20, choices=[(lvl.value, lvl.value) for lvl in StudentLevel], default=StudentLevel.GRADE2.value)
 	hint = models.CharField(max_length=250, blank=True, default="")
 	correct_answer = models.CharField(max_length=150)
 	type = models.CharField(max_length=50, choices=[(gt.value, gt.value) for gt in GameType])
