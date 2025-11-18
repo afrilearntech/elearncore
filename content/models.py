@@ -215,3 +215,22 @@ class Option(TimestampedModel):
 
 	def __str__(self) -> str:
 		return self.value
+
+
+class Activity(TimestampedModel):
+	"""A generic user activity for audit and feeds.
+
+	Examples: login, take_lesson, play_game
+	"""
+	user = models.ForeignKey('accounts.User', on_delete=models.CASCADE, related_name='activities')
+	type = models.CharField(max_length=50)
+	description = models.CharField(max_length=255, blank=True, default="")
+	metadata = models.JSONField(blank=True, null=True)
+
+	class Meta:
+		indexes = [
+			models.Index(fields=["user", "created_at"]),
+		]
+
+	def __str__(self) -> str:
+		return f"{self.user_id} - {self.type}"

@@ -1,7 +1,7 @@
 from typing import Iterable, Dict, List, Set
 
 from rest_framework import permissions, viewsets, status, filters, serializers
-from drf_spectacular.utils import extend_schema, OpenApiResponse
+from drf_spectacular.utils import extend_schema, OpenApiResponse, OpenApiExample
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from django.views.decorators.cache import cache_page
@@ -18,7 +18,7 @@ from elearncore.sysutils.constants import UserRole, Status as StatusEnum
 from content.models import (
 	Subject, Topic, Period, LessonResource, TakeLesson, LessonAssessment,
 	GeneralAssessment, GeneralAssessmentGrade, LessonAssessmentGrade,
-	GameModel,
+	GameModel, Activity,
 )
 from forum.models import Chat
 from django.core.cache import cache
@@ -240,7 +240,15 @@ class LessonResourceViewSet(viewsets.ModelViewSet):
 			return [permissions.IsAuthenticated(), CanCreateContent()]
 
 	def perform_create(self, serializer):
-		serializer.save(created_by=self.request.user, status=StatusEnum.DRAFT.value)
+		lesson = serializer.save(created_by=self.request.user, status=StatusEnum.DRAFT.value)
+		# Optionally log content creation as an activity for the creator
+		if self.request.user and self.request.user.is_authenticated:
+			Activity.objects.create(
+				user=self.request.user,
+				type="create_lesson",
+				description=f"Created lesson '{lesson.title}'",
+				metadata={"lesson_id": lesson.id},
+			)
 
 	@action(detail=True, methods=['post'], url_path='submit')
 	def submit_for_review(self, request, pk=None):
@@ -292,6 +300,18 @@ class TakeLessonViewSet(viewsets.ModelViewSet):
 		if student:
 			return qs.filter(student=student)
 		return TakeLesson.objects.none()
+
+	def perform_create(self, serializer):
+		"""Create a TakeLesson and log an activity for the student."""
+		instance: TakeLesson = serializer.save()
+		user = getattr(getattr(instance, 'student', None), 'profile', None)
+		if user is not None:
+			Activity.objects.create(
+				user=user,
+				type="take_lesson",
+				description=f"Took lesson '{instance.lesson.title}'",
+				metadata={"lesson_id": instance.lesson_id, "subject_id": getattr(instance.lesson.subject, 'id', None)},
+			)
 
 
 class AIRecommendationViewSet(viewsets.ReadOnlyModelViewSet):
@@ -347,7 +367,15 @@ class GameViewSet(viewsets.ModelViewSet):
 		return [permissions.IsAuthenticated(), CanCreateContent()]
 
 	def perform_create(self, serializer):
-		serializer.save(created_by=self.request.user)
+		game = serializer.save(created_by=self.request.user)
+		# Log game creation/update as an activity for the creator
+		if self.request.user and self.request.user.is_authenticated:
+			Activity.objects.create(
+				user=self.request.user,
+				type="create_game",
+				description=f"Created game '{game.name}'",
+				metadata={"game_id": game.id, "game_type": game.type},
+			)
 
 
 class OnboardingViewSet(viewsets.ViewSet):
@@ -386,6 +414,14 @@ class OnboardingViewSet(viewsets.ViewSet):
 
 		user = User.objects.create_user(email=email, phone=phone, name=name, password=password)
 		token = AuthToken.objects.create(user)[1]
+
+		# Log login activity
+		Activity.objects.create(
+			user=user,
+			type="login",
+			description="User logged in",
+			metadata={"role": user.role},
+		)
 		return Response({
 			"token": token,
 			"user": {"id": user.id, "name": user.name, "phone": user.phone, "email": user.email, "role": user.role},
@@ -751,40 +787,16 @@ class DashboardViewSet(viewsets.ViewSet):
 				'hours_left': hours_left,
 			})
 
-		# Recent activities: combine last items from lessons taken, grades, and forum chats
-		recent: List[dict] = []
-		# Last taken lessons
-		for tl in taken_qs.select_related('lesson__subject').order_by('-created_at')[:5]:
-			recent.append({
-				'type': 'lesson',
-				'label': f"Completed {tl.lesson.title}",
-				'course': tl.lesson.subject.name,
-				'created_at': tl.created_at.isoformat(),
-			})
-		# Last grades
-		for g in LessonAssessmentGrade.objects.select_related('lesson_assessment__lesson').filter(student=student).order_by('-created_at')[:5]:
-			recent.append({
-				'type': 'grade',
-				'label': f"Scored {g.score} in {g.lesson_assessment.title}",
-				'created_at': g.created_at.isoformat(),
-			})
-		for g in GeneralAssessmentGrade.objects.select_related('assessment').filter(student=student).order_by('-created_at')[:5]:
-			recent.append({
-				'type': 'grade',
-				'label': f"Scored {g.score} in {g.assessment.title}",
-				'created_at': g.created_at.isoformat(),
-			})
-		# Forum chats in forums where the student is a member
-		forum_chats = Chat.objects.select_related('forum', 'sender').filter(forum__memberships__student=student).order_by('-created_at')[:5]
-		for ch in forum_chats:
-			recent.append({
-				'type': 'chat',
-				'label': f"{ch.sender.name}: {ch.content[:40]}",
-				'forum': ch.forum.name,
-				'created_at': ch.created_at.isoformat(),
-			})
-		recent.sort(key=lambda x: x.get('created_at', ''), reverse=True)
-		recent = recent[:10]
+		# Recent activities feed (3 most recent generic activities for this user)
+		recent = [
+			{
+				'type': a.type,
+				'description': a.description,
+				'created_at': a.created_at.isoformat(),
+				'metadata': a.metadata or {},
+			}
+			for a in Activity.objects.filter(user=user).order_by('-created_at')[:3]
+		]
 
 		# the number of courses completed by the student in their grade as a percentage of total courses in that grade
 		overall_progress = (round((completed_courses / total_courses) * 100)) if total_courses > 0 else 0
@@ -992,6 +1004,142 @@ class DashboardViewSet(viewsets.ViewSet):
 			'badges': 0,
 		}
 		return Response(data)
+
+
+class KidsViewSet(viewsets.ViewSet):
+	"""Endpoints tailored for younger students (grades 1–3)."""
+	permission_classes = [permissions.IsAuthenticated]
+
+	@extend_schema(
+		description="Kids dashboard sample response",
+		responses={200: None},
+		examples=[
+			OpenApiExample(
+				name="KidsDashboardExample",
+				value={
+					"lessons_completed": 12,
+					"streaks_this_week": 4,
+					"current_level": "PRIMARY_3",
+					"points_earned": 100,
+					"todays_challenges": [
+						{"name": "Complete 3 lessons", "icon": "lessons"},
+						{"name": "Play 2 learning games", "icon": "games"},
+						{"name": "Pass a quiz", "icon": "quiz"},
+					],
+					"continue_learning": [
+						{"id": 1, "name": "Addition Basics", "subject": "Mathematics"},
+						{"id": 5, "name": "Animals Around Us", "subject": "Science"},
+					],
+					"recent_activities": [
+						{
+							"type": "login",
+							"description": "User logged in",
+							"created_at": "2025-11-18T09:15:00Z",
+							"metadata": {"role": "STUDENT"},
+						},
+						{
+							"type": "take_lesson",
+							"description": "Took lesson 'Shapes and Colors'",
+							"created_at": "2025-11-18T09:30:00Z",
+							"metadata": {"lesson_id": 10, "subject_id": 2},
+						},
+					],
+				},
+			),
+		],
+	)
+	@action(detail=False, methods=['get'], url_path='dashboard')
+	def dashboard(self, request):
+		"""Return a simplified dashboard for lower-grade students.
+
+		Cards:
+		- lessons_completed: total distinct lessons taken
+		- streaks_this_week: number of days in the current week with activity
+		- current_level: the student's grade
+		- points_earned: streaks_this_week multiplied by a constant (10)
+		"""
+		user: User = request.user
+		student = getattr(user, 'student', None)
+		if not student:
+			return Response({"detail": "Student profile required."}, status=403)
+
+		# Optionally restrict to lower grades if you encode them in grade string
+		# For now, treat any student as eligible for this kids dashboard.
+
+		now = timezone.now()
+		# Lessons completed (distinct lessons)
+		lessons_completed = (
+			TakeLesson.objects
+			.filter(student=student)
+			.values('lesson_id')
+			.distinct()
+			.count()
+		)
+
+		# Streaks this week: count unique days in the current week with activity
+		start_of_week = now.date() - timedelta(days=now.weekday())  # Monday
+		end_of_week = start_of_week + timedelta(days=6)
+		streak_days = (
+			TakeLesson.objects
+			.filter(student=student, created_at__date__gte=start_of_week, created_at__date__lte=end_of_week)
+			.annotate(day=TruncDate('created_at'))
+			.values('day')
+			.distinct()
+			.count()
+		)
+
+		current_level = student.grade
+		POINT_MULTIPLIER = 25
+		points_earned = streak_days * POINT_MULTIPLIER
+
+		# Predefined daily challenges for kids
+		todays_challenges = [
+			{"name": "Complete 3 lessons", "icon": "lessons"},
+			{"name": "Play 2 learning games", "icon": "games"},
+			{"name": "Pass a quiz", "icon": "quiz"},
+		]
+
+		# Continue learning: 3 most recent topics the student has touched
+		recent_topics_qs = (
+			TakeLesson.objects
+			.filter(student=student)
+			.select_related('lesson__topic')
+			.order_by('-created_at')
+		)
+		seen_topic_ids = set()
+		continue_learning = []
+		for tl in recent_topics_qs:
+			topic = getattr(tl.lesson, 'topic', None)
+			if not topic or topic.id in seen_topic_ids:
+				continue
+			seen_topic_ids.add(topic.id)
+			continue_learning.append({
+				'id': topic.id,
+				'name': topic.name,
+				'subject': getattr(getattr(topic, 'subject', None), 'name', None),
+			})
+			if len(continue_learning) >= 3:
+				break
+
+		recent_activities = [
+			{
+				'type': a.type,
+				'description': a.description,
+				'created_at': a.created_at.isoformat(),
+				'metadata': a.metadata or {},
+			}
+			for a in Activity.objects.filter(user=user).order_by('-created_at')[:3]
+		]
+
+		return Response({
+			'lessons_completed': lessons_completed,
+			'streaks_this_week': streak_days,
+			'current_level': current_level.replace('_', ' '),
+			'points_earned': points_earned,
+			'todays_challenges': todays_challenges,
+			'continue_learning': continue_learning,
+			'recent_activities': recent_activities,
+		})
 
 
 class LookupPagination(filters.BaseFilterBackend):

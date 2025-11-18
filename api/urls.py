@@ -19,6 +19,7 @@ from .viewsets import (
 	AdminDistrictViewSet,
 	AdminSchoolViewSet,
 	GameViewSet,
+	KidsViewSet,
 )
 
 router = DefaultRouter()
@@ -31,6 +32,7 @@ router.register(r'ai/recommendations', AIRecommendationViewSet, basename='ai-rec
 router.register(r'ai/abuse-reports', AIAbuseReportViewSet, basename='ai-abuse-report')
 router.register(r'onboarding', OnboardingViewSet, basename='onboarding')
 router.register(r'dashboard', DashboardViewSet, basename='dashboard')
+router.register(r'kids', KidsViewSet, basename='kids')
 router.register(r'lookup/schools', SchoolLookupViewSet, basename='school-lookup')
 router.register(r'lookup/counties', CountyLookupViewSet, basename='county-lookup')
 router.register(r'lookup/districts', DistrictLookupViewSet, basename='district-lookup')
