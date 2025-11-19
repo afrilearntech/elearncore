@@ -69,6 +69,7 @@ class Month(Enum):
 class GameType(Enum):
     MUSIC = "MUSIC"
     WORD_PUZZLE = "WORD_PUZZLE"
+    IMAGE_PUZZLE = "IMAGE_PUZZLE"
     SHAPE = "SHAPE"
     COLOR = "COLOR"
     NUMBER = "NUMBER"
