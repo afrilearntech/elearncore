@@ -149,7 +149,8 @@ MEDIA_URL = '/assets/'
 MEDIA_ROOT = BASE_DIR / "assets"
 
 # Use Spaces if DO_SPACES_BUCKET is provided; otherwise fall back to local MEDIA settings above.
-if os.getenv('DO_SPACES_BUCKET'):
+ENVIRONMENT = os.getenv('ENVIRONMENT', 'LOCAL').upper()
+if os.getenv('DO_SPACES_BUCKET') and ENVIRONMENT in ["LIVE", "PRODUCTION", "PROD"]:
     DEFAULT_FILE_STORAGE = 'storages.backends.s3boto3.S3Boto3Storage'
 
     AWS_ACCESS_KEY_ID = os.getenv('DO_SPACES_KEY') or os.getenv('AWS_ACCESS_KEY_ID')
@@ -252,32 +253,32 @@ ARKESEL_API_KEY = os.getenv('ARKESEL_SMS_API_KEY')
 
 
 # S3 storage (Production)
-if ENVIRONMENT in ["LIVE", "PRODUCTION", "PROD"]:
-    AWS_ACCESS_KEY_ID = os.getenv('AWS_ACCESS_KEY_ID', '')
-    AWS_SECRET_ACCESS_KEY = os.getenv('AWS_SECRET_ACCESS_KEY', '')
-    AWS_STORAGE_BUCKET_NAME = os.getenv('AWS_STORAGE_BUCKET_NAME', '')
-    AWS_S3_REGION_NAME = os.getenv('AWS_S3_REGION_NAME', None)
-    AWS_S3_ENDPOINT_URL = os.getenv('AWS_S3_ENDPOINT_URL', None)
-    AWS_QUERYSTRING_AUTH = False
-    AWS_DEFAULT_ACL = None
-    AWS_S3_FILE_OVERWRITE = False
+# if ENVIRONMENT in ["LIVE", "PRODUCTION", "PROD"]:
+#     AWS_ACCESS_KEY_ID = os.getenv('AWS_ACCESS_KEY_ID', '')
+#     AWS_SECRET_ACCESS_KEY = os.getenv('AWS_SECRET_ACCESS_KEY', '')
+#     AWS_STORAGE_BUCKET_NAME = os.getenv('AWS_STORAGE_BUCKET_NAME', '')
+#     AWS_S3_REGION_NAME = os.getenv('AWS_S3_REGION_NAME', None)
+#     AWS_S3_ENDPOINT_URL = os.getenv('AWS_S3_ENDPOINT_URL', None)
+#     AWS_QUERYSTRING_AUTH = False
+#     AWS_DEFAULT_ACL = None
+#     AWS_S3_FILE_OVERWRITE = False
 
-    # Optional custom domain if using CloudFront (leave blank to use AWS default)
-    AWS_S3_CUSTOM_DOMAIN = os.getenv('AWS_S3_CUSTOM_DOMAIN', None)
+#     # Optional custom domain if using CloudFront (leave blank to use AWS default)
+#     AWS_S3_CUSTOM_DOMAIN = os.getenv('AWS_S3_CUSTOM_DOMAIN', None)
 
-    if AWS_S3_CUSTOM_DOMAIN:
-        MEDIA_URL = f"https://{AWS_S3_CUSTOM_DOMAIN}/media/"
-        STATIC_URL = f"https://{AWS_S3_CUSTOM_DOMAIN}/static/"
-    else:
-        # Fallback to bucket domain
-        _s3_base = f"https://{AWS_STORAGE_BUCKET_NAME}.s3.amazonaws.com"
-        MEDIA_URL = f"{_s3_base}/media/"
-        STATIC_URL = f"{_s3_base}/static/"
+#     if AWS_S3_CUSTOM_DOMAIN:
+#         MEDIA_URL = f"https://{AWS_S3_CUSTOM_DOMAIN}/media/"
+#         STATIC_URL = f"https://{AWS_S3_CUSTOM_DOMAIN}/static/"
+#     else:
+#         # Fallback to bucket domain
+#         _s3_base = f"https://{AWS_STORAGE_BUCKET_NAME}.s3.amazonaws.com"
+#         MEDIA_URL = f"{_s3_base}/media/"
+#         STATIC_URL = f"{_s3_base}/static/"
 
-    DEFAULT_FILE_STORAGE = 'storages.backends.s3boto3.S3Boto3Storage'
-    STATICFILES_STORAGE = 'storages.backends.s3boto3.S3StaticStorage'
+#     DEFAULT_FILE_STORAGE = 'storages.backends.s3boto3.S3Boto3Storage'
+#     STATICFILES_STORAGE = 'storages.backends.s3boto3.S3StaticStorage'
 
-    # Location prefixes inside the bucket
-    AWS_LOCATION = ''
-    AWS_MEDIA_LOCATION = 'media'
-    AWS_STATIC_LOCATION = 'static'
+#     # Location prefixes inside the bucket
+#     AWS_LOCATION = ''
+#     AWS_MEDIA_LOCATION = 'media'
+#     AWS_STATIC_LOCATION = 'static'
