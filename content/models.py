@@ -96,7 +96,7 @@ class LessonResource(TimestampedModel):
 	description = models.TextField(blank=True, default="")
 	type = models.CharField(max_length=20, choices=[(t.value, t.value) for t in ContentTypeEnum])
 	status = models.CharField(max_length=30, choices=[(s.value, s.value) for s in StatusEnum], default=StatusEnum.DRAFT.value)
-	resource_url = models.URLField(max_length=500)
+	resource = models.FileField(upload_to='lesson_resources/')
 	created_by = models.ForeignKey('accounts.User', on_delete=models.SET_NULL, null=True, blank=True, related_name='created_lessons')
 	duration_minutes = models.PositiveIntegerField(null=True, blank=True, help_text="Estimated duration in minutes")
 
