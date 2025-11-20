@@ -1259,6 +1259,9 @@ class KidsViewSet(viewsets.ViewSet):
 			.order_by('due_at', 'title')
 		)
 
+		now = timezone.now()
+		in_5 = now + timedelta(days=5)
+
 		# Prefetch existing solutions/grades to avoid per-row queries
 		general_solution_map = {
 			row['assessment_id']: row['id']
@@ -1275,25 +1278,64 @@ class KidsViewSet(viewsets.ViewSet):
 		)
 
 		items = []
+		total = 0
+		pending = 0
+		due_soon = 0
+		overdue = 0
+		submitted = 0
+
 		for ga in general_qs:
+			status = "submitted" if ga.id in general_solution_map else "pending"
+			total += 1
+			if status == "submitted":
+				submitted += 1
+			else:
+				pending += 1
+				if ga.due_at:
+					if ga.due_at < now:
+						overdue += 1
+					elif now <= ga.due_at <= in_5:
+						due_soon += 1
+
 			items.append({
 				"id": ga.id,
 				"title": ga.title,
 				"type": "general",
 				"due_at": ga.due_at.isoformat() if ga.due_at else None,
-				"status": "submitted" if ga.id in general_solution_map else "pending",
+				"status": status,
 			})
+
 		for la in lesson_qs:
+			status = "submitted" if la.id in lesson_grade_ids else "pending"
+			total += 1
+			if status == "submitted":
+				submitted += 1
+			else:
+				pending += 1
+				if la.due_at:
+					if la.due_at < now:
+						overdue += 1
+					elif now <= la.due_at <= in_5:
+						due_soon += 1
+
 			items.append({
 				"id": la.id,
 				"title": la.title,
 				"type": "lesson",
 				"lesson_id": la.lesson_id,
 				"due_at": la.due_at.isoformat() if la.due_at else None,
-				"status": "submitted" if la.id in lesson_grade_ids else "pending",
+				"status": status,
 			})
 
-		return Response({"assignments": items})
+		stats = {
+			"total": total,
+			"pending": pending,
+			"due_soon": due_soon,
+			"overdue": overdue,
+			"submitted": submitted,
+		}
+
+		return Response({"assignments": items, "stats": stats})
 
 	@extend_schema(
 		description="List quizzes (assessments) available for the student's grade.",
