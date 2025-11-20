@@ -1263,13 +1263,11 @@ class KidsViewSet(viewsets.ViewSet):
 		in_5 = now + timedelta(days=5)
 
 		# Prefetch existing solutions/grades to avoid per-row queries
-		general_solution_map = {
-			row['assessment_id']: row['id']
-			for row in AssessmentSolution.objects.filter(
-				assessment__in=general_qs,
-				student=student,
-			).values('id', 'assessment_id')
-		}
+		general_solutions = list(
+			AssessmentSolution.objects
+			.filter(assessment__in=general_qs, student=student)
+		)
+		general_solution_map = {sol.assessment_id: sol for sol in general_solutions}
 		lesson_grade_ids = set(
 			LessonAssessmentGrade.objects.filter(
 				lesson_assessment__in=lesson_qs,
@@ -1285,7 +1283,8 @@ class KidsViewSet(viewsets.ViewSet):
 		submitted = 0
 
 		for ga in general_qs:
-			status = "submitted" if ga.id in general_solution_map else "pending"
+			solution_obj = general_solution_map.get(ga.id)
+			status = "submitted" if solution_obj is not None else "pending"
 			total += 1
 			if status == "submitted":
 				submitted += 1
@@ -1324,7 +1323,8 @@ class KidsViewSet(viewsets.ViewSet):
 				"title": la.title,
 				"instructions": la.instructions,
 				"type": "lesson",
-				"lesson_id": la.lesson_id,
+				"status": status,
+				"solution": AssessmentSolutionSerializer(solution_obj).data if solution_obj else None,
 				"due_at": la.due_at.isoformat() if la.due_at else None,
 				"status": status,
 			})
