@@ -1582,7 +1582,8 @@ class KidsViewSet(viewsets.ViewSet):
 		description=(
 			"Submit a solution for an assessment or assignment. "
 			"Send either general_id (for GeneralAssessment) or lesson_id (for LessonAssessment), "
-			"plus optional text solution and/or file attachment."
+			"plus optional text solution and/or file attachment.\n"
+			" \n\nBody params: \n- general_id: ID of GeneralAssessment (optional)\n- lesson_id: ID of LessonAssessment (optional)\n- solution: free-text answer (optional)\n- attachment: file upload (optional)"
 		),
 		request=None,
 		responses={
