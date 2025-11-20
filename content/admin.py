@@ -42,7 +42,7 @@ class TakeLessonAdmin(admin.ModelAdmin):
 
 @admin.register(GeneralAssessment)
 class GeneralAssessmentAdmin(admin.ModelAdmin):
-	list_display = ("id", "title", "given_by", "marks", "created_at")
+	list_display = ("id", "title", 'type', "given_by", "marks", "created_at")
 	list_filter = ("given_by",)
 	search_fields = ("title",)
 
@@ -55,7 +55,7 @@ class GeneralAssessmentGradeAdmin(admin.ModelAdmin):
 
 @admin.register(LessonAssessment)
 class LessonAssessmentAdmin(admin.ModelAdmin):
-	list_display = ("id", "title", "lesson", "given_by", "marks", "created_at")
+	list_display = ("id", "title", 'type', "lesson", "given_by", "marks", "created_at")
 	list_filter = ("lesson", "given_by")
 	search_fields = ("title",)
 

@@ -3,6 +3,7 @@ from django.db.models import Q
 from django.conf import settings
 
 from elearncore.sysutils.constants import (
+	AssessmentType,
 	ContentType as ContentTypeEnum,
 	GameType,
 	Status as StatusEnum,
@@ -128,6 +129,7 @@ class GeneralAssessment(TimestampedModel):
 	title = models.CharField(max_length=200)
 	given_by = models.ForeignKey('accounts.Teacher', on_delete=models.SET_NULL, null=True, related_name='general_assessments')
 	instructions = models.TextField(blank=True, default="")
+	type = models.CharField(max_length=30, choices=[(t.value, t.value) for t in AssessmentType], default=AssessmentType.ASSIGNMENT.value)
 	marks = models.FloatField(default=0.0)
 	due_at = models.DateTimeField(null=True, blank=True)
 	# Optional grade scoping; when null, assessment is global
@@ -159,6 +161,7 @@ class LessonAssessment(TimestampedModel):
 	lesson = models.ForeignKey(LessonResource, on_delete=models.CASCADE, related_name='assessments')
 	given_by = models.ForeignKey('accounts.Teacher', on_delete=models.SET_NULL, null=True, related_name='lesson_assessments')
 	title = models.CharField(max_length=200)
+	type = models.CharField(max_length=30, choices=[(t.value, t.value) for t in AssessmentType], default=AssessmentType.QUIZ.value)
 	instructions = models.TextField(blank=True, default="")
 	marks = models.FloatField(default=0.0)
 	due_at = models.DateTimeField(null=True, blank=True)

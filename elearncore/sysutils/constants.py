@@ -73,3 +73,8 @@ class GameType(Enum):
     SHAPE = "SHAPE"
     COLOR = "COLOR"
     NUMBER = "NUMBER"
+
+class AssessmentType(Enum):
+    QUIZ = "QUIZ"
+    ASSIGNMENT = "ASSIGNMENT"
+    TRIAL = "TRIAL"
