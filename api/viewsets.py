@@ -23,7 +23,7 @@ from content.models import (
 from forum.models import Chat
 from django.core.cache import cache
 from content.serializers import (
-	SubjectSerializer, TopicSerializer, PeriodSerializer, LessonResourceSerializer, TakeLessonSerializer,
+	AssessmentSolutionSerializer, SubjectSerializer, TopicSerializer, PeriodSerializer, LessonResourceSerializer, TakeLessonSerializer,
 	GameSerializer,
 )
 from agentic.models import AIRecommendation, AIAbuseReport
@@ -1258,6 +1258,21 @@ class KidsViewSet(viewsets.ViewSet):
 			.order_by('due_at', 'title')
 		)
 
+		# Prefetch existing solutions/grades to avoid per-row queries
+		general_solution_map = {
+			row['assessment_id']: row['id']
+			for row in AssessmentSolution.objects.filter(
+				assessment__in=general_qs,
+				student=student,
+			).values('id', 'assessment_id')
+		}
+		lesson_grade_ids = set(
+			LessonAssessmentGrade.objects.filter(
+				lesson_assessment__in=lesson_qs,
+				student=student,
+			).values_list('lesson_assessment_id', flat=True)
+		)
+
 		items = []
 		for ga in general_qs:
 			items.append({
@@ -1265,6 +1280,7 @@ class KidsViewSet(viewsets.ViewSet):
 				"title": ga.title,
 				"type": "general",
 				"due_at": ga.due_at.isoformat() if ga.due_at else None,
+				"status": "submitted" if ga.id in general_solution_map else "pending",
 			})
 		for la in lesson_qs:
 			items.append({
@@ -1273,6 +1289,7 @@ class KidsViewSet(viewsets.ViewSet):
 				"type": "lesson",
 				"lesson_id": la.lesson_id,
 				"due_at": la.due_at.isoformat() if la.due_at else None,
+				"status": "submitted" if la.id in lesson_grade_ids else "pending",
 			})
 
 		return Response({"assignments": items})
