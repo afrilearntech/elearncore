@@ -18,7 +18,7 @@ from elearncore.sysutils.constants import UserRole, Status as StatusEnum
 from content.models import (
 	Subject, Topic, Period, LessonResource, TakeLesson, LessonAssessment,
 	GeneralAssessment, GeneralAssessmentGrade, LessonAssessmentGrade,
-	GameModel, Activity,
+	GameModel, Activity, AssessmentSolution,
 )
 from forum.models import Chat
 from django.core.cache import cache
@@ -1577,6 +1577,74 @@ class KidsViewSet(viewsets.ViewSet):
 			"lesson_grades": lesson_payload,
 			"general_grades": general_payload,
 		})
+
+	@extend_schema(
+		description=(
+			"Submit a solution for an assessment or assignment. "
+			"Send either general_id (for GeneralAssessment) or lesson_id (for LessonAssessment), "
+			"plus optional text solution and/or file attachment."
+		),
+		request=None,
+		responses={
+			200: OpenApiResponse(description="Solution submitted or updated"),
+		},
+	)
+	@action(detail=False, methods=['post'], url_path='submit-solution')
+	def submit_solution(self, request):
+		"""Allow a kid to submit a solution for an assessment.
+
+		Body params:
+		- general_id: ID of GeneralAssessment (optional)
+		- lesson_id: ID of LessonAssessment (optional)
+		- solution: free-text answer (optional)
+		- attachment: file upload (optional)
+
+		Exactly one of general_id or lesson_id must be provided. Currently,
+		this implementation stores solutions only for GeneralAssessment.
+		"""
+		user: User = request.user
+		student = getattr(user, 'student', None)
+		if not student:
+			return Response({"detail": "Student profile required."}, status=403)
+
+		general_id = request.data.get('general_id')
+		lesson_id = request.data.get('lesson_id')
+		if bool(general_id) == bool(lesson_id):
+			return Response({"detail": "Provide exactly one of general_id or lesson_id."}, status=400)
+
+		text_solution = request.data.get('solution', '')
+		attachment = request.FILES.get('attachment')
+
+		if general_id:
+			assessment = GeneralAssessment.objects.filter(id=general_id).first()
+			if not assessment:
+				return Response({"detail": "General assessment not found."}, status=404)
+
+			# Create or update AssessmentSolution for this student/assessment
+			solution_obj, created = AssessmentSolution.objects.get_or_create(
+				assessment=assessment,
+				student=student,
+				defaults={
+					'solution': text_solution or "",
+				}
+			)
+			if not created:
+				if text_solution:
+					solution_obj.solution = text_solution
+				if attachment is not None:
+					solution_obj.attachment = attachment
+				solution_obj.save()
+			elif attachment is not None:
+				solution_obj.attachment = attachment
+				solution_obj.save()
+
+			return Response({
+				"detail": "Solution submitted.",
+				"solution_id": solution_obj.id,
+			})
+
+		# Placeholder for future LessonAssessment solution handling
+		return Response({"detail": "Lesson assessment solutions are not yet supported."}, status=400)
 
 
 class LookupPagination(filters.BaseFilterBackend):
