@@ -1303,6 +1303,7 @@ class KidsViewSet(viewsets.ViewSet):
 				"type": "general",
 				"due_at": ga.due_at.isoformat() if ga.due_at else None,
 				"status": status,
+				"solution": AssessmentSolutionSerializer(solution_obj).data if solution_obj else None,
 			})
 
 		for la in lesson_qs:
