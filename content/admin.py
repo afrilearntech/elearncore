@@ -2,7 +2,7 @@ from django.contrib import admin
 
 from .models import (
 	Objective, Subject, Topic, Period, LessonResource, TakeLesson,
-	GeneralAssessment, GeneralAssessmentGrade,
+	GeneralAssessment, GeneralAssessmentGrade, AssessmentSolution,
 	LessonAssessment, LessonAssessmentGrade,
 	Question, Option, GameModel,
 )
@@ -53,8 +53,14 @@ class GeneralAssessmentAdmin(admin.ModelAdmin):
 
 @admin.register(GeneralAssessmentGrade)
 class GeneralAssessmentGradeAdmin(admin.ModelAdmin):
-	list_display = ("id", "assessment", "student", "score", "created_at")
+	list_display = ("id", "assessment", "student", "solution", "score", "created_at")
 	list_filter = ("assessment",)
+
+
+@admin.register(AssessmentSolution)
+class AssessmentSolutionAdmin(admin.ModelAdmin):
+	list_display = ("id", "assessment", "student", "submitted_at", "created_at")
+	list_filter = ("assessment", "student")
 
 
 @admin.register(LessonAssessment)

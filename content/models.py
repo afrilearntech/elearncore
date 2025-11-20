@@ -144,10 +144,20 @@ class GeneralAssessment(TimestampedModel):
 			models.Index(fields=["grade", "due_at"]),
 		]
 
+class AssessmentSolution(TimestampedModel):
+	assessment = models.ForeignKey(GeneralAssessment, on_delete=models.CASCADE, related_name='solutions')
+	student = models.ForeignKey('accounts.Student', on_delete=models.CASCADE, related_name='assessment_solutions')
+	solution = models.TextField(blank=True, default="")
+	attachment = models.FileField(upload_to='assessment_solutions/')
+	submitted_at = models.DateTimeField(auto_now_add=True)
+
+	def __str__(self) -> str:
+		return f"Solution by {getattr(self.student.profile, 'name', 'Student')} for {self.assessment.title}"
 
 class GeneralAssessmentGrade(TimestampedModel):
 	assessment = models.ForeignKey(GeneralAssessment, on_delete=models.CASCADE, related_name='grades')
 	student = models.ForeignKey('accounts.Student', on_delete=models.CASCADE, related_name='general_assessment_grades')
+	solution = models.OneToOneField('AssessmentSolution', on_delete=models.SET_NULL, null=True, blank=True, related_name='grade')
 	score = models.FloatField()
 
 	class Meta:

@@ -4,7 +4,7 @@ from .models import (
 	Subject, Topic, Period, LessonResource, TakeLesson,
 	GeneralAssessment, GeneralAssessmentGrade,
 	LessonAssessment, LessonAssessmentGrade,
-	Question, Option, GameModel, Objective,
+	Question, Option, GameModel, Objective, AssessmentSolution,
 )
 
 
@@ -97,11 +97,20 @@ class GeneralAssessmentSerializer(serializers.ModelSerializer):
 		read_only_fields = ['created_at', 'updated_at']
 
 
+class AssessmentSolutionSerializer(serializers.ModelSerializer):
+	class Meta:
+		model = AssessmentSolution
+		fields = ['id', 'assessment', 'student', 'solution', 'attachment', 'submitted_at', 'created_at', 'updated_at']
+		read_only_fields = ['submitted_at', 'created_at', 'updated_at']
+
+
 class GeneralAssessmentGradeSerializer(serializers.ModelSerializer):
+	solution = AssessmentSolutionSerializer(read_only=True)
+
 	class Meta:
 		model = GeneralAssessmentGrade
-		fields = ['id', 'assessment', 'student', 'score', 'created_at', 'updated_at']
-		read_only_fields = ['created_at', 'updated_at']
+		fields = ['id', 'assessment', 'student', 'solution', 'score', 'created_at', 'updated_at']
+		read_only_fields = ['created_at', 'updated_at', 'solution']
 
 
 class LessonAssessmentSerializer(serializers.ModelSerializer):
