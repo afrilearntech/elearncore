@@ -1300,6 +1300,7 @@ class KidsViewSet(viewsets.ViewSet):
 			items.append({
 				"id": ga.id,
 				"title": ga.title,
+				"instructions": ga.instructions,
 				"type": "general",
 				"due_at": ga.due_at.isoformat() if ga.due_at else None,
 				"status": status,
@@ -1321,6 +1322,7 @@ class KidsViewSet(viewsets.ViewSet):
 			items.append({
 				"id": la.id,
 				"title": la.title,
+				"instructions": la.instructions,
 				"type": "lesson",
 				"lesson_id": la.lesson_id,
 				"due_at": la.due_at.isoformat() if la.due_at else None,
