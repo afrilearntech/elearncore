@@ -1181,7 +1181,7 @@ class KidsViewSet(viewsets.ViewSet):
 		# Subjects for the student's grade
 		subjects_qs = Subject.objects.filter(grade=student.grade).order_by('name')
 		subjects_payload = [
-			{"id": s.id, "name": s.name, "grade": s.grade}
+			{"id": s.id, "name": s.name, "grade": s.grade, "thumbnail": s.thumbnail.url if s.thumbnail else None}
 			for s in subjects_qs
 		]
 
