@@ -1197,6 +1197,8 @@ class KidsViewSet(viewsets.ViewSet):
 				"id": l.id,
 				"title": l.title,
 				"subject_id": l.subject_id,
+				"resource_type": l.type,
+				"resource": l.resource.url if l.resource else None,
 				"subject_name": getattr(l.subject, 'name', None),
 			}
 			for l in lessons_qs
