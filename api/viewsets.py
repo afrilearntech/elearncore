@@ -1201,6 +1201,127 @@ class KidsViewSet(viewsets.ViewSet):
 		POINT_MULTIPLIER = 25
 		points = longest_streak * POINT_MULTIPLIER
 
+		# --- Overall performance score for ranking ---
+		# Use combination of distinct lessons taken and average assessment score.
+		from django.db.models import Avg, Count as DjangoCount
+		my_lessons_taken = lessons_completed
+		lesson_scores = list(
+			LessonAssessmentGrade.objects
+			.filter(student=student)
+			.values_list('score', flat=True)
+		)
+		general_scores = list(
+			GeneralAssessmentGrade.objects
+			.filter(student=student)
+			.values_list('score', flat=True)
+		)
+		all_scores = lesson_scores + general_scores
+		avg_score = float(sum(all_scores) / len(all_scores)) if all_scores else 0.0
+		# Simple weighted score: lessons*1 + avg_score*2
+		my_perf_score = my_lessons_taken + (avg_score * 2.0)
+
+		def _compute_rank(base_qs, student_field='student'):
+			"""Return (rank, total) within a queryset aggregated by student.
+
+			base_qs should be a queryset of TakeLesson or Student-related rows
+			within a given scope (school/district/county).
+			"""
+			# Aggregate lessons taken per student
+			agg = (
+				TakeLesson.objects
+				.filter(**base_qs)
+				.values(student_field)
+				.annotate(lessons=DjangoCount('id', distinct=True))
+			)
+			if not agg.exists():
+				return None, 0
+
+			student_ids = [row[student_field] for row in agg]
+			lessons_by_student = {row[student_field]: row['lessons'] for row in agg}
+
+			# Average scores per student
+			lesson_scores_by_student = {
+				row['student']: row['avg']
+				for row in (
+					LessonAssessmentGrade.objects
+					.filter(student_id__in=student_ids)
+					.values('student')
+					.annotate(avg=Avg('score'))
+				)
+			}
+			general_scores_by_student = {
+				row['student']: row['avg']
+				for row in (
+					GeneralAssessmentGrade.objects
+					.filter(student_id__in=student_ids)
+					.values('student')
+					.annotate(avg=Avg('score'))
+				)
+			}
+
+			perf_scores = []
+			for sid in student_ids:
+				lessons = lessons_by_student.get(sid, 0) or 0
+				ls = lesson_scores_by_student.get(sid)
+				gs = general_scores_by_student.get(sid)
+				if ls is not None and gs is not None:
+					avg = float(ls + gs) / 2.0
+				elif ls is not None:
+					avg = float(ls)
+				elif gs is not None:
+					avg = float(gs)
+				else:
+					avg = 0.0
+				perf = lessons + (avg * 2.0)
+				perf_scores.append((sid, perf))
+
+			# Sort by performance descending; compute 1-based rank
+			perf_scores.sort(key=lambda x: x[1], reverse=True)
+			rank = None
+			for idx, (sid, score) in enumerate(perf_scores, start=1):
+				if sid == student.id:
+					rank = idx
+					break
+			return rank, len(perf_scores)
+
+		# School rank (if school attached)
+		school_rank = None
+		if getattr(student, 'school_id', None):
+			# Filter TakeLesson by students in same school
+			base = {'student__school_id': student.school_id}
+			school_rank_val, school_total = _compute_rank(base)
+			if school_rank_val is not None:
+				school_rank = {
+					'rank': school_rank_val,
+					'out_of': school_total,
+				}
+
+		# District rank (if district attached)
+		district_rank = None
+		student_district_id = getattr(getattr(student.school, 'district', None), 'id', None) if getattr(student, 'school', None) else None
+		if student_district_id:
+			base = {'student__school__district_id': student_district_id}
+			dist_rank_val, dist_total = _compute_rank(base)
+			if dist_rank_val is not None:
+				district_rank = {
+					'rank': dist_rank_val,
+					'out_of': dist_total,
+				}
+
+		# County rank (if county attached)
+		county_rank = None
+		student_county_id = None
+		if getattr(student, 'school', None) and getattr(student.school, 'district', None) and getattr(student.school.district, 'county', None):
+			student_county_id = student.school.district.county_id
+		if student_county_id:
+			base = {'student__school__district__county_id': student_county_id}
+			county_rank_val, county_total = _compute_rank(base)
+			if county_rank_val is not None:
+				county_rank = {
+					'rank': county_rank_val,
+					'out_of': county_total,
+				}
+
 		# Subject completion: percentage of lessons taken per subject
 		# Total lessons per subject (for student's grade)
 		all_lessons_qs = (
@@ -1236,6 +1357,9 @@ class KidsViewSet(viewsets.ViewSet):
 			"level": level,
 			"points": points,
 			"subjects": subjects_payload,
+			"rank_in_school": school_rank,
+			"rank_in_district": district_rank,
+			"rank_in_county": county_rank,
 		})
 
 	@extend_schema(
