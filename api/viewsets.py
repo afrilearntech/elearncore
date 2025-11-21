@@ -1142,6 +1142,103 @@ class KidsViewSet(viewsets.ViewSet):
 		})
 
 	@extend_schema(
+		description="Progress garden view showing overall progress and per-subject completion.",
+		responses={200: None},
+	)
+	@action(detail=False, methods=['get'], url_path='progressgarden')
+	def progress_garden(self, request):
+		"""Return progress metrics for the student in a garden-style view.
+
+		Includes:
+		- lessons_completed: total distinct lessons taken
+		- longest_streak: longest consecutive days with at least one lesson taken
+		- level: student's current grade
+		- points: longest_streak multiplied by the same constant used in dashboard
+		- subjects: list of subjects with completion percentage and thumbnail
+		"""
+		user: User = request.user
+		student = getattr(user, 'student', None)
+		if not student:
+			return Response({"detail": "Student profile required."}, status=403)
+
+		# All lessons the student has taken (distinct per lesson)
+		taken_qs = (
+			TakeLesson.objects
+			.filter(student=student)
+			.select_related('lesson__subject')
+		)
+
+		# Lessons completed count
+		lessons_completed = (
+			taken_qs
+			.values('lesson_id')
+			.distinct()
+			.count()
+		)
+
+		# Longest streak: consecutive days with any taken lesson
+		date_list = list(
+			taken_qs
+			.annotate(day=TruncDate('created_at'))
+			.values_list('day', flat=True)
+			.distinct()
+		)
+		date_list.sort()
+		longest_streak = 0
+		current_streak = 0
+		prev_day = None
+		for day in date_list:
+			if prev_day is None or (day - prev_day).days == 1:
+				current_streak += 1
+			else:
+				current_streak = 1
+			prev_day = day
+			if current_streak > longest_streak:
+				longest_streak = current_streak
+
+		# Level and points (use same POINT_MULTIPLIER as dashboard)
+		level = student.grade
+		POINT_MULTIPLIER = 25
+		points = longest_streak * POINT_MULTIPLIER
+
+		# Subject completion: percentage of lessons taken per subject
+		# Total lessons per subject (for student's grade)
+		all_lessons_qs = (
+			LessonResource.objects
+			.filter(subject__grade=student.grade)
+			.select_related('subject')
+		)
+		lessons_per_subject = {}
+		for row in all_lessons_qs.values('subject_id').annotate(c=models.Count('id')):
+			lessons_per_subject[row['subject_id']] = row['c']
+
+		# Taken lessons per subject
+		taken_per_subject = {}
+		for row in taken_qs.values('lesson__subject_id').annotate(c=models.Count('lesson_id', distinct=True)):
+			taken_per_subject[row['lesson__subject_id']] = row['c']
+
+		subjects = Subject.objects.filter(grade=student.grade).order_by('name')
+		subjects_payload = []
+		for subj in subjects:
+			total = int(lessons_per_subject.get(subj.id, 0))
+			taken = int(taken_per_subject.get(subj.id, 0))
+			percent = int(round((taken / total) * 100)) if total else 0
+			subjects_payload.append({
+				"id": subj.id,
+				"name": subj.name,
+				"thumbnail": subj.thumbnail.url if getattr(subj, 'thumbnail', None) else None,
+				"percent_complete": percent,
+			})
+
+		return Response({
+			"lessons_completed": lessons_completed,
+			"longest_streak": longest_streak,
+			"level": level,
+			"points": points,
+			"subjects": subjects_payload,
+		})
+
+	@extend_schema(
 		description="Subjects and lessons for the student's grade (kids view).",
 		responses={200: None},
 		examples=[
