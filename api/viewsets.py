@@ -1354,7 +1354,7 @@ class KidsViewSet(viewsets.ViewSet):
 		return Response({
 			"lessons_completed": lessons_completed,
 			"longest_streak": longest_streak,
-			"level": level,
+			"level": level.replace('_', ' '),
 			"points": points,
 			"subjects": subjects_payload,
 			"rank_in_school": school_rank,
