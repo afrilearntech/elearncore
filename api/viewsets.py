@@ -1669,6 +1669,63 @@ class KidsViewSet(viewsets.ViewSet):
 
 	@extend_schema(
 		description=(
+			"Record that the student has played a game. "
+			"Pass a game_id in the body; this will upsert a GamePlay row and "
+			"log a play_game activity."
+		),
+		request=None,
+		responses={200: OpenApiResponse(description="Game play recorded.")},
+	)
+	@action(detail=False, methods=['post'], url_path='play-game')
+	def play_game(self, request):
+		"""Mark a game as played for the current student.
+
+		Body params:
+		- game_id: ID of GameModel to mark as played.
+		"""
+		user: User = request.user
+		student = getattr(user, 'student', None)
+		if not student:
+			return Response({"detail": "Student profile required."}, status=403)
+
+		game_id = request.data.get('game_id')
+		if not game_id:
+			return Response({"detail": "game_id is required."}, status=400)
+		try:
+			game_id_int = int(game_id)
+		except (TypeError, ValueError):
+			return Response({"detail": "game_id must be an integer."}, status=400)
+
+		game = GameModel.objects.filter(id=game_id_int).first()
+		if not game:
+			return Response({"detail": "Game not found."}, status=404)
+
+		# Upsert GamePlay entry for this student/game
+		GamePlay.objects.update_or_create(
+			student=student,
+			game=game,
+			defaults={},
+		)
+
+		# Optionally log as an Activity for richer feeds/analytics
+		Activity.objects.create(
+			user=user,
+			type="play_game",
+			description=f"Played game '{game.name}'",
+			metadata={"game_id": game.id, "game_type": game.type},
+		)
+
+		return Response({
+			"detail": "Game play recorded.",
+			"game": {
+				"id": game.id,
+				"name": game.name,
+				"type": game.type,
+			},
+		})
+
+	@extend_schema(
+		description=(
 			"Get the next game for the student. Returns the first unplayed game "
 			"(ordered by name). If the student has played all available games, "
 			"returns a congratulatory message instead."
