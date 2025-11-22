@@ -36,6 +36,25 @@ class GameModel(TimestampedModel):
 		return self.name
 
 
+class GamePlay(TimestampedModel):
+	"""Track when a student plays a particular game.
+
+	One row per student/game pair, updated with latest play timestamp.
+	"""
+	student = models.ForeignKey('accounts.Student', on_delete=models.CASCADE, related_name='played_games')
+	game = models.ForeignKey(GameModel, on_delete=models.CASCADE, related_name='plays')
+	last_played_at = models.DateTimeField(auto_now=True)
+
+	class Meta:
+		unique_together = ("student", "game")
+		indexes = [
+			models.Index(fields=["student", "game"]),
+		]
+
+	def __str__(self) -> str:
+		return f"{getattr(self.student.profile, 'name', 'Student')} -> {self.game.name}"
+
+
 class Objective(TimestampedModel):
 	"""A reusable learning objective that can be linked to subjects."""
 	text = models.TextField()

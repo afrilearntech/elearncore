@@ -18,7 +18,7 @@ from elearncore.sysutils.constants import UserRole, Status as StatusEnum
 from content.models import (
 	Subject, Topic, Period, LessonResource, TakeLesson, LessonAssessment,
 	GeneralAssessment, GeneralAssessmentGrade, LessonAssessmentGrade,
-	GameModel, Activity, AssessmentSolution,
+	GameModel, Activity, AssessmentSolution, GamePlay,
 )
 from forum.models import Chat
 from django.core.cache import cache
@@ -1648,10 +1648,21 @@ class KidsViewSet(viewsets.ViewSet):
 		if not student:
 			return Response({"detail": "Student profile required."}, status=403)
 
-		# GameModel currently has no grade field, so return all.
+		# GameModel currently has limited grade linkage, but we can still
+		# compute a simple played/new status per game for this student.
 		games_qs = GameModel.objects.all().order_by('name')
+		played_ids = set(
+			GamePlay.objects
+			.filter(student=student, game__in=games_qs)
+			.values_list('game_id', flat=True)
+		)
 		payload = [
-			{"id": g.id, "name": g.name, "type": g.type}
+			{
+				"id": g.id,
+				"name": g.name,
+				"type": g.type,
+				"status": "played" if g.id in played_ids else "new",
+			}
 			for g in games_qs
 		]
 		return Response({"games": payload})
