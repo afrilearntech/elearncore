@@ -1413,6 +1413,12 @@ class KidsViewSet(viewsets.ViewSet):
 			.select_related('subject')
 			.order_by('subject__name', 'title')
 		)
+		# Determine which lessons the student has already taken
+		taken_lesson_ids = set(
+			TakeLesson.objects
+			.filter(student=student)
+			.values_list('lesson_id', flat=True)
+		)
 		lessons_payload = [
 			{
 				"id": l.id,
@@ -1422,6 +1428,7 @@ class KidsViewSet(viewsets.ViewSet):
 				"thumbnail": l.thumbnail.url if l.thumbnail else None,
 				"resource": l.resource.url if l.resource else None,
 				"subject_name": getattr(l.subject, 'name', None),
+				"status": "taken" if l.id in taken_lesson_ids else "new",
 			}
 			for l in lessons_qs
 		]
