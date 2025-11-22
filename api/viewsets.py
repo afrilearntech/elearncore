@@ -1668,6 +1668,61 @@ class KidsViewSet(viewsets.ViewSet):
 		return Response({"games": payload})
 
 	@extend_schema(
+		description=(
+			"Get the next game for the student. Returns the first unplayed game "
+			"(ordered by name). If the student has played all available games, "
+			"returns a congratulatory message instead."
+		),
+		responses={200: None},
+	)
+	@action(detail=False, methods=['get'], url_path='next-game')
+	def next_game(self, request):
+		"""Return the next unplayed game for the student.
+
+		If all games have been played, return a congratulatory message.
+		"""
+		user: User = request.user
+		student = getattr(user, 'student', None)
+		if not student:
+			return Response({"detail": "Student profile required."}, status=403)
+
+		games_qs = GameModel.objects.all().order_by('name')
+		if not games_qs.exists():
+			return Response({
+				"detail": "No games are available yet. Check back soon!",
+			})
+
+		played_ids = set(
+			GamePlay.objects
+			.filter(student=student, game__in=games_qs)
+			.values_list('game_id', flat=True)
+		)
+
+		# Find first unplayed game in the ordered list
+		next_game_obj = None
+		for g in games_qs:
+			if g.id not in played_ids:
+				next_game_obj = g
+				break
+
+		if next_game_obj is None:
+			# All games have been played by this student
+			return Response({
+				"detail": "Amazing! You've played all the games available. New challenges are coming soon!",
+				"all_played": True,
+			})
+
+		return Response({
+			"all_played": False,
+			"game": {
+				"id": next_game_obj.id,
+				"name": next_game_obj.name,
+				"type": next_game_obj.type,
+				"status": "new",
+			},
+		})
+
+	@extend_schema(
 		description="List all assessments (general + lesson) available for the student's grade.",
 		responses={200: None},
 		examples=[
