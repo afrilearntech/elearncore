@@ -377,6 +377,36 @@ class GameViewSet(viewsets.ModelViewSet):
 				metadata={"game_id": game.id, "game_type": game.type},
 			)
 
+	def list(self, request, *args, **kwargs):
+		"""List games and, for students, include a played/new status.
+
+		If the authenticated user has a student profile, each game in the
+		response will include a `status` field: "played" if a GamePlay record
+		exists for that student/game, otherwise "new".
+		"""
+		response = super().list(request, *args, **kwargs)
+		user: User = request.user
+		student = getattr(user, 'student', None)
+		if not student or not isinstance(response.data, list):
+			return response
+
+		# Collect game IDs from the paginated/filtered result set
+		game_ids = [item.get('id') for item in response.data if isinstance(item, dict) and 'id' in item]
+		if not game_ids:
+			return response
+
+		played_ids = set(
+			GamePlay.objects
+			.filter(student=student, game_id__in=game_ids)
+			.values_list('game_id', flat=True)
+		)
+
+		for item in response.data:
+			if isinstance(item, dict) and 'id' in item:
+				item['status'] = 'played' if item['id'] in played_ids else 'new'
+
+		return response
+
 
 class OnboardingViewSet(viewsets.ViewSet):
 	"""Endpoints to onboard users step-by-step.
