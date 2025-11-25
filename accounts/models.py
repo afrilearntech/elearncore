@@ -6,7 +6,7 @@ from django.db import models
 from django.utils import timezone
 
 from django.conf import settings
-from elearncore.sysutils.constants import UserRole, StudentLevel
+from elearncore.sysutils.constants import UserRole, StudentLevel, Status as StatusEnum
 
 from .manager import AccountManager
 
@@ -72,6 +72,8 @@ class OTP(TimestampedModel):
 # Geography and School structure
 class County(TimestampedModel):
     name = models.CharField(max_length=100, unique=True)
+    status = models.CharField(max_length=30, choices=[(s.value, s.value) for s in StatusEnum], default=StatusEnum.PENDING.value)
+    moderation_comment = models.TextField(blank=True, default="")
 
     def __str__(self) -> str:
         return self.name
@@ -80,6 +82,8 @@ class County(TimestampedModel):
 class District(TimestampedModel):
     county = models.ForeignKey(County, on_delete=models.CASCADE, related_name="districts")
     name = models.CharField(max_length=100)
+    status = models.CharField(max_length=30, choices=[(s.value, s.value) for s in StatusEnum], default=StatusEnum.PENDING.value)
+    moderation_comment = models.TextField(blank=True, default="")
 
     class Meta:
         unique_together = ("county", "name")
@@ -91,6 +95,8 @@ class District(TimestampedModel):
 class School(TimestampedModel):
     district = models.ForeignKey(District, on_delete=models.CASCADE, related_name="schools")
     name = models.CharField(max_length=150)
+    status = models.CharField(max_length=30, choices=[(s.value, s.value) for s in StatusEnum], default=StatusEnum.PENDING.value)
+    moderation_comment = models.TextField(blank=True, default="")
 
     class Meta:
         unique_together = ("district", "name")

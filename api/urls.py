@@ -2,6 +2,7 @@ from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 
 from .viewsets import (
+	ContentViewSet,
 	SubjectViewSet,
 	TopicViewSet,
 	PeriodViewSet,
@@ -41,6 +42,7 @@ router.register(r'admin/counties', AdminCountyViewSet, basename='admin-counties'
 router.register(r'admin/districts', AdminDistrictViewSet, basename='admin-districts')
 router.register(r'admin/schools', AdminSchoolViewSet, basename='admin-schools')
 router.register(r'games', GameViewSet, basename='game')
+router.register(r'content', ContentViewSet, basename='content')
 
 urlpatterns = [
 	path('', include(router.urls)),

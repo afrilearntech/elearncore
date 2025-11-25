@@ -31,6 +31,7 @@ class GameModel(TimestampedModel):
 	type = models.CharField(max_length=50, choices=[(gt.value, gt.value) for gt in GameType])
 	image = models.ImageField(upload_to='word_games/', null=True, blank=True)
 	created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='created_games')
+	status = models.CharField(max_length=30, choices=[(s.value, s.value) for s in StatusEnum], default=StatusEnum.DRAFT.value)
 
 	def __str__(self) -> str:
 		return self.name
@@ -78,6 +79,7 @@ class Subject(TimestampedModel):
 
 	# Allow teachers to be linked to one or more subjects
 	teachers = models.ManyToManyField('accounts.Teacher', related_name='subjects', blank=True)
+	moderation_comment = models.TextField(blank=True, default="")
 
 	class Meta:
 		unique_together = ("name", "grade")
@@ -119,6 +121,7 @@ class LessonResource(TimestampedModel):
 	thumbnail = models.ImageField(upload_to='thumbnails/lessons/', null=True, blank=True)
 	created_by = models.ForeignKey('accounts.User', on_delete=models.SET_NULL, null=True, blank=True, related_name='created_lessons')
 	duration_minutes = models.PositiveIntegerField(null=True, blank=True, help_text="Estimated duration in minutes")
+	moderation_comment = models.TextField(blank=True, default="")
 
 	def __str__(self) -> str:
 		return self.title
@@ -154,6 +157,8 @@ class GeneralAssessment(TimestampedModel):
 	due_at = models.DateTimeField(null=True, blank=True)
 	# Optional grade scoping; when null, assessment is global
 	grade = models.CharField(max_length=20, choices=[(lvl.value, lvl.value) for lvl in StudentLevel], null=True, blank=True)
+	moderation_comment = models.TextField(blank=True, default="")
+	status = models.CharField(max_length=30, choices=[(s.value, s.value) for s in StatusEnum], default=StatusEnum.DRAFT.value)
 
 	def __str__(self) -> str:
 		return self.title
@@ -195,6 +200,8 @@ class LessonAssessment(TimestampedModel):
 	instructions = models.TextField(blank=True, default="")
 	marks = models.FloatField(default=0.0)
 	due_at = models.DateTimeField(null=True, blank=True)
+	moderation_comment = models.TextField(blank=True, default="")
+	status = models.CharField(max_length=30, choices=[(s.value, s.value) for s in StatusEnum], default=StatusEnum.DRAFT.value)
 
 	def __str__(self) -> str:
 		return self.title

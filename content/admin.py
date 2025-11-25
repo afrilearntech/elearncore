@@ -46,8 +46,8 @@ class TakeLessonAdmin(admin.ModelAdmin):
 
 @admin.register(GeneralAssessment)
 class GeneralAssessmentAdmin(admin.ModelAdmin):
-	list_display = ("id", "title", 'type', "given_by", "marks", "created_at")
-	list_filter = ("given_by",)
+	list_display = ("id", "title", 'type', "given_by", "marks", "status", "created_at")
+	list_filter = ("given_by", "status")
 	search_fields = ("title",)
 
 
@@ -65,8 +65,8 @@ class AssessmentSolutionAdmin(admin.ModelAdmin):
 
 @admin.register(LessonAssessment)
 class LessonAssessmentAdmin(admin.ModelAdmin):
-	list_display = ("id", "title", 'type', "lesson", "given_by", "marks", "created_at")
-	list_filter = ("lesson", "given_by")
+	list_display = ("id", "title", 'type', "lesson", "given_by", "marks", "status", "created_at")
+	list_filter = ("lesson", "given_by", "status")
 	search_fields = ("title",)
 
 
@@ -90,6 +90,6 @@ class OptionAdmin(admin.ModelAdmin):
 
 @admin.register(GameModel)
 class GameModelAdmin(admin.ModelAdmin):
-	list_display = ("id", "name", "type", 'grade', "created_by", "created_at")
-	list_filter = ("type", "grade")
+	list_display = ("id", "name", "type", 'grade', "status", "created_by", "created_at")
+	list_filter = ("type", "grade", "status")
 	search_fields = ("name", "description", "instructions")

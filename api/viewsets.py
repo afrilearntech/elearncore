@@ -23,7 +23,14 @@ from content.models import (
 from forum.models import Chat
 from django.core.cache import cache
 from content.serializers import (
-	AssessmentSolutionSerializer, SubjectSerializer, TopicSerializer, PeriodSerializer, LessonResourceSerializer, TakeLessonSerializer,
+	AssessmentSolutionSerializer,
+	SubjectSerializer,
+	TopicSerializer,
+	PeriodSerializer,
+	LessonResourceSerializer,
+	TakeLessonSerializer,
+	GeneralAssessmentSerializer,
+	LessonAssessmentSerializer,
 	GameSerializer,
 )
 from agentic.models import AIRecommendation, AIAbuseReport
@@ -76,6 +83,30 @@ class IsAdminRole(permissions.BasePermission):
 
 	def has_permission(self, request, view):
 		return _user_role_in(request.user, {UserRole.ADMIN.value})
+
+
+class IsContentCreator(permissions.BasePermission):
+	"""Allow content creators, validators, teachers, and admins (for writes)."""
+	allowed_roles = {
+		UserRole.CONTENTCREATOR.value,
+		UserRole.CONTENTVALIDATOR.value,
+		UserRole.TEACHER.value,
+		UserRole.ADMIN.value,
+	}
+
+	def has_permission(self, request, view):
+		return _user_role_in(request.user, self.allowed_roles)
+
+
+class IsContentValidator(permissions.BasePermission):
+	"""Allow validators and admins for moderation actions."""
+	allowed_roles = {
+		UserRole.CONTENTVALIDATOR.value,
+		UserRole.ADMIN.value,
+	}
+
+	def has_permission(self, request, view):
+		return _user_role_in(request.user, self.allowed_roles)
 
 
 # ----- ViewSets -----
@@ -406,6 +437,230 @@ class GameViewSet(viewsets.ModelViewSet):
 				item['status'] = 'played' if item['id'] in played_ids else 'new'
 
 		return response
+
+
+class ContentViewSet(viewsets.ViewSet):
+	"""Aggregate content management operations for content teams.
+
+	Content Creators:
+	- can list/create/update subjects, lessons, assessments, games, schools, counties, districts.
+
+	Content Validators:
+	- can view everything and perform approve/reject/request-review on content objects
+	  that support a `status` field.
+	"""
+	permission_classes = [permissions.IsAuthenticated]
+
+	def _require_creator(self, request):
+		if not IsContentCreator().has_permission(request, self):
+			return Response({"detail": "Content creator role required."}, status=status.HTTP_403_FORBIDDEN)
+		return None
+
+	def _require_validator(self, request):
+		if not IsContentValidator().has_permission(request, self):
+			return Response({"detail": "Content validator role required."}, status=status.HTTP_403_FORBIDDEN)
+		return None
+
+	@action(detail=False, methods=['get', 'post'], url_path='subjects')
+	def subjects(self, request):
+		"""List or create subjects.
+
+		- Creators/validators can create/edit; others read-only.
+		"""
+		if request.method == 'GET':
+			qs = Subject.objects.all().order_by('name')
+			return Response(SubjectSerializer(qs, many=True).data)
+
+		# POST - creation requires creator capability
+		deny = self._require_creator(request)
+		if deny:
+			return deny
+		ser = SubjectSerializer(data=request.data)
+		ser.is_valid(raise_exception=True)
+		obj = ser.save(created_by=request.user)
+		return Response(SubjectSerializer(obj).data, status=status.HTTP_201_CREATED)
+
+	@action(detail=False, methods=['get', 'post'], url_path='lessons')
+	def lessons(self, request):
+		"""List or create lessons (LessonResource)."""
+		if request.method == 'GET':
+			qs = LessonResource.objects.select_related('subject').all().order_by('-created_at')
+			return Response(LessonResourceSerializer(qs, many=True).data)
+
+		deny = self._require_creator(request)
+		if deny:
+			return deny
+		ser = LessonResourceSerializer(data=request.data)
+		ser.is_valid(raise_exception=True)
+		obj = ser.save(created_by=request.user)
+		return Response(LessonResourceSerializer(obj).data, status=status.HTTP_201_CREATED)
+
+	@action(detail=False, methods=['get', 'post'], url_path='general-assessments')
+	def general_assessments(self, request):
+		"""List or create general assessments."""
+		if request.method == 'GET':
+			qs = GeneralAssessment.objects.select_related('given_by').all().order_by('-created_at')
+			return Response(GeneralAssessmentSerializer(qs, many=True).data)
+
+		deny = self._require_creator(request)
+		if deny:
+			return deny
+		ser = GeneralAssessmentSerializer(data=request.data)
+		ser.is_valid(raise_exception=True)
+		obj = ser.save()
+		return Response(GeneralAssessmentSerializer(obj).data, status=status.HTTP_201_CREATED)
+
+	@action(detail=False, methods=['get', 'post'], url_path='lesson-assessments')
+	def lesson_assessments(self, request):
+		"""List or create lesson assessments."""
+		if request.method == 'GET':
+			qs = LessonAssessment.objects.select_related('lesson').all().order_by('-created_at')
+			return Response(LessonAssessmentSerializer(qs, many=True).data)
+
+		deny = self._require_creator(request)
+		if deny:
+			return deny
+		ser = LessonAssessmentSerializer(data=request.data)
+		ser.is_valid(raise_exception=True)
+		obj = ser.save()
+		return Response(LessonAssessmentSerializer(obj).data, status=status.HTTP_201_CREATED)
+
+	@action(detail=False, methods=['get', 'post'], url_path='games')
+	def games(self, request):
+		"""List or create games for content management."""
+		if request.method == 'GET':
+			qs = GameModel.objects.all().order_by('-created_at')
+			return Response(GameSerializer(qs, many=True).data)
+
+		deny = self._require_creator(request)
+		if deny:
+			return deny
+		ser = GameSerializer(data=request.data)
+		ser.is_valid(raise_exception=True)
+		obj = ser.save(created_by=request.user)
+		return Response(GameSerializer(obj).data, status=status.HTTP_201_CREATED)
+
+	@action(detail=False, methods=['get', 'post'], url_path='schools')
+	def schools(self, request):
+		"""List or create schools."""
+		if request.method == 'GET':
+			qs = School.objects.select_related('district__county').all().order_by('name')
+			return Response(SchoolSerializer(qs, many=True).data)
+
+		deny = self._require_creator(request)
+		if deny:
+			return deny
+		ser = SchoolSerializer(data=request.data)
+		ser.is_valid(raise_exception=True)
+		obj = ser.save()
+		return Response(SchoolSerializer(obj).data, status=status.HTTP_201_CREATED)
+
+	@action(detail=False, methods=['get', 'post'], url_path='counties')
+	def counties(self, request):
+		"""List or create counties."""
+		if request.method == 'GET':
+			qs = County.objects.all().order_by('name')
+			return Response(CountySerializer(qs, many=True).data)
+
+		deny = self._require_creator(request)
+		if deny:
+			return deny
+		ser = CountySerializer(data=request.data)
+		ser.is_valid(raise_exception=True)
+		obj = ser.save()
+		return Response(CountySerializer(obj).data, status=status.HTTP_201_CREATED)
+
+	@action(detail=False, methods=['get', 'post'], url_path='districts')
+	def districts(self, request):
+		"""List or create districts."""
+		if request.method == 'GET':
+			qs = District.objects.select_related('county').all().order_by('name')
+			return Response(DistrictSerializer(qs, many=True).data)
+
+		deny = self._require_creator(request)
+		if deny:
+			return deny
+		ser = DistrictSerializer(data=request.data)
+		ser.is_valid(raise_exception=True)
+		obj = ser.save()
+		return Response(DistrictSerializer(obj).data, status=status.HTTP_201_CREATED)
+
+	@action(detail=False, methods=['post'], url_path='moderate')
+	def moderate(self, request):
+		"""Generic moderation endpoint for validators.
+
+		Body should include:
+		- model: one of "subject", "lesson", "general_assessment", "lesson_assessment", "game",
+		          "school", "county", "district".
+		- id: object primary key
+		- action: one of "approve", "reject", "request_changes".
+		- moderation_comment: optional string, required if action is "request_changes" or "request_review".
+		"""
+		deny = self._require_validator(request)
+		if deny:
+			return deny
+
+		model_name = str(request.data.get('model') or '').lower()
+		obj_id = request.data.get('id')
+		action_name = str(request.data.get('action') or '').lower()
+		comment = request.data.get('moderation_comment')
+		if not model_name or not obj_id or not action_name:
+			return Response({"detail": "model, id and action are required."}, status=status.HTTP_400_BAD_REQUEST)
+		if action_name in {'request_changes', 'request_review'} and not (comment and str(comment).strip()):
+			return Response({"detail": "moderation_comment is required when requesting changes or review."}, status=status.HTTP_400_BAD_REQUEST)
+
+		model_map = {
+			"subject": Subject,
+			"lesson": LessonResource,
+			"general_assessment": GeneralAssessment,
+			"lesson_assessment": LessonAssessment,
+			"game": GameModel,
+			"school": School,
+			"county": County,
+			"district": District,
+		}
+		ModelCls = model_map.get(model_name)
+		if not ModelCls:
+			return Response({"detail": "Unsupported model for moderation."}, status=status.HTTP_400_BAD_REQUEST)
+
+		try:
+			obj = ModelCls.objects.get(pk=obj_id)
+		except ModelCls.DoesNotExist:
+			return Response({"detail": "Object not found."}, status=status.HTTP_404_NOT_FOUND)
+
+		if action_name == 'approve':
+			obj.status = StatusEnum.APPROVED.value
+		elif action_name == 'reject':
+			obj.status = StatusEnum.REJECTED.value
+		elif action_name in {'request_changes', 'request_review'}:
+			obj.status = StatusEnum.REVIEW_REQUESTED.value
+		else:
+			return Response({"detail": "Unsupported action."}, status=status.HTTP_400_BAD_REQUEST)
+
+		# Persist moderation comment on the object if the field exists
+		if hasattr(obj, 'moderation_comment') and comment is not None:
+			obj.moderation_comment = str(comment).strip()
+			update_fields = ['status', 'moderation_comment']
+		else:
+			update_fields = ['status']
+		if hasattr(obj, 'updated_at'):
+			update_fields.append('updated_at')
+		obj.save(update_fields=update_fields)
+
+		# Also write an Activity log entry for audit trail
+		Activity.objects.create(
+			user=request.user,
+			type="moderate_content",
+			description=f"{action_name} {model_name} #{obj.pk}",
+			metadata={
+				"model": model_name,
+				"object_id": obj.pk,
+				"action": action_name,
+				"status": obj.status,
+				"moderation_comment": comment,
+			},
+		)
+		return Response({"id": obj.pk, "model": model_name, "status": obj.status, "moderation_comment": getattr(obj, 'moderation_comment', None)})
 
 
 class OnboardingViewSet(viewsets.ViewSet):

@@ -26,7 +26,7 @@ class SubjectSerializer(serializers.ModelSerializer):
 	class Meta:
 		model = Subject
 		fields = [
-			'id', 'name', 'grade', 'description', 'thumbnail', 'teachers',
+			'id', 'name', 'grade', 'description', 'thumbnail', 'teachers', 'status', 'moderation_comment',
 			'objective_items', 'objectives', 'created_at', 'updated_at', 'created_by',
 		]
 		read_only_fields = ['created_at', 'updated_at', 'created_by', 'objective_items']
@@ -77,7 +77,7 @@ class LessonResourceSerializer(serializers.ModelSerializer):
 	class Meta:
 		model = LessonResource
 		fields = [
-			'id', 'subject', 'topic', 'period', 'title', 'description', 'type', 'status', 'resource', 'thumbnail', 'created_by',
+			'id', 'subject', 'topic', 'period', 'title', 'description', 'type', 'status', 'resource', 'thumbnail', 'created_by', 'moderation_comment',
 			'duration_minutes', 'created_at', 'updated_at'
 		]
 		read_only_fields = ['created_at', 'updated_at']
@@ -93,7 +93,7 @@ class TakeLessonSerializer(serializers.ModelSerializer):
 class GeneralAssessmentSerializer(serializers.ModelSerializer):
 	class Meta:
 		model = GeneralAssessment
-		fields = ['id', 'title', 'type', 'given_by', 'instructions', 'marks', 'due_at', 'grade', 'created_at', 'updated_at']
+		fields = ['id', 'title', 'type', 'given_by', 'instructions', 'marks', 'due_at', 'grade', 'status', 'moderation_comment', 'created_at', 'updated_at']
 		read_only_fields = ['created_at', 'updated_at']
 
 
@@ -116,7 +116,7 @@ class GeneralAssessmentGradeSerializer(serializers.ModelSerializer):
 class LessonAssessmentSerializer(serializers.ModelSerializer):
 	class Meta:
 		model = LessonAssessment
-		fields = ['id', 'lesson', 'type', 'given_by', 'title', 'instructions', 'marks', 'due_at', 'created_at', 'updated_at']
+		fields = ['id', 'lesson', 'type', 'given_by', 'title', 'instructions', 'marks', 'due_at', 'status', 'moderation_comment', 'created_at', 'updated_at']
 		read_only_fields = ['created_at', 'updated_at']
 
 
@@ -150,6 +150,6 @@ class GameSerializer(serializers.ModelSerializer):
 		model = GameModel
 		fields = [
 			'id', 'name', 'instructions', 'description', 'hint', 'correct_answer',
-			'type', 'image', 'created_by', 'created_at', 'updated_at',
+			'type', 'image', 'status', 'created_by', 'created_at', 'updated_at',
 		]
 		read_only_fields = ['created_at', 'updated_at', 'created_by']
