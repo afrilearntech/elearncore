@@ -462,6 +462,12 @@ class ContentViewSet(viewsets.ViewSet):
 		return None
 
 	@action(detail=False, methods=['get', 'post'], url_path='subjects')
+	@extend_schema(
+		operation_id="content_subjects",
+		request=SubjectSerializer,
+		responses={200: SubjectSerializer(many=True)},
+		description="List or create subjects for content management.",
+	)
 	def subjects(self, request):
 		"""List or create subjects.
 
@@ -481,6 +487,12 @@ class ContentViewSet(viewsets.ViewSet):
 		return Response(SubjectSerializer(obj).data, status=status.HTTP_201_CREATED)
 
 	@action(detail=False, methods=['get', 'post'], url_path='lessons')
+	@extend_schema(
+		operation_id="content_lessons",
+		request=LessonResourceSerializer,
+		responses={200: LessonResourceSerializer(many=True)},
+		description="List or create lessons (LessonResource) for content management.",
+	)
 	def lessons(self, request):
 		"""List or create lessons (LessonResource)."""
 		if request.method == 'GET':
@@ -496,6 +508,12 @@ class ContentViewSet(viewsets.ViewSet):
 		return Response(LessonResourceSerializer(obj).data, status=status.HTTP_201_CREATED)
 
 	@action(detail=False, methods=['get', 'post'], url_path='general-assessments')
+	@extend_schema(
+		operation_id="content_general_assessments",
+		request=GeneralAssessmentSerializer,
+		responses={200: GeneralAssessmentSerializer(many=True)},
+		description="List or create general assessments for content management.",
+	)
 	def general_assessments(self, request):
 		"""List or create general assessments."""
 		if request.method == 'GET':
@@ -511,6 +529,12 @@ class ContentViewSet(viewsets.ViewSet):
 		return Response(GeneralAssessmentSerializer(obj).data, status=status.HTTP_201_CREATED)
 
 	@action(detail=False, methods=['get', 'post'], url_path='lesson-assessments')
+	@extend_schema(
+		operation_id="content_lesson_assessments",
+		request=LessonAssessmentSerializer,
+		responses={200: LessonAssessmentSerializer(many=True)},
+		description="List or create lesson assessments for content management.",
+	)
 	def lesson_assessments(self, request):
 		"""List or create lesson assessments."""
 		if request.method == 'GET':
@@ -526,6 +550,12 @@ class ContentViewSet(viewsets.ViewSet):
 		return Response(LessonAssessmentSerializer(obj).data, status=status.HTTP_201_CREATED)
 
 	@action(detail=False, methods=['get', 'post'], url_path='games')
+	@extend_schema(
+		operation_id="content_games",
+		request=GameSerializer,
+		responses={200: GameSerializer(many=True)},
+		description="List or create games for content management.",
+	)
 	def games(self, request):
 		"""List or create games for content management."""
 		if request.method == 'GET':
@@ -541,6 +571,12 @@ class ContentViewSet(viewsets.ViewSet):
 		return Response(GameSerializer(obj).data, status=status.HTTP_201_CREATED)
 
 	@action(detail=False, methods=['get', 'post'], url_path='schools')
+	@extend_schema(
+		operation_id="content_schools",
+		request=SchoolSerializer,
+		responses={200: SchoolSerializer(many=True)},
+		description="List or create schools for content management.",
+	)
 	def schools(self, request):
 		"""List or create schools."""
 		if request.method == 'GET':
@@ -556,6 +592,29 @@ class ContentViewSet(viewsets.ViewSet):
 		return Response(SchoolSerializer(obj).data, status=status.HTTP_201_CREATED)
 
 	@action(detail=False, methods=['get', 'post'], url_path='counties')
+	@extend_schema(
+		operation_id="content_counties",
+		request=CountySerializer,
+		responses={200: CountySerializer(many=True)},
+		description="List or create counties for content management.",
+		examples=[
+			OpenApiExample(
+				name="CreateCountyRequest",
+				value={"name": "Montserrado", "status": "PENDING", "moderation_comment": "Initial import"},
+			),
+			OpenApiExample(
+				name="CountyListResponseItem",
+				value={
+					"id": 1,
+					"name": "Montserrado",
+					"status": "APPROVED",
+					"moderation_comment": "Validated by admin",
+					"created_at": "2025-11-20T09:00:00Z",
+					"updated_at": "2025-11-21T10:00:00Z",
+				},
+			),
+		],
+	)
 	def counties(self, request):
 		"""List or create counties."""
 		if request.method == 'GET':
@@ -571,6 +630,12 @@ class ContentViewSet(viewsets.ViewSet):
 		return Response(CountySerializer(obj).data, status=status.HTTP_201_CREATED)
 
 	@action(detail=False, methods=['get', 'post'], url_path='districts')
+	@extend_schema(
+		operation_id="content_districts",
+		request=DistrictSerializer,
+		responses={200: DistrictSerializer(many=True)},
+		description="List or create districts for content management.",
+	)
 	def districts(self, request):
 		"""List or create districts."""
 		if request.method == 'GET':
@@ -586,6 +651,38 @@ class ContentViewSet(viewsets.ViewSet):
 		return Response(DistrictSerializer(obj).data, status=status.HTTP_201_CREATED)
 
 	@action(detail=False, methods=['post'], url_path='moderate')
+	@extend_schema(
+		operation_id="content_moderate",
+		request=OpenApiExample(
+			name="ContentModerationRequestBody",
+			value={
+				"model": "lesson",
+				"id": 123,
+				"action": "request_changes",
+				"moderation_comment": "Please clarify the grading rubric.",
+			},
+		),
+		responses={
+			200: OpenApiResponse(
+				description="Moderation result.",
+				examples=[
+					OpenApiExample(
+						name="ModerationResponseExample",
+						value={
+							"id": 123,
+							"model": "lesson",
+							"status": "review_requested",
+							"moderation_comment": "Please clarify the grading rubric.",
+						},
+					),
+				],
+			),
+		},
+		description=(
+			"Moderate a content object by approving, rejecting, or requesting changes. "
+			"Requires content validator role."
+		),
+	)
 	def moderate(self, request):
 		"""Generic moderation endpoint for validators.
 

@@ -16,21 +16,21 @@ class UserSerializer(serializers.ModelSerializer):
 class CountySerializer(serializers.ModelSerializer):
 	class Meta:
 		model = County
-		fields = ['id', 'name', 'created_at', 'updated_at']
+		fields = ['id', 'name', 'status', 'moderation_comment', 'created_at', 'updated_at']
 		read_only_fields = ['created_at', 'updated_at']
 
 
 class DistrictSerializer(serializers.ModelSerializer):
 	class Meta:
 		model = District
-		fields = ['id', 'county', 'name', 'created_at', 'updated_at']
+		fields = ['id', 'county', 'name', 'status', 'moderation_comment', 'created_at', 'updated_at']
 		read_only_fields = ['created_at', 'updated_at']
 
 
 class SchoolSerializer(serializers.ModelSerializer):
 	class Meta:
 		model = School
-		fields = ['id', 'district', 'name', 'created_at', 'updated_at']
+		fields = ['id', 'district', 'name', 'status', 'moderation_comment', 'created_at', 'updated_at']
 		read_only_fields = ['created_at', 'updated_at']
 
 
