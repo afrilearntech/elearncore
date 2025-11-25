@@ -801,17 +801,8 @@ class OnboardingViewSet(viewsets.ViewSet):
 			return Response({"detail": "Email already in use."}, status=400)
 
 		user = User.objects.create_user(email=email, phone=phone, name=name, password=password)
-		token = AuthToken.objects.create(user)[1]
-
-		# Log login activity
-		Activity.objects.create(
-			user=user,
-			type="login",
-			description="User logged in",
-			metadata={"role": user.role},
-		)
 		return Response({
-			"token": token,
+			"detail": "Account created successfully. Please complete onboarding and wait for approval if required.",
 			"user": {"id": user.id, "name": user.name, "phone": user.phone, "email": user.email, "role": user.role},
 		}, status=201)
 
@@ -995,6 +986,14 @@ class LoginViewSet(viewsets.ViewSet):
 		if user.role not in allowed_roles:
 			msg = forbidden_msg or "Insufficient role for this login."
 			return Response({"detail": msg}, status=403)
+		# For student logins, require that the linked student profile is approved
+		if user.role == UserRole.STUDENT.value and hasattr(user, 'student') and user.student:
+			from elearncore.sysutils.constants import Status as StatusEnum
+			if getattr(user.student, 'status', StatusEnum.PENDING.value) != StatusEnum.APPROVED.value:
+				return Response(
+					{"detail": "Your account is awaiting approval by a teacher or administrator."},
+					status=403,
+				)
 
 		token = AuthToken.objects.create(user)[1]
 

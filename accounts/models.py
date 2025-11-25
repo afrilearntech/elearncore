@@ -110,6 +110,8 @@ class Student(TimestampedModel):
     profile = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="student")
     school = models.ForeignKey(School, on_delete=models.SET_NULL, null=True, blank=True, related_name="students")
     grade = models.CharField(max_length=20, choices=[(lvl.value, lvl.value) for lvl in StudentLevel], default=StudentLevel.OTHER.value)
+    status = models.CharField(max_length=30, choices=[(s.value, s.value) for s in StatusEnum], default=StatusEnum.PENDING.value)
+    moderation_comment = models.TextField(blank=True, default="")
 
     def __str__(self) -> str:
         return f"Student: {self.profile.name}"
