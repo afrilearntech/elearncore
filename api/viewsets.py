@@ -550,6 +550,59 @@ class ContentViewSet(viewsets.ViewSet):
 		obj = ser.save()
 		return Response(LessonAssessmentSerializer(obj).data, status=status.HTTP_201_CREATED)
 
+	@action(detail=False, methods=['get'], url_path='all-assessments')
+	@extend_schema(
+		operation_id="content_all_assessments",
+		responses={200: None},
+		description=(
+			"Return both general and lesson assessments in a single response. "
+			"Each item includes a 'kind' field (general|lesson)."
+		),
+	)
+	def all_assessments(self, request):
+		"""Return a combined list of general and lesson assessments."""
+		general_qs = GeneralAssessment.objects.select_related('given_by').all().order_by('-created_at')
+		lesson_qs = LessonAssessment.objects.select_related('lesson', 'given_by').all().order_by('-created_at')
+
+		general_payload = [
+			{
+				"kind": "general",
+				"id": ga.id,
+				"title": ga.title,
+				"type": ga.type,
+				"marks": ga.marks,
+				"due_at": ga.due_at.isoformat() if ga.due_at else None,
+				"grade": ga.grade,
+				"given_by_id": ga.given_by_id,
+			}
+			for ga in general_qs
+		]
+
+		lesson_payload = [
+			{
+				"kind": "lesson",
+				"id": la.id,
+				"title": la.title,
+				"type": la.type,
+				"marks": la.marks,
+				"due_at": la.due_at.isoformat() if la.due_at else None,
+				"lesson_id": la.lesson_id,
+				"lesson_title": getattr(la.lesson, 'title', None),
+				"subject_id": getattr(getattr(la.lesson, 'subject', None), 'id', None),
+				"subject_name": getattr(getattr(la.lesson, 'subject', None), 'name', None),
+				"given_by_id": la.given_by_id,
+			}
+			for la in lesson_qs
+		]
+
+		# Sort combined by due_at (descending), then by created_at implicitly via original ordering
+		def _sort_key(item):
+			return item.get("due_at") or ""
+
+		combined = general_payload + lesson_payload
+		combined.sort(key=_sort_key, reverse=True)
+		return Response(combined)
+
 	@action(detail=False, methods=['get', 'post'], url_path='games')
 	@extend_schema(
 		operation_id="content_games",
@@ -1913,10 +1966,24 @@ class TeacherViewSet(viewsets.ViewSet):
 	@extend_schema(
 		description=(
 			"Grade a general assessment solution for a student. "
-			"Only assessments where this teacher is given_by are allowed."
+			"Only assessments where this teacher is given_by are allowed. "
+			"Score must be numeric, non-negative, and not exceed the assessment's total marks."
 		),
-		request=None,
-		responses={200: None},
+		request=OpenApiExample(
+			name="GradeGeneralAssessmentRequest",
+			value={"assessment_id": 1, "student_id": 10, "score": 18.5},
+		),
+		responses={
+			200: OpenApiResponse(
+				description="Grading result.",
+				examples=[
+					OpenApiExample(
+						name="GradeGeneralAssessmentResponse",
+						value={"assessment_id": 1, "student_id": 10, "score": 18.5},
+					),
+				],
+			),
+		},
 	)
 	@action(detail=False, methods=['post'], url_path='grade/general')
 	def grade_general_assessment(self, request):
@@ -1966,10 +2033,24 @@ class TeacherViewSet(viewsets.ViewSet):
 	@extend_schema(
 		description=(
 			"Grade a lesson assessment for a student. "
-			"Only assessments where this teacher is given_by are allowed."
+			"Only assessments where this teacher is given_by are allowed. "
+			"Score must be numeric, non-negative, and not exceed the assessment's total marks."
 		),
-		request=None,
-		responses={200: None},
+		request=OpenApiExample(
+			name="GradeLessonAssessmentRequest",
+			value={"assessment_id": 5, "student_id": 10, "score": 9},
+		),
+		responses={
+			200: OpenApiResponse(
+				description="Grading result.",
+				examples=[
+					OpenApiExample(
+						name="GradeLessonAssessmentResponse",
+						value={"assessment_id": 5, "student_id": 10, "score": 9},
+					),
+				],
+			),
+		},
 	)
 	@action(detail=False, methods=['post'], url_path='grade/lesson')
 	def grade_lesson_assessment(self, request):
