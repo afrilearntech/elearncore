@@ -1454,6 +1454,7 @@ class KidsViewSet(viewsets.ViewSet):
 				"id": l.id,
 				"title": l.title,
 				"subject_id": l.subject_id,
+				"grade": getattr(l.subject, 'grade', None),
 				"resource_type": l.type,
 				"thumbnail": l.thumbnail.url if l.thumbnail else None,
 				"resource": l.resource.url if l.resource else None,
