@@ -76,6 +76,7 @@ class Subject(TimestampedModel):
 	# Many-to-many link to objectives; a subject may have many objectives,
 	# and an objective string can be reused across subjects.
 	objectives = models.ManyToManyField(Objective, related_name="subjects", blank=True)
+	status = models.CharField(max_length=30, choices=[(s.value, s.value) for s in StatusEnum], default=StatusEnum.PENDING.value)
 
 	# Allow teachers to be linked to one or more subjects
 	teachers = models.ManyToManyField('accounts.Teacher', related_name='subjects', blank=True)

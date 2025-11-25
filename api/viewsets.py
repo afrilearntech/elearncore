@@ -757,7 +757,13 @@ class ContentViewSet(viewsets.ViewSet):
 				"moderation_comment": comment,
 			},
 		)
-		return Response({"id": obj.pk, "model": model_name, "status": obj.status, "moderation_comment": getattr(obj, 'moderation_comment', None)})
+		return Response(
+			{
+				"id": obj.pk, 
+				"model": model_name, 
+				"status": obj.status, 
+				"moderation_comment": getattr(obj, 'moderation_comment', None)
+			})
 
 
 class OnboardingViewSet(viewsets.ViewSet):
