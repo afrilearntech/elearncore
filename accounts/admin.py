@@ -34,28 +34,29 @@ class OTPAdmin(admin.ModelAdmin):
 
 @admin.register(County)
 class CountyAdmin(admin.ModelAdmin):
-	list_display = ("id", "name", "created_at")
+	list_display = ("id", "name", "status", "created_at")
+	list_filter = ("status",)
 	search_fields = ("name",)
 
 
 @admin.register(District)
 class DistrictAdmin(admin.ModelAdmin):
-	list_display = ("id", "name", "county", "created_at")
-	list_filter = ("county",)
+	list_display = ("id", "name", "county", "status", "created_at")
+	list_filter = ("county", "status")
 	search_fields = ("name",)
 
 
 @admin.register(School)
 class SchoolAdmin(admin.ModelAdmin):
-	list_display = ("id", "name", "district", "created_at")
-	list_filter = ("district",)
+	list_display = ("id", "name", "district", "status", "created_at")
+	list_filter = ("district", "status")
 	search_fields = ("name",)
 
 
 @admin.register(Student)
 class StudentAdmin(admin.ModelAdmin):
-	list_display = ("id", "profile", "school", "grade", "created_at")
-	list_filter = ("grade", "school")
+	list_display = ("id", "profile", "school", "grade", "status", "created_at")
+	list_filter = ("grade", "school", "status")
 	search_fields = ("profile__name", "profile__phone")
 
 

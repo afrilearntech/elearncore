@@ -715,6 +715,7 @@ class ContentViewSet(viewsets.ViewSet):
 			"school": School,
 			"county": County,
 			"district": District,
+			"student": Student,
 		}
 		ModelCls = model_map.get(model_name)
 		if not ModelCls:
