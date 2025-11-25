@@ -31,7 +31,7 @@ class GameModel(TimestampedModel):
 	type = models.CharField(max_length=50, choices=[(gt.value, gt.value) for gt in GameType])
 	image = models.ImageField(upload_to='word_games/', null=True, blank=True)
 	created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='created_games')
-	status = models.CharField(max_length=30, choices=[(s.value, s.value) for s in StatusEnum], default=StatusEnum.DRAFT.value)
+	status = models.CharField(max_length=30, choices=[(s.value, s.value) for s in StatusEnum], default=StatusEnum.PENDING.value)
 
 	def __str__(self) -> str:
 		return self.name
@@ -117,7 +117,7 @@ class LessonResource(TimestampedModel):
 	title = models.CharField(max_length=200)
 	description = models.TextField(blank=True, default="")
 	type = models.CharField(max_length=20, choices=[(t.value, t.value) for t in ContentTypeEnum])
-	status = models.CharField(max_length=30, choices=[(s.value, s.value) for s in StatusEnum], default=StatusEnum.DRAFT.value)
+	status = models.CharField(max_length=30, choices=[(s.value, s.value) for s in StatusEnum], default=StatusEnum.PENDING.value)
 	resource = models.FileField(upload_to='lesson_resources/')
 	thumbnail = models.ImageField(upload_to='thumbnails/lessons/', null=True, blank=True)
 	created_by = models.ForeignKey('accounts.User', on_delete=models.SET_NULL, null=True, blank=True, related_name='created_lessons')
@@ -159,7 +159,7 @@ class GeneralAssessment(TimestampedModel):
 	# Optional grade scoping; when null, assessment is global
 	grade = models.CharField(max_length=20, choices=[(lvl.value, lvl.value) for lvl in StudentLevel], null=True, blank=True)
 	moderation_comment = models.TextField(blank=True, default="")
-	status = models.CharField(max_length=30, choices=[(s.value, s.value) for s in StatusEnum], default=StatusEnum.DRAFT.value)
+	status = models.CharField(max_length=30, choices=[(s.value, s.value) for s in StatusEnum], default=StatusEnum.PENDING.value)
 
 	def __str__(self) -> str:
 		return self.title
@@ -202,7 +202,7 @@ class LessonAssessment(TimestampedModel):
 	marks = models.FloatField(default=0.0)
 	due_at = models.DateTimeField(null=True, blank=True)
 	moderation_comment = models.TextField(blank=True, default="")
-	status = models.CharField(max_length=30, choices=[(s.value, s.value) for s in StatusEnum], default=StatusEnum.DRAFT.value)
+	status = models.CharField(max_length=30, choices=[(s.value, s.value) for s in StatusEnum], default=StatusEnum.PENDING.value)
 
 	def __str__(self) -> str:
 		return self.title
