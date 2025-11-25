@@ -40,7 +40,7 @@ from accounts.models import User, Student, Teacher, Parent, School, County, Dist
 from accounts.serializers import (
 	SchoolLookupSerializer, CountyLookupSerializer, DistrictLookupSerializer,
 	CountySerializer, DistrictSerializer, SchoolSerializer,
-	StudentSerializer,
+	StudentSerializer, TeacherSerializer,
 )
 from .serializers import ProfileSetupSerializer, UserRoleSerializer, AboutUserSerializer, LinkChildSerializer, LoginSerializer
 
@@ -705,6 +705,35 @@ class ContentViewSet(viewsets.ViewSet):
 		ser.is_valid(raise_exception=True)
 		obj = ser.save()
 		return Response(DistrictSerializer(obj).data, status=status.HTTP_201_CREATED)
+
+	@action(detail=False, methods=['get'], url_path='teachers')
+	@extend_schema(
+		operation_id="content_teachers",
+		responses={200: TeacherSerializer(many=True)},
+		description="List all teachers for content management (read-only).",
+	)
+	def teachers(self, request):
+		"""Return all teacher profiles.
+
+		Intended for content managers/validators/admins to see teacher accounts
+		and their moderation status.
+		"""
+		qs = Teacher.objects.select_related('profile', 'school').all().order_by('profile__name')
+		return Response(TeacherSerializer(qs, many=True).data)
+
+	@action(detail=False, methods=['get'], url_path='teachers/(?P<pk>[^/.]+)')
+	@extend_schema(
+		operation_id="content_teacher_detail",
+		responses={200: TeacherSerializer},
+		description="Retrieve a single teacher by id for content management.",
+	)
+	def teacher_detail(self, request, pk=None):
+		"""Return a single teacher profile by id."""
+		try:
+			teacher = Teacher.objects.select_related('profile', 'school').get(pk=pk)
+		except Teacher.DoesNotExist:
+			return Response({"detail": "Teacher not found."}, status=404)
+		return Response(TeacherSerializer(teacher).data)
 
 	@action(detail=False, methods=['get'], url_path='dashboard')
 	@extend_schema(
