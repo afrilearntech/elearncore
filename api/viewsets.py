@@ -1911,6 +1911,112 @@ class TeacherViewSet(viewsets.ViewSet):
 		return Response(StudentSerializer(student).data)
 
 	@extend_schema(
+		description=(
+			"Grade a general assessment solution for a student. "
+			"Only assessments where this teacher is given_by are allowed."
+		),
+		request=None,
+		responses={200: None},
+	)
+	@action(detail=False, methods=['post'], url_path='grade/general')
+	def grade_general_assessment(self, request):
+		"""Grade a general assessment for a student.
+
+		Body:
+		- assessment_id
+		- student_id
+		- score
+		"""
+		deny = self._require_teacher(request)
+		if deny:
+			return deny
+		teacher = request.user.teacher
+		assessment_id = request.data.get('assessment_id')
+		student_id = request.data.get('student_id')
+		score = request.data.get('score')
+		if assessment_id is None or student_id is None or score is None:
+			return Response({"detail": "assessment_id, student_id and score are required."}, status=400)
+		try:
+			assessment = GeneralAssessment.objects.get(pk=assessment_id, given_by=teacher)
+		except GeneralAssessment.DoesNotExist:
+			return Response({"detail": "Assessment not found or not owned by you."}, status=404)
+		try:
+			student = Student.objects.get(pk=student_id)
+		except Student.DoesNotExist:
+			return Response({"detail": "Student not found."}, status=404)
+		try:
+			score_value = float(score)
+		except (TypeError, ValueError):
+			return Response({"detail": "score must be a number."}, status=400)
+		if score_value < 0:
+			return Response({"detail": "score cannot be negative."}, status=400)
+		if assessment.marks is not None and score_value > float(assessment.marks):
+			return Response({"detail": "score cannot exceed assessment total marks."}, status=400)
+		grade_obj, _created = GeneralAssessmentGrade.objects.update_or_create(
+			assessment=assessment,
+			student=student,
+			defaults={"score": score_value},
+		)
+		return Response({
+			"assessment_id": grade_obj.assessment_id,
+			"student_id": grade_obj.student_id,
+			"score": grade_obj.score,
+		})
+
+	@extend_schema(
+		description=(
+			"Grade a lesson assessment for a student. "
+			"Only assessments where this teacher is given_by are allowed."
+		),
+		request=None,
+		responses={200: None},
+	)
+	@action(detail=False, methods=['post'], url_path='grade/lesson')
+	def grade_lesson_assessment(self, request):
+		"""Grade a lesson assessment for a student.
+
+		Body:
+		- assessment_id (lesson_assessment id)
+		- student_id
+		- score
+		"""
+		deny = self._require_teacher(request)
+		if deny:
+			return deny
+		teacher = request.user.teacher
+		assessment_id = request.data.get('assessment_id')
+		student_id = request.data.get('student_id')
+		score = request.data.get('score')
+		if assessment_id is None or student_id is None or score is None:
+			return Response({"detail": "assessment_id, student_id and score are required."}, status=400)
+		try:
+			assessment = LessonAssessment.objects.select_related('lesson__subject').get(pk=assessment_id, given_by=teacher)
+		except LessonAssessment.DoesNotExist:
+			return Response({"detail": "Assessment not found or not owned by you."}, status=404)
+		try:
+			student = Student.objects.get(pk=student_id)
+		except Student.DoesNotExist:
+			return Response({"detail": "Student not found."}, status=404)
+		try:
+			score_value = float(score)
+		except (TypeError, ValueError):
+			return Response({"detail": "score must be a number."}, status=400)
+		if score_value < 0:
+			return Response({"detail": "score cannot be negative."}, status=400)
+		if assessment.marks is not None and score_value > float(assessment.marks):
+			return Response({"detail": "score cannot exceed assessment total marks."}, status=400)
+		grade_obj, _created = LessonAssessmentGrade.objects.update_or_create(
+			lesson_assessment=assessment,
+			student=student,
+			defaults={"score": score_value},
+		)
+		return Response({
+			"assessment_id": grade_obj.lesson_assessment_id,
+			"student_id": grade_obj.student_id,
+			"score": grade_obj.score,
+		})
+
+	@extend_schema(
 		description="Subjects and lessons for the student's grade (kids view).",
 		responses={200: None},
 		examples=[
