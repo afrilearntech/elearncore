@@ -66,19 +66,19 @@ class SchoolLookupSerializer(serializers.ModelSerializer):
 class StudentSerializer(serializers.ModelSerializer):
 	class Meta:
 		model = Student
-		fields = ['id', 'user', 'school', 'grade', 'status', 'moderation_comment', 'created_at', 'updated_at']
+		fields = ['id', 'profile', 'school', 'grade', 'status', 'moderation_comment', 'created_at', 'updated_at']
 		read_only_fields = ['created_at', 'updated_at']
 
 
 class TeacherSerializer(serializers.ModelSerializer):
 	class Meta:
 		model = Teacher
-		fields = ['id', 'user', 'school', 'created_at', 'updated_at']
+		fields = ['id', 'profile', 'school', 'created_at', 'updated_at']
 		read_only_fields = ['created_at', 'updated_at']
 
 
 class ParentSerializer(serializers.ModelSerializer):
 	class Meta:
 		model = Parent
-		fields = ['id', 'user', 'wards', 'created_at', 'updated_at']
+		fields = ['id', 'profile', 'wards', 'created_at', 'updated_at']
 		read_only_fields = ['created_at', 'updated_at']
