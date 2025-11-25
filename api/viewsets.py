@@ -706,6 +706,84 @@ class ContentViewSet(viewsets.ViewSet):
 		obj = ser.save()
 		return Response(DistrictSerializer(obj).data, status=status.HTTP_201_CREATED)
 
+	@action(detail=False, methods=['get'], url_path='dashboard')
+	@extend_schema(
+		operation_id="content_dashboard",
+		responses={200: None},
+		description=(
+			"Summary stats for content managers. Returns counts for four cards: "
+			"Total content items, Approved, Rejected, and Reviews Requested (review_requested)."
+		),
+	)
+	def dashboard(self, request):
+		"""Return high-level status counts for all manageable content types.
+
+		Includes subjects, lessons, general assessments, lesson assessments, games,
+		and schools in the totals.
+		"""
+		# Require at least content creator/validator/admin access
+		deny = self._require_creator(request)
+		if deny and not IsContentValidator().has_permission(request, self):
+			return deny
+
+		from elearncore.sysutils.constants import Status as StatusEnum
+
+		status_values = {
+			"APPROVED": StatusEnum.APPROVED.value,
+			"REJECTED": StatusEnum.REJECTED.value,
+			"REVIEW_REQUESTED": StatusEnum.REVIEW_REQUESTED.value,
+		}
+
+		# Helper to count by status for a queryset with a 'status' field
+		def _counts_for(qs):
+			return {
+				"total": qs.count(),
+				"approved": qs.filter(status=status_values["APPROVED"]).count(),
+				"rejected": qs.filter(status=status_values["REJECTED"]).count(),
+				"review_requested": qs.filter(status=status_values["REVIEW_REQUESTED"]).count(),
+			}
+
+		# Collect counts for each model where status is available
+		lesson_counts = _counts_for(LessonResource.objects.all())
+		general_assessment_counts = _counts_for(GeneralAssessment.objects.all())
+		lesson_assessment_counts = _counts_for(LessonAssessment.objects.all())
+		game_counts = _counts_for(GameModel.objects.all())
+		school_counts = _counts_for(School.objects.all())
+
+		# Subjects have a status field as well
+		subject_counts = _counts_for(Subject.objects.all())
+
+		# Aggregate overall totals across all content types
+		def _agg(*count_dicts):
+			agg = {"total": 0, "approved": 0, "rejected": 0, "review_requested": 0}
+			for c in count_dicts:
+				for k in agg.keys():
+					agg[k] += c.get(k, 0)
+			return agg
+
+		overall = _agg(
+			lesson_counts,
+			general_assessment_counts,
+			lesson_assessment_counts,
+			game_counts,
+			school_counts,
+			subject_counts,
+		)
+
+		return Response(
+			{
+				"overall": overall,
+				"by_type": {
+					"subjects": subject_counts,
+					"lessons": lesson_counts,
+					"general_assessments": general_assessment_counts,
+					"lesson_assessments": lesson_assessment_counts,
+					"games": game_counts,
+					"schools": school_counts,
+				},
+			}
+		)
+
 	@action(detail=False, methods=['post'], url_path='moderate')
 	@extend_schema(
 		operation_id="content_moderate",
@@ -744,7 +822,7 @@ class ContentViewSet(viewsets.ViewSet):
 
 		Body should include:
 		- model: one of "subject", "lesson", "general_assessment", "lesson_assessment", "game",
-		          "school", "county", "district".
+		          "school", "county", "district", "student", "teacher".
 		- id: object primary key
 		- action: one of "approve", "reject", "request_changes".
 		- moderation_comment: optional string, required if action is "request_changes" or "request_review".
@@ -772,6 +850,7 @@ class ContentViewSet(viewsets.ViewSet):
 			"county": County,
 			"district": District,
 			"student": Student,
+			"teacher": Teacher,
 		}
 		ModelCls = model_map.get(model_name)
 		if not ModelCls:
@@ -1022,6 +1101,48 @@ class LoginViewSet(viewsets.ViewSet):
 		'''
 		return self._login_with_role(request, allowed_roles={UserRole.ADMIN.value})
 
+	@extend_schema(
+		description=(
+			"Change password for the authenticated user. "
+			"Requires current_password, new_password, and confirm_password."
+		),
+		request=OpenApiExample(
+			name="ChangePasswordRequest",
+			value={
+				"current_password": "oldpass123",
+				"new_password": "newpass456",
+				"confirm_password": "newpass456",
+			},
+		),
+		responses={200: OpenApiResponse(description="Password changed successfully.")},
+	)
+	@action(detail=False, methods=['post'], url_path='change-password', permission_classes=[permissions.IsAuthenticated])
+	def change_password(self, request):
+		"""Allow any authenticated user to change their password.
+
+		Body:
+		- current_password
+		- new_password
+		- confirm_password
+		"""
+		user: User = request.user
+		current = request.data.get('current_password')
+		new = request.data.get('new_password')
+		confirm = request.data.get('confirm_password')
+		if not all([current, new, confirm]):
+			return Response({"detail": "current_password, new_password and confirm_password are required."}, status=400)
+		if not user.check_password(current):
+			return Response({"detail": "Current password is incorrect."}, status=400)
+		if new != confirm:
+			return Response({"detail": "New password and confirm password do not match."}, status=400)
+		if len(new) < 6:
+			return Response({"detail": "New password must be at least 6 characters."}, status=400)
+		if new == current:
+			return Response({"detail": "New password must be different from current password."}, status=400)
+		user.set_password(new)
+		user.save(update_fields=['password', 'updated_at'])
+		return Response({"detail": "Password changed successfully."})
+
 	def _login_with_role(self, request, allowed_roles: Set[str], stdprofile=False, forbidden_msg: str | None = None):
 		identifier = str(request.data.get('identifier') or '').strip()
 		password = request.data.get('password')
@@ -1043,12 +1164,19 @@ class LoginViewSet(viewsets.ViewSet):
 		if user.role not in allowed_roles:
 			msg = forbidden_msg or "Insufficient role for this login."
 			return Response({"detail": msg}, status=403)
+		from elearncore.sysutils.constants import Status as StatusEnum
 		# For student logins, require that the linked student profile is approved
 		if user.role == UserRole.STUDENT.value and hasattr(user, 'student') and user.student:
-			from elearncore.sysutils.constants import Status as StatusEnum
 			if getattr(user.student, 'status', StatusEnum.PENDING.value) != StatusEnum.APPROVED.value:
 				return Response(
 					{"detail": "Your account is awaiting approval by a teacher or administrator."},
+					status=403,
+				)
+		# For teacher/content logins, require that the teacher profile is approved
+		if user.role == UserRole.TEACHER.value and hasattr(user, 'teacher') and user.teacher:
+			if getattr(user.teacher, 'status', StatusEnum.PENDING.value) != StatusEnum.APPROVED.value:
+				return Response(
+					{"detail": "Your teacher account is awaiting approval by a content validator or administrator."},
 					status=403,
 				)
 

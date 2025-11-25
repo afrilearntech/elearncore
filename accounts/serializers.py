@@ -73,7 +73,7 @@ class StudentSerializer(serializers.ModelSerializer):
 class TeacherSerializer(serializers.ModelSerializer):
 	class Meta:
 		model = Teacher
-		fields = ['id', 'profile', 'school', 'created_at', 'updated_at']
+		fields = ['id', 'profile', 'school', 'status', 'moderation_comment', 'created_at', 'updated_at']
 		read_only_fields = ['created_at', 'updated_at']
 
 

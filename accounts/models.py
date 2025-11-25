@@ -120,7 +120,8 @@ class Student(TimestampedModel):
 class Teacher(TimestampedModel):
     profile = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="teacher")
     school = models.ForeignKey('accounts.School', on_delete=models.SET_NULL, null=True, blank=True, related_name="teachers")
-    # subject relationship handled as M2M from content.Subject to Teacher to allow multi-subjects
+    status = models.CharField(max_length=30, choices=[(s.value, s.value) for s in StatusEnum], default=StatusEnum.PENDING.value)
+    moderation_comment = models.TextField(blank=True, default="")
 
     def __str__(self) -> str:
         return f"Teacher: {self.profile.name}"
