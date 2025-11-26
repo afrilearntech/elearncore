@@ -71,6 +71,7 @@ class StudentSerializer(serializers.ModelSerializer):
 
 
 class TeacherSerializer(serializers.ModelSerializer):
+	profile = UserSerializer(read_only=True)
 	class Meta:
 		model = Teacher
 		fields = ['id', 'profile', 'school', 'status', 'moderation_comment', 'created_at', 'updated_at']
