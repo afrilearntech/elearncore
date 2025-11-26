@@ -139,8 +139,11 @@ class SubjectViewSet(viewsets.ModelViewSet):
 	def retrieve(self, request, *args, **kwargs):
 		"""Return subject detail plus basic aggregated stats."""
 		instance: Subject = self.get_object()
-		print(f'Instance: {instance}')
 		data = self.get_serializer(instance).data
+
+		# Attach topics for this subject
+		topics_qs = Topic.objects.filter(subject=instance).order_by('name')
+		data['topics'] = TopicSerializer(topics_qs, many=True).data
 
 		# Total instructors linked to this subject
 		total_instructors = instance.teachers.count()
