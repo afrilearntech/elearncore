@@ -40,7 +40,7 @@ from accounts.models import User, Student, Teacher, Parent, School, County, Dist
 from accounts.serializers import (
 	SchoolLookupSerializer, CountyLookupSerializer, DistrictLookupSerializer,
 	CountySerializer, DistrictSerializer, SchoolSerializer,
-	StudentSerializer, TeacherSerializer,
+	StudentSerializer, TeacherSerializer, UserSerializer,
 )
 from .serializers import ProfileSetupSerializer, UserRoleSerializer, AboutUserSerializer, LinkChildSerializer, LoginSerializer
 
@@ -1331,7 +1331,7 @@ class LoginViewSet(viewsets.ViewSet):
 
 		return Response({
 			"token": token,
-			"user": {"id": user.id, "name": user.name, "phone": user.phone, "email": user.email, "role": user.role},
+			"user": UserSerializer(user).data,
 			**({"student": student_payload} if student_payload else {}),
 		})
 
