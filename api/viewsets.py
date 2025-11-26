@@ -476,6 +476,11 @@ class ContentViewSet(viewsets.ViewSet):
 		"""
 		if request.method == 'GET':
 			qs = Subject.objects.all().order_by('name')
+			# Content creators should only see subjects they created;
+			# validators/admins can still see all subjects.
+			user = request.user
+			if user and user.is_authenticated and IsContentCreator().has_permission(request, self) and not IsContentValidator().has_permission(request, self):
+				qs = qs.filter(created_by=user)
 			return Response(SubjectSerializer(qs, many=True).data)
 
 		# POST - creation requires creator capability
@@ -498,6 +503,9 @@ class ContentViewSet(viewsets.ViewSet):
 		"""List or create lessons (LessonResource)."""
 		if request.method == 'GET':
 			qs = LessonResource.objects.select_related('subject').all().order_by('-created_at')
+			user = request.user
+			if user and user.is_authenticated and IsContentCreator().has_permission(request, self) and not IsContentValidator().has_permission(request, self):
+				qs = qs.filter(created_by=user)
 			return Response(LessonResourceSerializer(qs, many=True).data)
 
 		deny = self._require_creator(request)
@@ -519,6 +527,15 @@ class ContentViewSet(viewsets.ViewSet):
 		"""List or create general assessments."""
 		if request.method == 'GET':
 			qs = GeneralAssessment.objects.select_related('given_by').all().order_by('-created_at')
+			user = request.user
+			if user and user.is_authenticated and IsContentCreator().has_permission(request, self) and not IsContentValidator().has_permission(request, self):
+				# For creator role, restrict to assessments created by them.
+				# GeneralAssessment does not have created_by; it links to a teacher via given_by.
+				teacher = getattr(user, 'teacher', None)
+				if teacher is not None:
+					qs = qs.filter(given_by=teacher)
+				else:
+					qs = qs.none()
 			return Response(GeneralAssessmentSerializer(qs, many=True).data)
 
 		deny = self._require_creator(request)
@@ -540,6 +557,13 @@ class ContentViewSet(viewsets.ViewSet):
 		"""List or create lesson assessments."""
 		if request.method == 'GET':
 			qs = LessonAssessment.objects.select_related('lesson').all().order_by('-created_at')
+			user = request.user
+			if user and user.is_authenticated and IsContentCreator().has_permission(request, self) and not IsContentValidator().has_permission(request, self):
+				teacher = getattr(user, 'teacher', None)
+				if teacher is not None:
+					qs = qs.filter(given_by=teacher)
+				else:
+					qs = qs.none()
 			return Response(LessonAssessmentSerializer(qs, many=True).data)
 
 		deny = self._require_creator(request)
@@ -616,6 +640,9 @@ class ContentViewSet(viewsets.ViewSet):
 		"""List or create games for content management."""
 		if request.method == 'GET':
 			qs = GameModel.objects.all().order_by('-created_at')
+			user = request.user
+			if user and user.is_authenticated and IsContentCreator().has_permission(request, self) and not IsContentValidator().has_permission(request, self):
+				qs = qs.filter(created_by=user)
 			return Response(GameSerializer(qs, many=True).data)
 
 		deny = self._require_creator(request)
@@ -637,6 +664,9 @@ class ContentViewSet(viewsets.ViewSet):
 		"""List or create schools."""
 		if request.method == 'GET':
 			qs = School.objects.select_related('district__county').all().order_by('name')
+			user = request.user
+			if user and user.is_authenticated and IsContentCreator().has_permission(request, self) and not IsContentValidator().has_permission(request, self):
+				qs = qs.filter(created_by=user)
 			return Response(SchoolSerializer(qs, many=True).data)
 
 		deny = self._require_creator(request)
@@ -675,6 +705,9 @@ class ContentViewSet(viewsets.ViewSet):
 		"""List or create counties."""
 		if request.method == 'GET':
 			qs = County.objects.all().order_by('name')
+			user = request.user
+			if user and user.is_authenticated and IsContentCreator().has_permission(request, self) and not IsContentValidator().has_permission(request, self):
+				qs = qs.filter(created_by=user)
 			return Response(CountySerializer(qs, many=True).data)
 
 		deny = self._require_creator(request)
@@ -696,6 +729,9 @@ class ContentViewSet(viewsets.ViewSet):
 		"""List or create districts."""
 		if request.method == 'GET':
 			qs = District.objects.select_related('county').all().order_by('name')
+			user = request.user
+			if user and user.is_authenticated and IsContentCreator().has_permission(request, self) and not IsContentValidator().has_permission(request, self):
+				qs = qs.filter(created_by=user)
 			return Response(DistrictSerializer(qs, many=True).data)
 
 		deny = self._require_creator(request)
