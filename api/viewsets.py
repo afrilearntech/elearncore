@@ -1135,6 +1135,61 @@ class LoginViewSet(viewsets.ViewSet):
 
 	serializer_class = DummySerializer
 
+	@extend_schema(
+		description=(
+			"Return the authenticated user's profile, including any attached "
+			"role-specific profile (student, teacher, or parent)."
+		),
+		responses={200: OpenApiResponse(description="User profile payload")},
+	)
+	@action(detail=False, methods=['get'], url_path='userprofile', permission_classes=[permissions.IsAuthenticated])
+	def userprofile(self, request):
+		"""Return the current authenticated user's profile and attached role profile.
+
+		Response structure:
+		- user: basic fields (id, name, email, phone, role)
+		- student / teacher / parent: included when available for that user.
+		"""
+		user: User = request.user
+		payload = {
+			"user": {
+				"id": user.id,
+				"name": getattr(user, "name", None),
+				"phone": getattr(user, "phone", None),
+				"email": getattr(user, "email", None),
+				"dob": getattr(user, "dob", None),
+				"gender": getattr(user, "gender", None),
+				"role": getattr(user, "role", None),
+			}
+		}
+
+		# Attach student profile snapshot, if present
+		student = getattr(user, 'student', None)
+		if student is not None:
+			payload["student"] = {
+				"id": student.id,
+				"grade": getattr(student, "grade", None),
+				"status": getattr(student, "status", None),
+			}
+
+		# Attach teacher profile snapshot, if present
+		teacher = getattr(user, 'teacher', None)
+		if teacher is not None:
+			payload["teacher"] = {
+				"id": teacher.id,
+				"school_id": getattr(teacher, "school_id", None),
+				"status": getattr(teacher, "status", None),
+			}
+
+		# Attach parent profile snapshot, if present
+		parent = getattr(user, 'parent', None)
+		if parent is not None:
+			payload["parent"] = {
+				"id": parent.id,
+			}
+
+		return Response(payload)
+
 	@extend_schema(request=LoginSerializer, responses={200: OpenApiResponse(description="Token and user payload")})
 	@action(detail=False, methods=['post'], url_path='student')
 	def studentlogin(self, request):
