@@ -241,6 +241,18 @@ class TopicViewSet(viewsets.ModelViewSet):
 	search_fields = ['name']
 	ordering_fields = ['name', 'created_at']
 
+	def get_queryset(self):
+		"""Optionally filter topics by subject id via ?subject=<id>."""
+		qs = super().get_queryset()
+		subject_id = self.request.query_params.get('subject') if hasattr(self, 'request') else None
+		if subject_id:
+			try:
+				qs = qs.filter(subject_id=int(subject_id))
+			except (TypeError, ValueError):
+				# Ignore invalid subject values and return the unfiltered queryset
+				pass
+		return qs
+
 	@method_decorator(cache_page(60 * 5), name='list')
 	@method_decorator(cache_page(60 * 10), name='retrieve')
 	def dispatch(self, *args, **kwargs):
