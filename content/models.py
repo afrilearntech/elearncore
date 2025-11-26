@@ -56,26 +56,15 @@ class GamePlay(TimestampedModel):
 		return f"{getattr(self.student.profile, 'name', 'Student')} -> {self.game.name}"
 
 
-class Objective(TimestampedModel):
-	"""A reusable learning objective that can be linked to subjects."""
-	text = models.TextField()
-
-	class Meta:
-		ordering = ["id"]
-
-	def __str__(self) -> str:
-		return (self.text[:47] + "...") if len(self.text) > 50 else self.text
-
-
 class Subject(TimestampedModel):
 	name = models.CharField(max_length=120)
 	grade = models.CharField(max_length=20, choices=[(lvl.value, lvl.value) for lvl in StudentLevel])
 	description = models.TextField(blank=True, default="")
 	thumbnail = models.ImageField(upload_to='thumbnails/subjects/', null=True, blank=True)
 	created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='created_subjects')
-	# Many-to-many link to objectives; a subject may have many objectives,
-	# and an objective string can be reused across subjects.
-	objectives = models.ManyToManyField(Objective, related_name="subjects", blank=True)
+	# Store objectives as a single comma-separated string, but expose
+	# them as a list of strings via the serializer layer.
+	objectives = models.TextField(blank=True, default="")
 	status = models.CharField(max_length=30, choices=[(s.value, s.value) for s in StatusEnum], default=StatusEnum.PENDING.value)
 
 	# Allow teachers to be linked to one or more subjects

@@ -4,58 +4,49 @@ from .models import (
 	Subject, Topic, Period, LessonResource, TakeLesson,
 	GeneralAssessment, GeneralAssessmentGrade,
 	LessonAssessment, LessonAssessmentGrade,
-	Question, Option, GameModel, Objective, AssessmentSolution,
+	Question, Option, GameModel, AssessmentSolution,
 )
 
 
-class ObjectiveSerializer(serializers.ModelSerializer):
-	class Meta:
-		model = Objective
-		fields = ['id', 'text']
-
-
 class SubjectSerializer(serializers.ModelSerializer):
-	# Accept objectives as a simple list of strings when creating/updating
+	# Expose objectives as a list of strings while storing them
+	# internally as a single comma-separated string on the model.
 	objectives = serializers.ListField(
 		child=serializers.CharField(),
-		write_only=True,
 		required=False,
 	)
-	objective_items = ObjectiveSerializer(source='objectives', many=True, read_only=True)
 
 	class Meta:
 		model = Subject
 		fields = [
 			'id', 'name', 'grade', 'status', 'description', 'thumbnail', 'teachers', 'moderation_comment',
-			'objective_items', 'objectives', 'created_at', 'updated_at', 'created_by',
+			'objectives', 'created_at', 'updated_at', 'created_by',
 		]
-		read_only_fields = ['created_at', 'updated_at', 'created_by', 'objective_items']
+		read_only_fields = ['created_at', 'updated_at', 'created_by']
+
+	def to_representation(self, instance):
+		data = super().to_representation(instance)
+		raw = instance.objectives or ""
+		# Split on commas and strip whitespace; filter out empties
+		items = [part.strip() for part in raw.split(',') if part.strip()]
+		data['objectives'] = items
+		return data
 
 	def create(self, validated_data):
-		objective_strings = validated_data.pop('objectives', [])
-		subject = super().create(validated_data)
-		self._set_objectives(subject, objective_strings)
-		return subject
+		objective_list = validated_data.pop('objectives', []) or []
+		validated_data['objectives'] = self._join_objectives(objective_list)
+		return super().create(validated_data)
 
 	def update(self, instance, validated_data):
-		objective_strings = validated_data.pop('objectives', None)
-		instance = super().update(instance, validated_data)
-		if objective_strings is not None:
-			self._set_objectives(instance, objective_strings)
-		return instance
+		objective_list = validated_data.pop('objectives', None)
+		if objective_list is not None:
+			validated_data['objectives'] = self._join_objectives(objective_list)
+		return super().update(instance, validated_data)
 
-	def _set_objectives(self, subject: Subject, objective_strings):
-		# Normalize strings and deduplicate
-		texts = [s.strip() for s in objective_strings if str(s).strip()]
-		if not texts:
-			subject.objectives.clear()
-			return
-		# Get or create Objective rows
-		objs = []
-		for text in texts:
-			obj, _ = Objective.objects.get_or_create(text=text)
-			objs.append(obj)
-		subject.objectives.set(objs)
+	def _join_objectives(self, items):
+		# Normalize and join into a comma-separated string for storage
+		parts = [str(s).strip() for s in items if str(s).strip()]
+		return ", ".join(parts)
 
 
 class TopicSerializer(serializers.ModelSerializer):

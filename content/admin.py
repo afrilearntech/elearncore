@@ -1,7 +1,7 @@
 from django.contrib import admin
 
 from .models import (
-	Objective, Subject, Topic, Period, LessonResource, TakeLesson,
+	Subject, Topic, Period, LessonResource, TakeLesson,
 	GeneralAssessment, GeneralAssessmentGrade, AssessmentSolution,
 	LessonAssessment, LessonAssessmentGrade,
 	Question, Option, GameModel,
@@ -13,11 +13,6 @@ class SubjectAdmin(admin.ModelAdmin):
 	list_display = ("id", "name", "grade", "created_at")
 	list_filter = ("grade",)
 	search_fields = ("name",)
-
-@admin.register(Objective)
-class ObjectiveAdmin(admin.ModelAdmin):
-	list_display = ("id", "text", "created_at")
-	search_fields = ("text",)
 
 @admin.register(Topic)
 class TopicAdmin(admin.ModelAdmin):
