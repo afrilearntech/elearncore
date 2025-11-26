@@ -9,20 +9,26 @@ from .models import (
 
 
 class SubjectSerializer(serializers.ModelSerializer):
-	# Expose objectives as a list of strings while storing them
-	# internally as a single comma-separated string on the model.
+	"""Read serializer: expose objectives as list of strings.
+
+	The underlying model stores objectives as a single comma-separated
+	string. This serializer converts that string into a list on output.
+	"""
+
 	objectives = serializers.ListField(
 		child=serializers.CharField(),
 		required=False,
 	)
 
+	teacher_count = serializers.IntegerField(read_only=True)
+
 	class Meta:
 		model = Subject
 		fields = [
 			'id', 'name', 'grade', 'status', 'description', 'thumbnail', 'teachers', 'moderation_comment',
-			'objectives', 'created_at', 'updated_at', 'created_by',
+			'objectives', 'created_at', 'updated_at', 'created_by', 'teacher_count',
 		]
-		read_only_fields = ['created_at', 'updated_at', 'created_by']
+		read_only_fields = ['created_at', 'teachers', 'updated_at', 'created_by']
 
 	def to_representation(self, instance):
 		data = super().to_representation(instance)
@@ -32,20 +38,42 @@ class SubjectSerializer(serializers.ModelSerializer):
 		data['objectives'] = items
 		return data
 
+
+class SubjectWriteSerializer(serializers.ModelSerializer):
+	"""Write serializer: accept objectives as a comma-separated string.
+
+	Swagger/clients will see a simple text field for objectives when
+	creating or updating subjects. Internally we normalize and store
+	as a comma-separated string.
+	"""
+
+	objectives = serializers.CharField(
+		required=False,
+		allow_blank=True,
+		help_text="Comma-separated list of objectives.",
+	)
+
+	class Meta:
+		model = Subject
+		fields = [
+			'id', 'name', 'grade', 'status', 'description', 'thumbnail', 'teachers', 'moderation_comment',
+			'objectives', 'created_at', 'updated_at', 'created_by',
+		]
+		read_only_fields = ['created_at', 'teachers', 'updated_at', 'created_by']
+
 	def create(self, validated_data):
-		objective_list = validated_data.pop('objectives', []) or []
-		validated_data['objectives'] = self._join_objectives(objective_list)
+		raw = validated_data.get('objectives') or ""
+		validated_data['objectives'] = self._normalize_objectives(raw)
 		return super().create(validated_data)
 
 	def update(self, instance, validated_data):
-		objective_list = validated_data.pop('objectives', None)
-		if objective_list is not None:
-			validated_data['objectives'] = self._join_objectives(objective_list)
+		if 'objectives' in validated_data:
+			raw = validated_data.get('objectives') or ""
+			validated_data['objectives'] = self._normalize_objectives(raw)
 		return super().update(instance, validated_data)
 
-	def _join_objectives(self, items):
-		# Normalize and join into a comma-separated string for storage
-		parts = [str(s).strip() for s in items if str(s).strip()]
+	def _normalize_objectives(self, raw: str) -> str:
+		parts = [part.strip() for part in str(raw).split(',') if part.strip()]
 		return ", ".join(parts)
 
 

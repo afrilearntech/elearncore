@@ -7,3 +7,4 @@ __pycache__/
 cmd.txt
 deployment
 assets
+schema.yaml

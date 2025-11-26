@@ -71,6 +71,10 @@ class Subject(TimestampedModel):
 	teachers = models.ManyToManyField('accounts.Teacher', related_name='subjects', blank=True)
 	moderation_comment = models.TextField(blank=True, default="")
 
+	@property
+	def teacher_count(self) -> int:
+		return self.teachers.count()
+
 	class Meta:
 		unique_together = ("name", "grade")
 

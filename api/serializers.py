@@ -37,3 +37,58 @@ class LinkChildSerializer(serializers.Serializer):
 class LoginSerializer(serializers.Serializer):
     identifier = serializers.CharField(help_text="Phone or Email")
     password = serializers.CharField(write_only=True, min_length=6)
+
+
+class ContentModerationSerializer(serializers.Serializer):
+    model = serializers.ChoiceField(
+        choices=[
+            "subject",
+            "lesson",
+            "general_assessment",
+            "lesson_assessment",
+            "game",
+            "school",
+            "county",
+            "district",
+            "student",
+            "teacher",
+        ],
+    )
+    id = serializers.IntegerField()
+    action = serializers.ChoiceField(choices=["approve", "reject", "request_changes", "request_review"])
+    moderation_comment = serializers.CharField(required=False, allow_blank=True)
+
+
+class ContentModerationResponseSerializer(serializers.Serializer):
+    id = serializers.IntegerField()
+    model = serializers.CharField()
+    status = serializers.CharField()
+    moderation_comment = serializers.CharField(allow_null=True, required=False)
+
+
+class ContentAssessmentItemSerializer(serializers.Serializer):
+    kind = serializers.ChoiceField(choices=["general", "lesson"])
+    id = serializers.IntegerField()
+    title = serializers.CharField()
+    type = serializers.CharField()
+    marks = serializers.FloatField()
+    status = serializers.CharField()
+    due_at = serializers.CharField(allow_null=True)
+    grade = serializers.CharField(allow_null=True, required=False)
+    lesson_id = serializers.IntegerField(allow_null=True, required=False)
+    lesson_title = serializers.CharField(allow_null=True, required=False)
+    subject_id = serializers.IntegerField(allow_null=True, required=False)
+    subject_name = serializers.CharField(allow_null=True, required=False)
+    given_by_id = serializers.IntegerField(allow_null=True, required=False)
+
+
+class ContentDashboardCountsSerializer(serializers.Serializer):
+    total = serializers.IntegerField()
+    approved = serializers.IntegerField()
+    rejected = serializers.IntegerField()
+    review_requested = serializers.IntegerField()
+
+
+class ContentDashboardSerializer(serializers.Serializer):
+    overall = ContentDashboardCountsSerializer()
+    by_type = serializers.DictField(child=ContentDashboardCountsSerializer())

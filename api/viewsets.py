@@ -25,6 +25,7 @@ from django.core.cache import cache
 from content.serializers import (
 	AssessmentSolutionSerializer,
 	SubjectSerializer,
+	SubjectWriteSerializer,
 	TopicSerializer,
 	PeriodSerializer,
 	LessonResourceSerializer,
@@ -42,7 +43,17 @@ from accounts.serializers import (
 	CountySerializer, DistrictSerializer, SchoolSerializer,
 	StudentSerializer, TeacherSerializer, UserSerializer,
 )
-from .serializers import ProfileSetupSerializer, UserRoleSerializer, AboutUserSerializer, LinkChildSerializer, LoginSerializer
+from .serializers import (
+	ProfileSetupSerializer,
+	UserRoleSerializer,
+	AboutUserSerializer,
+	LinkChildSerializer,
+	LoginSerializer,
+	ContentModerationSerializer,
+	ContentModerationResponseSerializer,
+	ContentAssessmentItemSerializer,
+	ContentDashboardSerializer,
+)
 
 
 # ----- Permissions -----
@@ -462,13 +473,14 @@ class ContentViewSet(viewsets.ViewSet):
 			return Response({"detail": "Content validator role required."}, status=status.HTTP_403_FORBIDDEN)
 		return None
 
-	@action(detail=False, methods=['get', 'post'], url_path='subjects')
+	
 	@extend_schema(
 		operation_id="content_subjects",
-		request=SubjectSerializer,
+		request=SubjectWriteSerializer,
 		responses={200: SubjectSerializer(many=True)},
 		description="List or create subjects for content management.",
 	)
+	@action(detail=False, methods=['get', 'post'], url_path='subjects')
 	def subjects(self, request):
 		"""List or create subjects.
 
@@ -487,18 +499,19 @@ class ContentViewSet(viewsets.ViewSet):
 		deny = self._require_creator(request)
 		if deny:
 			return deny
-		ser = SubjectSerializer(data=request.data)
+		ser = SubjectWriteSerializer(data=request.data)
 		ser.is_valid(raise_exception=True)
 		obj = ser.save(created_by=request.user)
 		return Response(SubjectSerializer(obj).data, status=status.HTTP_201_CREATED)
 
-	@action(detail=False, methods=['get', 'post'], url_path='lessons')
+	
 	@extend_schema(
 		operation_id="content_lessons",
 		request=LessonResourceSerializer,
 		responses={200: LessonResourceSerializer(many=True)},
 		description="List or create lessons (LessonResource) for content management.",
 	)
+	@action(detail=False, methods=['get', 'post'], url_path='lessons')
 	def lessons(self, request):
 		"""List or create lessons (LessonResource)."""
 		if request.method == 'GET':
@@ -516,13 +529,13 @@ class ContentViewSet(viewsets.ViewSet):
 		obj = ser.save(created_by=request.user)
 		return Response(LessonResourceSerializer(obj).data, status=status.HTTP_201_CREATED)
 
-	@action(detail=False, methods=['get', 'post'], url_path='general-assessments')
 	@extend_schema(
 		operation_id="content_general_assessments",
 		request=GeneralAssessmentSerializer,
 		responses={200: GeneralAssessmentSerializer(many=True)},
 		description="List or create general assessments for content management.",
 	)
+	@action(detail=False, methods=['get', 'post'], url_path='general-assessments')
 	def general_assessments(self, request):
 		"""List or create general assessments."""
 		if request.method == 'GET':
@@ -546,13 +559,13 @@ class ContentViewSet(viewsets.ViewSet):
 		obj = ser.save()
 		return Response(GeneralAssessmentSerializer(obj).data, status=status.HTTP_201_CREATED)
 
-	@action(detail=False, methods=['get', 'post'], url_path='lesson-assessments')
 	@extend_schema(
 		operation_id="content_lesson_assessments",
 		request=LessonAssessmentSerializer,
 		responses={200: LessonAssessmentSerializer(many=True)},
 		description="List or create lesson assessments for content management.",
 	)
+	@action(detail=False, methods=['get', 'post'], url_path='lesson-assessments')
 	def lesson_assessments(self, request):
 		"""List or create lesson assessments."""
 		if request.method == 'GET':
@@ -574,15 +587,15 @@ class ContentViewSet(viewsets.ViewSet):
 		obj = ser.save()
 		return Response(LessonAssessmentSerializer(obj).data, status=status.HTTP_201_CREATED)
 
-	@action(detail=False, methods=['get'], url_path='all-assessments')
 	@extend_schema(
 		operation_id="content_all_assessments",
-		responses={200: None},
+		responses={200: ContentAssessmentItemSerializer(many=True)},
 		description=(
 			"Return both general and lesson assessments in a single response. "
 			"Each item includes a 'kind' field (general|lesson)."
 		),
 	)
+	@action(detail=False, methods=['get'], url_path='all-assessments')
 	def all_assessments(self, request):
 		"""Return a combined list of general and lesson assessments."""
 		general_qs = GeneralAssessment.objects.select_related('given_by').all().order_by('-created_at')
@@ -629,13 +642,13 @@ class ContentViewSet(viewsets.ViewSet):
 		combined.sort(key=_sort_key, reverse=True)
 		return Response(combined)
 
-	@action(detail=False, methods=['get', 'post'], url_path='games')
 	@extend_schema(
 		operation_id="content_games",
 		request=GameSerializer,
 		responses={200: GameSerializer(many=True)},
 		description="List or create games for content management.",
 	)
+	@action(detail=False, methods=['get', 'post'], url_path='games')
 	def games(self, request):
 		"""List or create games for content management."""
 		if request.method == 'GET':
@@ -653,13 +666,13 @@ class ContentViewSet(viewsets.ViewSet):
 		obj = ser.save(created_by=request.user)
 		return Response(GameSerializer(obj).data, status=status.HTTP_201_CREATED)
 
-	@action(detail=False, methods=['get', 'post'], url_path='schools')
 	@extend_schema(
 		operation_id="content_schools",
 		request=SchoolSerializer,
 		responses={200: SchoolSerializer(many=True)},
 		description="List or create schools for content management.",
 	)
+	@action(detail=False, methods=['get', 'post'], url_path='schools')
 	def schools(self, request):
 		"""List or create schools."""
 		if request.method == 'GET':
@@ -677,7 +690,6 @@ class ContentViewSet(viewsets.ViewSet):
 		obj = ser.save()
 		return Response(SchoolSerializer(obj).data, status=status.HTTP_201_CREATED)
 
-	@action(detail=False, methods=['get', 'post'], url_path='counties')
 	@extend_schema(
 		operation_id="content_counties",
 		request=CountySerializer,
@@ -701,6 +713,7 @@ class ContentViewSet(viewsets.ViewSet):
 			),
 		],
 	)
+	@action(detail=False, methods=['get', 'post'], url_path='counties')
 	def counties(self, request):
 		"""List or create counties."""
 		if request.method == 'GET':
@@ -718,13 +731,13 @@ class ContentViewSet(viewsets.ViewSet):
 		obj = ser.save()
 		return Response(CountySerializer(obj).data, status=status.HTTP_201_CREATED)
 
-	@action(detail=False, methods=['get', 'post'], url_path='districts')
 	@extend_schema(
 		operation_id="content_districts",
 		request=DistrictSerializer,
 		responses={200: DistrictSerializer(many=True)},
 		description="List or create districts for content management.",
 	)
+	@action(detail=False, methods=['get', 'post'], url_path='districts')
 	def districts(self, request):
 		"""List or create districts."""
 		if request.method == 'GET':
@@ -742,12 +755,12 @@ class ContentViewSet(viewsets.ViewSet):
 		obj = ser.save()
 		return Response(DistrictSerializer(obj).data, status=status.HTTP_201_CREATED)
 
-	@action(detail=False, methods=['get'], url_path='teachers')
 	@extend_schema(
 		operation_id="content_teachers",
 		responses={200: TeacherSerializer(many=True)},
 		description="List all teachers for content management (read-only).",
 	)
+	@action(detail=False, methods=['get'], url_path='teachers')
 	def teachers(self, request):
 		"""Return all teacher profiles.
 
@@ -757,12 +770,12 @@ class ContentViewSet(viewsets.ViewSet):
 		qs = Teacher.objects.select_related('profile', 'school').all().order_by('profile__name')
 		return Response(TeacherSerializer(qs, many=True).data)
 
-	@action(detail=False, methods=['get'], url_path='teachers/(?P<pk>[^/.]+)')
 	@extend_schema(
 		operation_id="content_teacher_detail",
 		responses={200: TeacherSerializer},
 		description="Retrieve a single teacher by id for content management.",
 	)
+	@action(detail=False, methods=['get'], url_path='teachers/(?P<pk>[^/.]+)')
 	def teacher_detail(self, request, pk=None):
 		"""Return a single teacher profile by id."""
 		try:
@@ -771,15 +784,15 @@ class ContentViewSet(viewsets.ViewSet):
 			return Response({"detail": "Teacher not found."}, status=404)
 		return Response(TeacherSerializer(teacher).data)
 
-	@action(detail=False, methods=['get'], url_path='dashboard')
 	@extend_schema(
 		operation_id="content_dashboard",
-		responses={200: None},
+		responses={200: ContentDashboardSerializer},
 		description=(
 			"Summary stats for content managers. Returns counts for four cards: "
 			"Total content items, Approved, Rejected, and Reviews Requested (review_requested)."
 		),
 	)
+	@action(detail=False, methods=['get'], url_path='dashboard')
 	def dashboard(self, request):
 		"""Return high-level status counts for all manageable content types.
 
@@ -849,39 +862,16 @@ class ContentViewSet(viewsets.ViewSet):
 			}
 		)
 
-	@action(detail=False, methods=['post'], url_path='moderate')
 	@extend_schema(
 		operation_id="content_moderate",
-		request=OpenApiExample(
-			name="ContentModerationRequestBody",
-			value={
-				"model": "lesson",
-				"id": 123,
-				"action": "request_changes",
-				"moderation_comment": "Please clarify the grading rubric.",
-			},
-		),
-		responses={
-			200: OpenApiResponse(
-				description="Moderation result.",
-				examples=[
-					OpenApiExample(
-						name="ModerationResponseExample",
-						value={
-							"id": 123,
-							"model": "lesson",
-							"status": "review_requested",
-							"moderation_comment": "Please clarify the grading rubric.",
-						},
-					),
-				],
-			),
-		},
+		request=ContentModerationSerializer,
+		responses={200: ContentModerationResponseSerializer},
 		description=(
 			"Moderate a content object by approving, rejecting, or requesting changes. "
 			"Requires content validator role."
 		),
 	)
+	@action(detail=False, methods=['post'], url_path='moderate')
 	def moderate(self, request):
 		"""Generic moderation endpoint for validators.
 
