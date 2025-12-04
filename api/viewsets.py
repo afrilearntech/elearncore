@@ -784,6 +784,70 @@ class ParentViewSet(viewsets.ViewSet):
 		})
 
 	@extend_schema(
+		operation_id="parent_linkchild",
+		request=LinkChildSerializer,
+		responses={200: OpenApiResponse(description="Child linked successfully.")},
+		description=(
+			"Link an existing student to the authenticated parent. "
+			"Allows passing student id, email/phone for verification, and "
+			"optionally school id and grade to update the student profile."
+		),
+	)
+	@action(detail=False, methods=['post'], url_path='linkchild')
+	def parent_linkchild(self, request):
+		"""Link a student to the authenticated parent.
+
+		Body fields:
+		- student_id (required)
+		- student_email (optional)
+		- student_phone (optional)
+		- school_id (optional)
+		- grade (optional)
+		"""
+		user: User = request.user
+		if user.role != UserRole.PARENT.value or not hasattr(user, 'parent'):
+			return Response({"detail": "Only parents can link children."}, status=status.HTTP_403_FORBIDDEN)
+
+		student_id = request.data.get('student_id')
+		student_email = (request.data.get('student_email') or '').strip().lower()
+		student_phone = (request.data.get('student_phone') or '').strip()
+		school_id = request.data.get('school_id')
+		grade = request.data.get('grade')
+
+		if not student_id:
+			return Response({"detail": "student_id is required."}, status=status.HTTP_400_BAD_REQUEST)
+		if not (student_email or student_phone):
+			return Response({"detail": "Provide student_email or student_phone (or both)."}, status=status.HTTP_400_BAD_REQUEST)
+
+		qs = Student.objects.select_related('profile').filter(id=student_id)
+		if student_email:
+			qs = qs.filter(profile__email__iexact=student_email)
+		if student_phone:
+			qs = qs.filter(profile__phone=student_phone)
+		student = qs.first()
+		if not student:
+			return Response({"detail": "Student not found with provided identifiers."}, status=status.HTTP_404_NOT_FOUND)
+
+		# Optionally update school and grade
+		update_fields = []
+		if grade:
+			student.grade = str(grade)
+			update_fields.append('grade')
+		if school_id:
+			from accounts.models import School as AccountSchool
+			school_obj = AccountSchool.objects.filter(id=school_id).first()
+			if not school_obj:
+				return Response({"detail": "School not found."}, status=status.HTTP_400_BAD_REQUEST)
+			student.school = school_obj
+			update_fields.append('school')
+		if update_fields:
+			update_fields.append('updated_at') if hasattr(student, 'updated_at') else None
+			student.save(update_fields=[f for f in update_fields if f])
+
+		user.parent.wards.add(student)
+		return Response({"detail": "Child linked."})
+
+	@extend_schema(
 		operation_id="parent_mychildren",
 		request=None,
 		responses={200: ParentChildSerializer(many=True)},
@@ -1628,6 +1692,19 @@ class LoginViewSet(viewsets.ViewSet):
 		[password]: user's password
 		'''
 		return self._login_with_role(request, allowed_roles={UserRole.ADMIN.value})
+
+	@extend_schema(request=LoginSerializer, responses={200: OpenApiResponse(description="Token and user payload")})
+	@action(detail=False, methods=['post'], url_path='parent')
+	def parentlogin(self, request):
+		'''Parent login endpoint.\n
+		[identifier]: email or phone \n
+		[password]: user's password
+		'''
+		return self._login_with_role(
+			request,
+			allowed_roles={UserRole.PARENT.value},
+			forbidden_msg="Only parents can use this endpoint.",
+		)
 
 	@extend_schema(
 		description=(
