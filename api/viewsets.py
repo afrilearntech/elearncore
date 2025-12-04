@@ -56,6 +56,23 @@ from .serializers import (
 )
 
 
+class ParentChildSerializer(serializers.Serializer):
+	name = serializers.CharField()
+	student_id = serializers.CharField()
+	student_db_id = serializers.IntegerField()
+	grade = serializers.CharField(allow_null=True)
+	school = serializers.CharField(allow_null=True)
+
+
+class ParentGradeOverviewSerializer(serializers.Serializer):
+	child_name = serializers.CharField()
+	student_id = serializers.CharField()
+	subject = serializers.CharField()
+	overall_score = serializers.FloatField()
+	score_grade = serializers.CharField()
+	score_remark = serializers.CharField()
+
+
 # ----- Permissions -----
 def _user_role_in(user, roles: Iterable[str]) -> bool:
 	try:
@@ -405,6 +422,392 @@ class AIAbuseReportViewSet(viewsets.ReadOnlyModelViewSet):
 		if user and getattr(user, 'role', None) in {UserRole.ADMIN.value, UserRole.CONTENTVALIDATOR.value}:
 			return qs
 		return AIAbuseReport.objects.none()
+
+
+class ParentViewSet(viewsets.ViewSet):
+	"""Endpoints for parents to see information about their wards."""
+	permission_classes = [permissions.IsAuthenticated]
+
+	def _grade_for_score(self, score: float):
+		"""Map numeric score (0-100) to grade letter and remark."""
+		if score is None:
+			return "N/A", "No score"
+		# 96-100 A+
+		if score >= 96:
+			return "A+", "Excellent"
+		# 90-95 A-
+		if score >= 90:
+			return "A-", "Very good"
+		# 86-89 B+
+		if score >= 86:
+			return "B+", "Good"
+		# 80-85 B-
+		if score >= 80:
+			return "B-", "Good"
+		# 76-79 C+
+		if score >= 76:
+			return "C+", "Fair"
+		# 70-75 C-
+		if score >= 70:
+			return "C-", "Fair"
+		# 65-69 D+
+		if score >= 65:
+			return "D+", "Poor"
+		# 60-64 D-
+		if score >= 60:
+			return "D-", "Poor"
+		# Below 60 F
+		return "F", "Fail"
+
+	@extend_schema(
+		operation_id="parent_dashboard",
+		request=None,
+		responses={200: serializers.Serializer},
+		description="Parent dashboard with children list and grades overview across all wards.",
+	)
+	@action(detail=False, methods=['get'], url_path='dashboard')
+	def dashboard(self, request):
+		user: User = request.user
+		parent = getattr(user, 'parent', None)
+		if not parent:
+			return Response({"detail": "Parent profile required."}, status=status.HTTP_403_FORBIDDEN)
+
+		# Children list
+		children_payload = []
+		students = parent.wards.select_related('profile', 'school').all()
+		for stu in students:
+			children_payload.append({
+				"name": getattr(stu.profile, 'name', None),
+				"student_id": stu.student_id,
+				"student_db_id": stu.id,
+				"grade": stu.grade,
+				"school": getattr(stu.school, 'name', None) if stu.school else None,
+			})
+
+		# Grades overview combined across all wards
+		grades_by_key: Dict[tuple, List[float]] = {}
+		student_map: Dict[int, tuple] = {}
+		for stu in students:
+			student_map[stu.id] = (getattr(stu.profile, 'name', None), stu.student_id)
+
+			# General assessment grades with subject via assessment.title/grade scope is not subject-specific.
+			# For now we won't include these in subject-based overview.
+
+			# Lesson assessment grades -> subject via lesson.subject
+			lesson_grades = (
+				LessonAssessmentGrade.objects
+				.select_related('lesson_assessment__lesson__subject')
+				.filter(student=stu)
+			)
+			for g in lesson_grades:
+				subject = getattr(getattr(getattr(g.lesson_assessment, 'lesson', None), 'subject', None), 'name', None)
+				if not subject:
+					continue
+				key = (stu.id, subject)
+				grades_by_key.setdefault(key, []).append(float(g.score))
+
+		grades_overview = []
+		for (student_id, subject_name), scores in grades_by_key.items():
+			if not scores:
+				continue
+			avg_score = sum(scores) / len(scores)
+			grade_letter, remark = self._grade_for_score(avg_score)
+			child_name, child_student_id = student_map.get(student_id, (None, None))
+			grades_overview.append({
+				"child_name": child_name,
+				"student_id": child_student_id,
+				"subject": subject_name,
+				"overall_score": round(avg_score, 2),
+				"score_grade": grade_letter,
+				"score_remark": remark,
+			})
+
+		response_data = {
+			"children": children_payload,
+			"grades_overview": grades_overview,
+		}
+		return Response(response_data)
+
+	@extend_schema(
+		operation_id="parent_grades",
+		request=None,
+		responses={200: ParentGradeOverviewSerializer(many=True)},
+		description="Flat list of all individual lesson assessment grades for all wards of the parent.",
+	)
+	@action(detail=False, methods=['get'], url_path='grades')
+	def grades(self, request):
+		"""Return all individual grades for all wards of the parent.
+
+		Each item includes child name, subject name, percentage score,
+		letter grade and remark, and when it was last updated.
+		"""
+		user: User = request.user
+		parent = getattr(user, 'parent', None)
+		if not parent:
+			return Response({"detail": "Parent profile required."}, status=status.HTTP_403_FORBIDDEN)
+
+		students = parent.wards.select_related('profile').all()
+		if not students:
+			return Response([])
+
+		student_ids = [s.id for s in students]
+		name_by_id = {s.id: getattr(s.profile, 'name', None) for s in students}
+		code_by_id = {s.id: s.student_id for s in students}
+
+		items = []
+		# Use lesson assessment grades because they map cleanly to a subject
+		qs = (
+			LessonAssessmentGrade.objects
+			.select_related('student__profile', 'lesson_assessment__lesson__subject')
+			.filter(student_id__in=student_ids)
+		)
+		for g in qs:
+			student_id = g.student_id
+			child_name = name_by_id.get(student_id)
+			child_code = code_by_id.get(student_id)
+			subject_name = getattr(getattr(getattr(g.lesson_assessment, 'lesson', None), 'subject', None), 'name', None)
+			if not subject_name:
+				continue
+			# Assume score is already a percentage (0-100)
+			percentage = float(g.score)
+			grade_letter, remark = self._grade_for_score(percentage)
+			items.append({
+				"child_name": child_name,
+				"student_id": child_code,
+				"subject": subject_name,
+				"overall_score": round(percentage, 2),
+				"score_grade": grade_letter,
+				"score_remark": remark,
+				"updated_at": getattr(g, 'updated_at', None),
+			})
+
+		return Response(items)
+
+	@extend_schema(
+		operation_id="parent_assessments",
+		request=None,
+		responses={200: OpenApiResponse(description="Assessments list with summary.")},
+		description=(
+			"List all assessments (general and lesson) relevant to the parent's children, "
+			"including child scores when available, and a summary of completion status."
+		),
+	)
+	@action(detail=False, methods=['get'], url_path='assessments')
+	def assessments(self, request):
+		"""Return all assessments relevant to the parent's children.
+
+		Each item includes child, assessment, subject, type, allocated score,
+		child score (if graded), status, start and due dates. A summary is
+		also included with counts for Completed, Pending and In Progress.
+		"""
+		user: User = request.user
+		parent = getattr(user, 'parent', None)
+		if not parent:
+			return Response({"detail": "Parent profile required."}, status=status.HTTP_403_FORBIDDEN)
+
+		students = list(parent.wards.select_related('profile'))
+		if not students:
+			return Response({"assessments": [], "summary": {"completed": 0, "pending": 0, "in_progress": 0}})
+
+		student_ids = [s.id for s in students]
+		name_by_id = {s.id: getattr(s.profile, 'name', None) for s in students}
+
+		items = []
+		completed = pending = in_progress = 0
+
+		# Lesson assessments: scoped via subject.grade to the student's grade
+		lesson_assessments = (
+			LessonAssessment.objects
+			.select_related('lesson__subject')
+			.filter(lesson__subject__grade__in=[s.grade for s in students])
+		)
+
+		# Preload grades for lesson assessments per (assessment_id, student_id)
+		lag_qs = LessonAssessmentGrade.objects.filter(student_id__in=student_ids)
+		lag_map: Dict[tuple, LessonAssessmentGrade] = {}
+		for g in lag_qs.select_related('lesson_assessment'):
+			lag_map[(g.lesson_assessment_id, g.student_id)] = g
+
+		from elearncore.sysutils.constants import AssessmentType
+
+		def _status_for(child_score, due_at, now):
+			if child_score is not None:
+				return "Completed"
+			if due_at and due_at < now:
+				return "Pending"
+			return "In Progress"
+
+		now = timezone.now()
+
+		for la in lesson_assessments:
+			subject = getattr(getattr(la.lesson, 'subject', None), 'name', None)
+			for student in students:
+				grade_rec = lag_map.get((la.id, student.id))
+				child_score = float(grade_rec.score) if grade_rec else None
+				status_label = _status_for(child_score, la.due_at, now)
+				if status_label == "Completed":
+					completed += 1
+				elif status_label == "Pending":
+					pending += 1
+				else:
+					in_progress += 1
+				items.append({
+					"child_name": name_by_id.get(student.id),
+					"assessment_title": la.title,
+					"subject": subject,
+					"assessment_type": la.type,
+					"assessment_score": float(la.marks),
+					"child_score": float(child_score) if child_score is not None else None,
+					"assessment_status": status_label,
+					"start_date": la.created_at,
+					"due_date": la.due_at,
+				})
+
+		# General assessments: not subject-specific in the model; we keep subject as None
+		general_assessments = GeneralAssessment.objects.all()
+		gag_qs = GeneralAssessmentGrade.objects.filter(student_id__in=student_ids)
+		gag_map: Dict[tuple, GeneralAssessmentGrade] = {}
+		for g in gag_qs.select_related('assessment'):
+			gag_map[(g.assessment_id, g.student_id)] = g
+
+		for ga in general_assessments:
+			for student in students:
+				grade_rec = gag_map.get((ga.id, student.id))
+				child_score = float(grade_rec.score) if grade_rec else None
+				status_label = _status_for(child_score, ga.due_at, now)
+				if status_label == "Completed":
+					completed += 1
+				elif status_label == "Pending":
+					pending += 1
+				else:
+					in_progress += 1
+				items.append({
+					"child_name": name_by_id.get(student.id),
+					"assessment_title": ga.title,
+					"subject": None,
+					"assessment_type": ga.type,
+					"assessment_score": float(ga.marks),
+					"child_score": float(child_score) if child_score is not None else None,
+					"assessment_status": status_label,
+					"start_date": ga.created_at,
+					"due_date": ga.due_at,
+				})
+
+		return Response({
+			"assessments": items,
+			"summary": {
+				"completed": completed,
+				"pending": pending,
+				"in_progress": in_progress,
+			},
+		})
+
+	@extend_schema(
+		operation_id="parent_submissions",
+		request=None,
+		responses={200: OpenApiResponse(description="Submissions list with summary.")},
+		description=(
+			"List all assessment submissions made by the parent's children, "
+			"including grading status and solution details."
+		),
+	)
+	@action(detail=False, methods=['get'], url_path='submissions')
+	def submissions(self, request):
+		"""Return all submissions for the parent's children.
+
+		Each item includes child name, assessment title, subject name,
+		child score (if graded), allocated score, submission status,
+		solution details, and submission date.
+		"""
+		user: User = request.user
+		parent = getattr(user, 'parent', None)
+		if not parent:
+			return Response({"detail": "Parent profile required."}, status=status.HTTP_403_FORBIDDEN)
+
+		students = list(parent.wards.select_related('profile'))
+		if not students:
+			return Response({"submissions": [], "summary": {"graded": 0, "pending": 0}})
+
+		student_ids = [s.id for s in students]
+		name_by_id = {s.id: getattr(s.profile, 'name', None) for s in students}
+
+		graded_count = pending_count = 0
+		items = []
+
+		# General assessment submissions (use AssessmentSolution and GeneralAssessmentGrade)
+		solutions = (
+			AssessmentSolution.objects
+			.select_related('assessment', 'student__profile')
+			.filter(student_id__in=student_ids)
+		)
+		# Map grades by solution id
+		grade_by_solution_id: Dict[int, GeneralAssessmentGrade] = {}
+		for g in GeneralAssessmentGrade.objects.filter(student_id__in=student_ids).select_related('assessment', 'solution'):
+			if g.solution_id:
+				grade_by_solution_id[g.solution_id] = g
+
+		for sol in solutions:
+			student_id = sol.student_id
+			child_name = name_by_id.get(student_id)
+			assessment = sol.assessment
+			grade_obj = grade_by_solution_id.get(sol.id)
+			child_score = float(grade_obj.score) if grade_obj else None
+			allocated = float(getattr(assessment, 'marks', 0.0) or 0.0)
+			status_label = "Graded" if grade_obj else "Pending Review"
+			if grade_obj:
+				graded_count += 1
+			else:
+				pending_count += 1
+			items.append({
+				"child_name": child_name,
+				"assessment_title": getattr(assessment, 'title', None),
+				"subject": None,
+				"score": child_score,
+				"assessment_score": allocated,
+				"submission_status": status_label,
+				"solution": {
+					"solution": sol.solution,
+					"attachment": sol.attachment.url if getattr(sol, 'attachment', None) else None,
+				},
+				"date_submitted": sol.submitted_at,
+			})
+
+		# Note: Lesson assessments currently don't have a dedicated solution model;
+		# if added later, similar logic can be applied for those.
+
+		return Response({
+			"submissions": items,
+			"summary": {
+				"graded": graded_count,
+				"pending": pending_count,
+			},
+		})
+
+	@extend_schema(
+		operation_id="parent_mychildren",
+		request=None,
+		responses={200: ParentChildSerializer(many=True)},
+		description="List all children (wards) linked to the authenticated parent.",
+	)
+	@action(detail=False, methods=['get'], url_path='mychildren')
+	def mychildren(self, request):
+		user: User = request.user
+		parent = getattr(user, 'parent', None)
+		if not parent:
+			return Response({"detail": "Parent profile required."}, status=status.HTTP_403_FORBIDDEN)
+
+		students = parent.wards.select_related('profile', 'school').all()
+		payload = []
+		for stu in students:
+			payload.append({
+				"id": stu.id,
+				"name": getattr(stu.profile, 'name', None),
+				"school": getattr(stu.school, 'name', None) if stu.school else None,
+				"grade": stu.grade,
+				"student_id": stu.student_id,
+				"created_at": stu.created_at,
+			})
+		return Response(payload)
 
 
 class GameViewSet(viewsets.ModelViewSet):

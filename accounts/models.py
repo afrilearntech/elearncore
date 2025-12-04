@@ -107,29 +107,53 @@ class School(TimestampedModel):
 
 # Profiles
 class Student(TimestampedModel):
+    student_id = models.CharField(max_length=20, unique=True, null=True, blank=True)
     profile = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="student")
     school = models.ForeignKey(School, on_delete=models.SET_NULL, null=True, blank=True, related_name="students")
     grade = models.CharField(max_length=20, choices=[(lvl.value, lvl.value) for lvl in StudentLevel], default=StudentLevel.OTHER.value)
     status = models.CharField(max_length=30, choices=[(s.value, s.value) for s in StatusEnum], default=StatusEnum.PENDING.value)
     moderation_comment = models.TextField(blank=True, default="")
 
+    def save(self, *args, **kwargs):
+        # Ensure we have a primary key before generating the student_id
+        if not self.student_id:
+            super().save(*args, **kwargs)
+            self.student_id = f"STU{self.id:07d}"
+        super().save(*args, **kwargs)
+
     def __str__(self) -> str:
         return f"Student: {self.profile.name}"
 
 
 class Teacher(TimestampedModel):
+    teacher_id = models.CharField(max_length=20, unique=True, null=True, blank=True)
     profile = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="teacher")
     school = models.ForeignKey('accounts.School', on_delete=models.SET_NULL, null=True, blank=True, related_name="teachers")
     status = models.CharField(max_length=30, choices=[(s.value, s.value) for s in StatusEnum], default=StatusEnum.PENDING.value)
     moderation_comment = models.TextField(blank=True, default="")
+
+    def save(self, *args, **kwargs):
+        # Ensure we have a primary key before generating the teacher_id
+        if not self.teacher_id:
+            super().save(*args, **kwargs)
+            self.teacher_id = f"TEA{self.id:07d}"
+        super().save(*args, **kwargs)
 
     def __str__(self) -> str:
         return f"Teacher: {self.profile.name}"
 
 
 class Parent(TimestampedModel):
+    parent_id = models.CharField(max_length=20, unique=True, null=True, blank=True)
     profile = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="parent")
     wards = models.ManyToManyField(Student, related_name="guardians", blank=True)
+
+    def save(self, *args, **kwargs):
+        # Ensure we have a primary key before generating the parent_id
+        if not self.parent_id:
+            super().save(*args, **kwargs)
+            self.parent_id = f"PAR{self.id:07d}"
+        super().save(*args, **kwargs)
 
     def __str__(self) -> str:
         return f"Parent: {self.profile.name}"
