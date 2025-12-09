@@ -2539,299 +2539,6 @@ class KidsViewSet(viewsets.ViewSet):
 			"rank_in_county": county_rank,
 		})
 
-
-class TeacherViewSet(viewsets.ViewSet):
-	"""Endpoints specifically for teachers to manage their classroom.
-
-	Teachers can:
-	- View subjects and lessons for their grade.
-	- Create lessons and assessments.
-	- View students in their school and approve them.
-	"""
-	permission_classes = [permissions.IsAuthenticated]
-
-	def _require_teacher(self, request):
-		user: User = request.user
-		if not user or getattr(user, 'role', None) not in {UserRole.TEACHER.value, UserRole.ADMIN.value}:
-			return Response({"detail": "Teacher role required."}, status=403)
-		if not hasattr(user, 'teacher'):
-			return Response({"detail": "Teacher profile required."}, status=403)
-		return None
-
-	@extend_schema(
-		description="List subjects for the teacher's grade.",
-		responses={200: SubjectSerializer(many=True)},
-	)
-	@action(detail=False, methods=['get'], url_path='subjects')
-	def my_subjects(self, request):
-		deny = self._require_teacher(request)
-		if deny:
-			return deny
-		teacher = request.user.teacher
-		# For now, return all subjects linked to this teacher profile.
-		qs = Subject.objects.filter(teachers=teacher).order_by('name')
-		return Response(SubjectSerializer(qs, many=True).data)
-
-	@extend_schema(
-		description="List lessons created by this teacher or for their subjects.",
-		responses={200: LessonResourceSerializer(many=True)},
-	)
-	@action(detail=False, methods=['get'], url_path='lessons')
-	def my_lessons(self, request):
-		deny = self._require_teacher(request)
-		if deny:
-			return deny
-		teacher = request.user.teacher
-		qs = (
-			LessonResource.objects
-			.filter(subject__teachers=teacher)
-			.select_related('subject')
-			.order_by('-created_at')
-		)
-		return Response(LessonResourceSerializer(qs, many=True).data)
-
-	@extend_schema(
-		description="Create a new lesson resource for one of the teacher's subjects.",
-		request=LessonResourceSerializer,
-		responses={201: LessonResourceSerializer},
-	)
-	@action(detail=False, methods=['post'], url_path='lessons/create')
-	def create_lesson(self, request):
-		deny = self._require_teacher(request)
-		if deny:
-			return deny
-		ser = LessonResourceSerializer(data=request.data)
-		ser.is_valid(raise_exception=True)
-		lesson = ser.save(created_by=request.user, status=StatusEnum.DRAFT.value)
-		return Response(LessonResourceSerializer(lesson).data, status=201)
-
-	@extend_schema(
-		description="List general assessments created by this teacher.",
-		responses={200: GeneralAssessmentSerializer(many=True)},
-	)
-	@action(detail=False, methods=['get'], url_path='general-assessments')
-	def my_general_assessments(self, request):
-		deny = self._require_teacher(request)
-		if deny:
-			return deny
-		teacher = request.user.teacher
-		qs = GeneralAssessment.objects.filter(given_by=teacher).order_by('-created_at')
-		return Response(GeneralAssessmentSerializer(qs, many=True).data)
-
-	@extend_schema(
-		description="Create a general assessment scoped to the teacher's grade (optional).",
-		request=GeneralAssessmentSerializer,
-		responses={201: GeneralAssessmentSerializer},
-	)
-	@action(detail=False, methods=['post'], url_path='general-assessments/create')
-	def create_general_assessment(self, request):
-		deny = self._require_teacher(request)
-		if deny:
-			return deny
-		teacher = request.user.teacher
-		ser = GeneralAssessmentSerializer(data=request.data)
-		ser.is_valid(raise_exception=True)
-		ga = ser.save(given_by=teacher)
-		return Response(GeneralAssessmentSerializer(ga).data, status=201)
-
-	@extend_schema(
-		description="List lesson assessments created by this teacher.",
-		responses={200: LessonAssessmentSerializer(many=True)},
-	)
-	@action(detail=False, methods=['get'], url_path='lesson-assessments')
-	def my_lesson_assessments(self, request):
-		deny = self._require_teacher(request)
-		if deny:
-			return deny
-		teacher = request.user.teacher
-		qs = LessonAssessment.objects.filter(given_by=teacher).select_related('lesson').order_by('-created_at')
-		return Response(LessonAssessmentSerializer(qs, many=True).data)
-
-	@extend_schema(
-		description="Create a lesson assessment for one of the teacher's lessons.",
-		request=LessonAssessmentSerializer,
-		responses={201: LessonAssessmentSerializer},
-	)
-	@action(detail=False, methods=['post'], url_path='lesson-assessments/create')
-	def create_lesson_assessment(self, request):
-		deny = self._require_teacher(request)
-		if deny:
-			return deny
-		teacher = request.user.teacher
-		ser = LessonAssessmentSerializer(data=request.data)
-		ser.is_valid(raise_exception=True)
-		la = ser.save(given_by=teacher)
-		return Response(LessonAssessmentSerializer(la).data, status=201)
-
-	@extend_schema(
-		description="List students in the teacher's school, including their status.",
-		responses={200: StudentSerializer(many=True)},
-	)
-	@action(detail=False, methods=['get'], url_path='students')
-	def my_students(self, request):
-		deny = self._require_teacher(request)
-		if deny:
-			return deny
-		teacher = request.user.teacher
-		if not getattr(teacher, 'school_id', None):
-			return Response([], status=200)
-		qs = Student.objects.filter(school_id=teacher.school_id).select_related('profile', 'school').order_by('profile__name')
-		return Response(StudentSerializer(qs, many=True).data)
-
-	@extend_schema(
-		description="Approve a pending student in the teacher's school.",
-		request=None,
-		responses={200: StudentSerializer},
-	)
-	@action(detail=True, methods=['post'], url_path='approve-student')
-	def approve_student(self, request, pk=None):
-		deny = self._require_teacher(request)
-		if deny:
-			return deny
-		teacher = request.user.teacher
-		try:
-			student = Student.objects.get(pk=pk, school=teacher.school)
-		except Student.DoesNotExist:
-			return Response({"detail": "Student not found in your school."}, status=404)
-		student.status = StatusEnum.APPROVED.value
-		student.moderation_comment = "Approved by teacher"
-		student.save(update_fields=['status', 'moderation_comment', 'updated_at'])
-		return Response(StudentSerializer(student).data)
-
-	@extend_schema(
-		description=(
-			"Grade a general assessment solution for a student. "
-			"Only assessments where this teacher is given_by are allowed. "
-			"Score must be numeric, non-negative, and not exceed the assessment's total marks."
-		),
-		request=OpenApiExample(
-			name="GradeGeneralAssessmentRequest",
-			value={"assessment_id": 1, "student_id": 10, "score": 18.5},
-		),
-		responses={
-			200: OpenApiResponse(
-				description="Grading result.",
-				examples=[
-					OpenApiExample(
-						name="GradeGeneralAssessmentResponse",
-						value={"assessment_id": 1, "student_id": 10, "score": 18.5},
-					),
-				],
-			),
-		},
-	)
-	@action(detail=False, methods=['post'], url_path='grade/general')
-	def grade_general_assessment(self, request):
-		"""Grade a general assessment for a student.
-
-		Body:
-		- assessment_id
-		- student_id
-		- score
-		"""
-		deny = self._require_teacher(request)
-		if deny:
-			return deny
-		teacher = request.user.teacher
-		assessment_id = request.data.get('assessment_id')
-		student_id = request.data.get('student_id')
-		score = request.data.get('score')
-		if assessment_id is None or student_id is None or score is None:
-			return Response({"detail": "assessment_id, student_id and score are required."}, status=400)
-		try:
-			assessment = GeneralAssessment.objects.get(pk=assessment_id, given_by=teacher)
-		except GeneralAssessment.DoesNotExist:
-			return Response({"detail": "Assessment not found or not owned by you."}, status=404)
-		try:
-			student = Student.objects.get(pk=student_id)
-		except Student.DoesNotExist:
-			return Response({"detail": "Student not found."}, status=404)
-		try:
-			score_value = float(score)
-		except (TypeError, ValueError):
-			return Response({"detail": "score must be a number."}, status=400)
-		if score_value < 0:
-			return Response({"detail": "score cannot be negative."}, status=400)
-		if assessment.marks is not None and score_value > float(assessment.marks):
-			return Response({"detail": "score cannot exceed assessment total marks."}, status=400)
-		grade_obj, _created = GeneralAssessmentGrade.objects.update_or_create(
-			assessment=assessment,
-			student=student,
-			defaults={"score": score_value},
-		)
-		return Response({
-			"assessment_id": grade_obj.assessment_id,
-			"student_id": grade_obj.student_id,
-			"score": grade_obj.score,
-		})
-
-	@extend_schema(
-		description=(
-			"Grade a lesson assessment for a student. "
-			"Only assessments where this teacher is given_by are allowed. "
-			"Score must be numeric, non-negative, and not exceed the assessment's total marks."
-		),
-		request=OpenApiExample(
-			name="GradeLessonAssessmentRequest",
-			value={"assessment_id": 5, "student_id": 10, "score": 9},
-		),
-		responses={
-			200: OpenApiResponse(
-				description="Grading result.",
-				examples=[
-					OpenApiExample(
-						name="GradeLessonAssessmentResponse",
-						value={"assessment_id": 5, "student_id": 10, "score": 9},
-					),
-				],
-			),
-		},
-	)
-	@action(detail=False, methods=['post'], url_path='grade/lesson')
-	def grade_lesson_assessment(self, request):
-		"""Grade a lesson assessment for a student.
-
-		Body:
-		- assessment_id (lesson_assessment id)
-		- student_id
-		- score
-		"""
-		deny = self._require_teacher(request)
-		if deny:
-			return deny
-		teacher = request.user.teacher
-		assessment_id = request.data.get('assessment_id')
-		student_id = request.data.get('student_id')
-		score = request.data.get('score')
-		if assessment_id is None or student_id is None or score is None:
-			return Response({"detail": "assessment_id, student_id and score are required."}, status=400)
-		try:
-			assessment = LessonAssessment.objects.select_related('lesson__subject').get(pk=assessment_id, given_by=teacher)
-		except LessonAssessment.DoesNotExist:
-			return Response({"detail": "Assessment not found or not owned by you."}, status=404)
-		try:
-			student = Student.objects.get(pk=student_id)
-		except Student.DoesNotExist:
-			return Response({"detail": "Student not found."}, status=404)
-		try:
-			score_value = float(score)
-		except (TypeError, ValueError):
-			return Response({"detail": "score must be a number."}, status=400)
-		if score_value < 0:
-			return Response({"detail": "score cannot be negative."}, status=400)
-		if assessment.marks is not None and score_value > float(assessment.marks):
-			return Response({"detail": "score cannot exceed assessment total marks."}, status=400)
-		grade_obj, _created = LessonAssessmentGrade.objects.update_or_create(
-			lesson_assessment=assessment,
-			student=student,
-			defaults={"score": score_value},
-		)
-		return Response({
-			"assessment_id": grade_obj.lesson_assessment_id,
-			"student_id": grade_obj.student_id,
-			"score": grade_obj.score,
-		})
-
 	@extend_schema(
 		description="Subjects and lessons for the student's grade (kids view).",
 		responses={200: None},
@@ -3531,6 +3238,301 @@ class TeacherViewSet(viewsets.ViewSet):
 
 		# Placeholder for future LessonAssessment solution handling
 		return Response({"detail": "Lesson assessment solutions are not yet supported."}, status=400)
+
+
+
+
+class TeacherViewSet(viewsets.ViewSet):
+	"""Endpoints specifically for teachers to manage their classroom.
+
+	Teachers can:
+	- View subjects and lessons for their grade.
+	- Create lessons and assessments.
+	- View students in their school and approve them.
+	"""
+	permission_classes = [permissions.IsAuthenticated]
+
+	def _require_teacher(self, request):
+		user: User = request.user
+		if not user or getattr(user, 'role', None) not in {UserRole.TEACHER.value, UserRole.ADMIN.value}:
+			return Response({"detail": "Teacher role required."}, status=403)
+		if not hasattr(user, 'teacher'):
+			return Response({"detail": "Teacher profile required."}, status=403)
+		return None
+
+	@extend_schema(
+		description="List subjects for the teacher's grade.",
+		responses={200: SubjectSerializer(many=True)},
+	)
+	@action(detail=False, methods=['get'], url_path='subjects')
+	def my_subjects(self, request):
+		deny = self._require_teacher(request)
+		if deny:
+			return deny
+		teacher = request.user.teacher
+		# For now, return all subjects linked to this teacher profile.
+		qs = Subject.objects.filter(teachers=teacher).order_by('name')
+		return Response(SubjectSerializer(qs, many=True).data)
+
+	@extend_schema(
+		description="List lessons created by this teacher or for their subjects.",
+		responses={200: LessonResourceSerializer(many=True)},
+	)
+	@action(detail=False, methods=['get'], url_path='lessons')
+	def my_lessons(self, request):
+		deny = self._require_teacher(request)
+		if deny:
+			return deny
+		teacher = request.user.teacher
+		qs = (
+			LessonResource.objects
+			.filter(subject__teachers=teacher)
+			.select_related('subject')
+			.order_by('-created_at')
+		)
+		return Response(LessonResourceSerializer(qs, many=True).data)
+
+	@extend_schema(
+		description="Create a new lesson resource for one of the teacher's subjects.",
+		request=LessonResourceSerializer,
+		responses={201: LessonResourceSerializer},
+	)
+	@action(detail=False, methods=['post'], url_path='lessons/create')
+	def create_lesson(self, request):
+		deny = self._require_teacher(request)
+		if deny:
+			return deny
+		ser = LessonResourceSerializer(data=request.data)
+		ser.is_valid(raise_exception=True)
+		lesson = ser.save(created_by=request.user, status=StatusEnum.DRAFT.value)
+		return Response(LessonResourceSerializer(lesson).data, status=201)
+
+	@extend_schema(
+		description="List general assessments created by this teacher.",
+		responses={200: GeneralAssessmentSerializer(many=True)},
+	)
+	@action(detail=False, methods=['get'], url_path='general-assessments')
+	def my_general_assessments(self, request):
+		deny = self._require_teacher(request)
+		if deny:
+			return deny
+		teacher = request.user.teacher
+		qs = GeneralAssessment.objects.filter(given_by=teacher).order_by('-created_at')
+		return Response(GeneralAssessmentSerializer(qs, many=True).data)
+
+	@extend_schema(
+		description="Create a general assessment scoped to the teacher's grade (optional).",
+		request=GeneralAssessmentSerializer,
+		responses={201: GeneralAssessmentSerializer},
+	)
+	@action(detail=False, methods=['post'], url_path='general-assessments/create')
+	def create_general_assessment(self, request):
+		deny = self._require_teacher(request)
+		if deny:
+			return deny
+		teacher = request.user.teacher
+		ser = GeneralAssessmentSerializer(data=request.data)
+		ser.is_valid(raise_exception=True)
+		ga = ser.save(given_by=teacher)
+		return Response(GeneralAssessmentSerializer(ga).data, status=201)
+
+	@extend_schema(
+		description="List lesson assessments created by this teacher.",
+		responses={200: LessonAssessmentSerializer(many=True)},
+	)
+	@action(detail=False, methods=['get'], url_path='lesson-assessments')
+	def my_lesson_assessments(self, request):
+		deny = self._require_teacher(request)
+		if deny:
+			return deny
+		teacher = request.user.teacher
+		qs = LessonAssessment.objects.filter(given_by=teacher).select_related('lesson').order_by('-created_at')
+		return Response(LessonAssessmentSerializer(qs, many=True).data)
+
+	@extend_schema(
+		description="Create a lesson assessment for one of the teacher's lessons.",
+		request=LessonAssessmentSerializer,
+		responses={201: LessonAssessmentSerializer},
+	)
+	@action(detail=False, methods=['post'], url_path='lesson-assessments/create')
+	def create_lesson_assessment(self, request):
+		deny = self._require_teacher(request)
+		if deny:
+			return deny
+		teacher = request.user.teacher
+		ser = LessonAssessmentSerializer(data=request.data)
+		ser.is_valid(raise_exception=True)
+		la = ser.save(given_by=teacher)
+		return Response(LessonAssessmentSerializer(la).data, status=201)
+
+	@extend_schema(
+		description="List students in the teacher's school, including their status.",
+		responses={200: StudentSerializer(many=True)},
+	)
+	@action(detail=False, methods=['get'], url_path='students')
+	def my_students(self, request):
+		deny = self._require_teacher(request)
+		if deny:
+			return deny
+		teacher = request.user.teacher
+		if not getattr(teacher, 'school_id', None):
+			return Response([], status=200)
+		qs = Student.objects.filter(school_id=teacher.school_id).select_related('profile', 'school').order_by('profile__name')
+		return Response(StudentSerializer(qs, many=True).data)
+
+	@extend_schema(
+		description="Approve a pending student in the teacher's school.",
+		request=None,
+		responses={200: StudentSerializer},
+	)
+	@action(detail=True, methods=['post'], url_path='approve-student')
+	def approve_student(self, request, pk=None):
+		deny = self._require_teacher(request)
+		if deny:
+			return deny
+		teacher = request.user.teacher
+		try:
+			student = Student.objects.get(pk=pk, school=teacher.school)
+		except Student.DoesNotExist:
+			return Response({"detail": "Student not found in your school."}, status=404)
+		student.status = StatusEnum.APPROVED.value
+		student.moderation_comment = "Approved by teacher"
+		student.save(update_fields=['status', 'moderation_comment', 'updated_at'])
+		return Response(StudentSerializer(student).data)
+
+	@extend_schema(
+		description=(
+			"Grade a general assessment solution for a student. "
+			"Only assessments where this teacher is given_by are allowed. "
+			"Score must be numeric, non-negative, and not exceed the assessment's total marks."
+		),
+		request=OpenApiExample(
+			name="GradeGeneralAssessmentRequest",
+			value={"assessment_id": 1, "student_id": 10, "score": 18.5},
+		),
+		responses={
+			200: OpenApiResponse(
+				description="Grading result.",
+				examples=[
+					OpenApiExample(
+						name="GradeGeneralAssessmentResponse",
+						value={"assessment_id": 1, "student_id": 10, "score": 18.5},
+					),
+				],
+			),
+		},
+	)
+	@action(detail=False, methods=['post'], url_path='grade/general')
+	def grade_general_assessment(self, request):
+		"""Grade a general assessment for a student.
+
+		Body:
+		- assessment_id
+		- student_id
+		- score
+		"""
+		deny = self._require_teacher(request)
+		if deny:
+			return deny
+		teacher = request.user.teacher
+		assessment_id = request.data.get('assessment_id')
+		student_id = request.data.get('student_id')
+		score = request.data.get('score')
+		if assessment_id is None or student_id is None or score is None:
+			return Response({"detail": "assessment_id, student_id and score are required."}, status=400)
+		try:
+			assessment = GeneralAssessment.objects.get(pk=assessment_id, given_by=teacher)
+		except GeneralAssessment.DoesNotExist:
+			return Response({"detail": "Assessment not found or not owned by you."}, status=404)
+		try:
+			student = Student.objects.get(pk=student_id)
+		except Student.DoesNotExist:
+			return Response({"detail": "Student not found."}, status=404)
+		try:
+			score_value = float(score)
+		except (TypeError, ValueError):
+			return Response({"detail": "score must be a number."}, status=400)
+		if score_value < 0:
+			return Response({"detail": "score cannot be negative."}, status=400)
+		if assessment.marks is not None and score_value > float(assessment.marks):
+			return Response({"detail": "score cannot exceed assessment total marks."}, status=400)
+		grade_obj, _created = GeneralAssessmentGrade.objects.update_or_create(
+			assessment=assessment,
+			student=student,
+			defaults={"score": score_value},
+		)
+		return Response({
+			"assessment_id": grade_obj.assessment_id,
+			"student_id": grade_obj.student_id,
+			"score": grade_obj.score,
+		})
+
+	@extend_schema(
+		description=(
+			"Grade a lesson assessment for a student. "
+			"Only assessments where this teacher is given_by are allowed. "
+			"Score must be numeric, non-negative, and not exceed the assessment's total marks."
+		),
+		request=OpenApiExample(
+			name="GradeLessonAssessmentRequest",
+			value={"assessment_id": 5, "student_id": 10, "score": 9},
+		),
+		responses={
+			200: OpenApiResponse(
+				description="Grading result.",
+				examples=[
+					OpenApiExample(
+						name="GradeLessonAssessmentResponse",
+						value={"assessment_id": 5, "student_id": 10, "score": 9},
+					),
+				],
+			),
+		},
+	)
+	@action(detail=False, methods=['post'], url_path='grade/lesson')
+	def grade_lesson_assessment(self, request):
+		"""Grade a lesson assessment for a student.
+
+		Body:
+		- assessment_id (lesson_assessment id)
+		- student_id
+		- score
+		"""
+		deny = self._require_teacher(request)
+		if deny:
+			return deny
+		teacher = request.user.teacher
+		assessment_id = request.data.get('assessment_id')
+		student_id = request.data.get('student_id')
+		score = request.data.get('score')
+		if assessment_id is None or student_id is None or score is None:
+			return Response({"detail": "assessment_id, student_id and score are required."}, status=400)
+		try:
+			assessment = LessonAssessment.objects.select_related('lesson__subject').get(pk=assessment_id, given_by=teacher)
+		except LessonAssessment.DoesNotExist:
+			return Response({"detail": "Assessment not found or not owned by you."}, status=404)
+		try:
+			student = Student.objects.get(pk=student_id)
+		except Student.DoesNotExist:
+			return Response({"detail": "Student not found."}, status=404)
+		try:
+			score_value = float(score)
+		except (TypeError, ValueError):
+			return Response({"detail": "score must be a number."}, status=400)
+		if score_value < 0:
+			return Response({"detail": "score cannot be negative."}, status=400)
+		if assessment.marks is not None and score_value > float(assessment.marks):
+			return Response({"detail": "score cannot exceed assessment total marks."}, status=400)
+		grade_obj, _created = LessonAssessmentGrade.objects.update_or_create(
+			lesson_assessment=assessment,
+			student=student,
+			defaults={"score": score_value},
+		)
+		return Response({
+			"assessment_id": grade_obj.lesson_assessment_id,
+			"student_id": grade_obj.student_id,
+			"score": grade_obj.score,
+		})
 
 
 class LookupPagination(filters.BaseFilterBackend):
