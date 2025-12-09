@@ -126,3 +126,33 @@ class TeacherBulkStudentUploadSerializer(serializers.Serializer):
         if not name.lower().endswith(".csv"):
             raise serializers.ValidationError("Only CSV files with .csv extension are supported.")
         return value
+
+
+class ContentCreateTeacherSerializer(serializers.Serializer):
+    name = serializers.CharField(max_length=255)
+    phone = serializers.CharField(max_length=25)
+    email = serializers.EmailField(required=False, allow_blank=True)
+    gender = serializers.CharField(required=False, allow_blank=True, max_length=20)
+    dob = serializers.DateField(required=False)
+    school_id = serializers.IntegerField(required=True)
+
+    def validate(self, attrs):
+        from accounts.models import User
+        phone = attrs.get("phone")
+        email = attrs.get("email")
+        if User.objects.filter(phone=phone).exists():
+            raise serializers.ValidationError({"phone": "A user with this phone already exists."})
+        if email and User.objects.filter(email__iexact=email).exists():
+            raise serializers.ValidationError({"email": "A user with this email already exists."})
+        return attrs
+
+
+class ContentBulkTeacherUploadSerializer(serializers.Serializer):
+    """Serializer for bulk teacher CSV uploads used by content managers/admins."""
+    file = serializers.FileField()
+
+    def validate_file(self, value):
+        name = getattr(value, "name", "") or ""
+        if not name.lower().endswith(".csv"):
+            raise serializers.ValidationError("Only CSV files with .csv extension are supported.")
+        return value

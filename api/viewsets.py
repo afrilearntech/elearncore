@@ -60,6 +60,8 @@ from .serializers import (
 	ContentDashboardSerializer,
 	TeacherCreateStudentSerializer,
 	TeacherBulkStudentUploadSerializer,
+	ContentCreateTeacherSerializer,
+	ContentBulkTeacherUploadSerializer,
 )
 from messsaging.services import send_sms
 
@@ -1679,6 +1681,87 @@ class ContentViewSet(viewsets.ViewSet):
 		return Response(TeacherSerializer(qs, many=True).data)
 
 	@extend_schema(
+		operation_id="content_create_teacher",
+		description=(
+			"Create a teacher account (User + Teacher profile). "
+			"School is required because content managers do not have a school profile."
+		),
+		request=ContentCreateTeacherSerializer,
+		responses={201: TeacherSerializer},
+	)
+	@action(detail=False, methods=['post'], url_path='teachers/create')
+	def create_teacher(self, request):
+		"""Content managers/admins create a single teacher (user + profile)."""
+		from django.db import transaction
+		from accounts.models import User, School, Teacher as TeacherModel
+
+		deny = self._require_creator(request)
+		if deny:
+			return deny
+
+		ser = ContentCreateTeacherSerializer(data=request.data)
+		ser.is_valid(raise_exception=True)
+		data = ser.validated_data
+
+		name = data["name"].strip()
+		phone = data["phone"].strip()
+		email = (data.get("email") or "").strip() or None
+		gender = (data.get("gender") or "").strip() or None
+		dob = data.get("dob")
+		school_id = data.get("school_id")
+
+		try:
+			school = School.objects.get(id=school_id)
+		except School.DoesNotExist:
+			return Response({"detail": "School not found."}, status=status.HTTP_400_BAD_REQUEST)
+
+		import secrets
+		import string
+		alphabet = string.ascii_letters + string.digits
+		temp_password = "".join(secrets.choice(alphabet) for _ in range(10))
+
+		with transaction.atomic():
+			user = User(
+				name=name,
+				phone=phone,
+				email=email,
+				role=UserRole.TEACHER.value,
+				dob=dob,
+				gender=gender,
+			)
+			user.set_password(temp_password)
+			user.save()
+
+			teacher = TeacherModel.objects.create(profile=user, school=school)
+
+		message = (
+			f"Hi {name}, your Liberia eLearn teacher account has been created.\n"
+			f"Login with phone: {phone} and password: {temp_password}.\n"
+			"Please change this password after your first login."
+		)
+		try:
+			if phone:
+				send_sms(message, [phone])
+		except Exception:
+			pass
+
+		try:
+			if email:
+				from_email = getattr(settings, "DEFAULT_FROM_EMAIL", None) or None
+				if from_email:
+					send_mail(
+						subject="Your Liberia eLearn teacher account",
+						message=message,
+						from_email=from_email,
+						recipient_list=[email],
+						fail_silently=True,
+					)
+		except Exception:
+			pass
+
+		return Response(TeacherSerializer(teacher).data, status=status.HTTP_201_CREATED)
+
+	@extend_schema(
 		operation_id="content_teacher_detail",
 		responses={200: TeacherSerializer},
 		description="Retrieve a single teacher by id for content management.",
@@ -1691,6 +1774,170 @@ class ContentViewSet(viewsets.ViewSet):
 		except Teacher.DoesNotExist:
 			return Response({"detail": "Teacher not found."}, status=404)
 		return Response(TeacherSerializer(teacher).data)
+
+	@extend_schema(
+		operation_id="content_bulk_create_teachers",
+		description=(
+			"Bulk create teacher accounts from a CSV file. "
+			"Each row must include name, phone, and school_id; "
+			"optional columns are email, gender, and dob (YYYY-MM-DD)."
+		),
+		request=ContentBulkTeacherUploadSerializer,
+		responses={
+			200: OpenApiResponse(
+				description="Bulk teacher creation summary with per-row statuses.",
+			),
+		},
+	)
+	@action(detail=False, methods=['post'], url_path='teachers/bulk-create')
+	def bulk_create_teachers(self, request):
+		"""Bulk create teacher accounts (User + Teacher profile) from a CSV upload."""
+		from django.db import transaction
+		from rest_framework.exceptions import ValidationError
+		from accounts.models import User, School, Teacher as TeacherModel
+
+		deny = self._require_creator(request)
+		if deny:
+			return deny
+
+		upload_ser = ContentBulkTeacherUploadSerializer(data=request.data)
+		upload_ser.is_valid(raise_exception=True)
+		file_obj = upload_ser.validated_data['file']
+
+		try:
+			decoded = file_obj.read().decode('utf-8-sig')
+		except Exception:
+			return Response({"detail": "Unable to read uploaded file as UTF-8 text."}, status=status.HTTP_400_BAD_REQUEST)
+
+		if not decoded.strip():
+			return Response({"detail": "Uploaded file is empty."}, status=status.HTTP_400_BAD_REQUEST)
+
+		reader = csv.DictReader(io.StringIO(decoded))
+		if not reader.fieldnames:
+			return Response({"detail": "CSV file has no header row."}, status=status.HTTP_400_BAD_REQUEST)
+
+		required_columns = ['name', 'phone', 'school_id']
+		missing = [c for c in required_columns if c not in reader.fieldnames]
+		if missing:
+			return Response({"detail": f"Missing required columns: {', '.join(missing)}."}, status=status.HTTP_400_BAD_REQUEST)
+
+		results = []
+		created_count = 0
+		failed_count = 0
+
+		for row_index, row in enumerate(reader, start=2):
+			row_result = {"row": row_index}
+
+			mapped = {
+				"name": (row.get("name") or "").strip(),
+				"phone": (row.get("phone") or "").strip(),
+				"email": (row.get("email") or "").strip() or None,
+				"gender": (row.get("gender") or "").strip() or None,
+				"dob": (row.get("dob") or None),
+			}
+
+			school_id_raw = (row.get("school_id") or "").strip()
+			if not school_id_raw:
+				results.append({**row_result, "status": "error", "errors": {"school_id": ["This field is required."]}})
+				failed_count += 1
+				continue
+			try:
+				mapped["school_id"] = int(school_id_raw)
+			except ValueError:
+				results.append({**row_result, "status": "error", "errors": {"school_id": ["Invalid integer."]}})
+				failed_count += 1
+				continue
+
+			ser = ContentCreateTeacherSerializer(data=mapped)
+			try:
+				ser.is_valid(raise_exception=True)
+			except ValidationError as exc:
+				results.append({**row_result, "status": "error", "errors": exc.detail})
+				failed_count += 1
+				continue
+
+			data = ser.validated_data
+			name = data["name"].strip()
+			phone = data["phone"].strip()
+			email = (data.get("email") or "").strip() or None
+			gender = (data.get("gender") or "").strip() or None
+			dob = data.get("dob")
+			school_id = data.get("school_id")
+
+			try:
+				school = School.objects.get(id=school_id)
+			except School.DoesNotExist:
+				results.append({**row_result, "status": "error", "errors": {"school_id": ["School not found."]}})
+				failed_count += 1
+				continue
+
+			import secrets
+			import string
+			alphabet = string.ascii_letters + string.digits
+			temp_password = "".join(secrets.choice(alphabet) for _ in range(10))
+
+			try:
+				with transaction.atomic():
+					user = User(
+						name=name,
+						phone=phone,
+						email=email,
+						role=UserRole.TEACHER.value,
+						dob=dob,
+						gender=gender,
+					)
+					user.set_password(temp_password)
+					user.save()
+
+					teacher = TeacherModel.objects.create(profile=user, school=school)
+			except Exception as exc:
+				results.append({**row_result, "status": "error", "errors": {"non_field_errors": [str(exc)]}})
+				failed_count += 1
+				continue
+
+			message = (
+				f"Hi {name}, your Liberia eLearn teacher account has been created.\n"
+				f"Login with phone: {phone} and password: {temp_password}.\n"
+				"Please change this password after your first login."
+			)
+			try:
+				if phone:
+					send_sms(message, [phone])
+			except Exception:
+				pass
+
+			try:
+				if email:
+					from_email = getattr(settings, "DEFAULT_FROM_EMAIL", None) or None
+					if from_email:
+						send_mail(
+							subject="Your Liberia eLearn teacher account",
+							message=message,
+							from_email=from_email,
+							recipient_list=[email],
+							fail_silently=True,
+						)
+			except Exception:
+				pass
+
+			created_count += 1
+			results.append({
+				**row_result,
+				"status": "created",
+				"teacher_db_id": teacher.id,
+				"teacher_id": teacher.teacher_id,
+				"name": name,
+				"phone": phone,
+			})
+
+		return Response({
+			"summary": {
+				"total_rows": len(results),
+				"created": created_count,
+				"failed": failed_count,
+			},
+			"results": results,
+		})
 
 	@extend_schema(
 		operation_id="content_dashboard",
@@ -1769,6 +2016,325 @@ class ContentViewSet(viewsets.ViewSet):
 				},
 			}
 		)
+
+	@extend_schema(
+		operation_id="content_create_student",
+		description=(
+			"Create a student account (User + Student profile). "
+			"school_id is required because content managers do not have a school profile."
+		),
+		request=TeacherCreateStudentSerializer,
+		responses={201: StudentSerializer},
+	)
+	@action(detail=False, methods=['post'], url_path='students/create')
+	def create_student(self, request):
+		"""Content managers/admins create a single student (user + profile)."""
+		from django.db import transaction
+		from accounts.models import User, School, Student as StudentModel
+
+		deny = self._require_creator(request)
+		if deny:
+			return deny
+
+		ser = TeacherCreateStudentSerializer(data=request.data)
+		ser.is_valid(raise_exception=True)
+		data = ser.validated_data
+
+		name = data["name"].strip()
+		phone = data["phone"].strip()
+		email = (data.get("email") or "").strip() or None
+		grade = (data.get("grade") or "").strip() or None
+		gender = (data.get("gender") or "").strip() or None
+		dob = data.get("dob")
+		school_id = data.get("school_id")
+
+		if school_id is None:
+			return Response({"detail": "school_id is required for content-created students."}, status=status.HTTP_400_BAD_REQUEST)
+		try:
+			school = School.objects.get(id=school_id)
+		except School.DoesNotExist:
+			return Response({"detail": "School not found."}, status=status.HTTP_400_BAD_REQUEST)
+
+		import secrets
+		import string
+		alphabet = string.ascii_letters + string.digits
+		temp_password = "".join(secrets.choice(alphabet) for _ in range(10))
+
+		with transaction.atomic():
+			user = User(
+				name=name,
+				phone=phone,
+				email=email,
+				role=UserRole.STUDENT.value,
+				dob=dob,
+				gender=gender,
+			)
+			user.set_password(temp_password)
+			user.save()
+
+			student_kwargs = {"profile": user, "school": school}
+			if grade:
+				student_kwargs["grade"] = grade
+			student = StudentModel.objects.create(**student_kwargs)
+
+		message = (
+			f"Hi {name}, your Liberia eLearn student account has been created.\n"
+			f"Login with phone: {phone} and password: {temp_password}.\n"
+			"Please change this password after your first login."
+		)
+		try:
+			if phone:
+				send_sms(message, [phone])
+		except Exception:
+			pass
+
+		try:
+			if email:
+				from_email = getattr(settings, "DEFAULT_FROM_EMAIL", None) or None
+				if from_email:
+					send_mail(
+						subject="Your Liberia eLearn student account",
+						message=message,
+						from_email=from_email,
+						recipient_list=[email],
+						fail_silently=True,
+					)
+		except Exception:
+			pass
+
+		return Response(StudentSerializer(student).data, status=status.HTTP_201_CREATED)
+
+	@extend_schema(
+		operation_id="content_bulk_create_students",
+		description=(
+			"Bulk create student accounts from a CSV file. "
+			"Each row must include name, phone, and school_id; "
+			"optional columns are email, grade, gender, and dob (YYYY-MM-DD)."
+		),
+		request=TeacherBulkStudentUploadSerializer,
+		responses={
+			200: OpenApiResponse(
+				description="Bulk student creation summary with per-row statuses.",
+			),
+		},
+	)
+	@action(detail=False, methods=['post'], url_path='students/bulk-create')
+	def bulk_create_students(self, request):
+		"""Bulk create student accounts (User + Student profile) from a CSV upload."""
+		from django.db import transaction
+		from rest_framework.exceptions import ValidationError
+		from accounts.models import User, School, Student as StudentModel
+
+		deny = self._require_creator(request)
+		if deny:
+			return deny
+
+		upload_ser = TeacherBulkStudentUploadSerializer(data=request.data)
+		upload_ser.is_valid(raise_exception=True)
+		file_obj = upload_ser.validated_data['file']
+
+		try:
+			decoded = file_obj.read().decode('utf-8-sig')
+		except Exception:
+			return Response({"detail": "Unable to read uploaded file as UTF-8 text."}, status=status.HTTP_400_BAD_REQUEST)
+
+		if not decoded.strip():
+			return Response({"detail": "Uploaded file is empty."}, status=status.HTTP_400_BAD_REQUEST)
+
+		reader = csv.DictReader(io.StringIO(decoded))
+		if not reader.fieldnames:
+			return Response({"detail": "CSV file has no header row."}, status=status.HTTP_400_BAD_REQUEST)
+
+		required_columns = ['name', 'phone', 'school_id']
+		missing = [c for c in required_columns if c not in reader.fieldnames]
+		if missing:
+			return Response({"detail": f"Missing required columns: {', '.join(missing)}."}, status=status.HTTP_400_BAD_REQUEST)
+
+		results = []
+		created_count = 0
+		failed_count = 0
+
+		for row_index, row in enumerate(reader, start=2):
+			row_result = {"row": row_index}
+
+			mapped = {
+				"name": (row.get("name") or "").strip(),
+				"phone": (row.get("phone") or "").strip(),
+				"email": (row.get("email") or "").strip() or None,
+				"grade": (row.get("grade") or "").strip() or None,
+				"gender": (row.get("gender") or "").strip() or None,
+				"dob": (row.get("dob") or None),
+			}
+
+			school_id_raw = (row.get("school_id") or "").strip()
+			if not school_id_raw:
+				results.append({**row_result, "status": "error", "errors": {"school_id": ["This field is required."]}})
+				failed_count += 1
+				continue
+			try:
+				mapped["school_id"] = int(school_id_raw)
+			except ValueError:
+				results.append({**row_result, "status": "error", "errors": {"school_id": ["Invalid integer."]}})
+				failed_count += 1
+				continue
+
+			ser = TeacherCreateStudentSerializer(data=mapped)
+			try:
+				ser.is_valid(raise_exception=True)
+			except ValidationError as exc:
+				results.append({**row_result, "status": "error", "errors": exc.detail})
+				failed_count += 1
+				continue
+
+			data = ser.validated_data
+			name = data["name"].strip()
+			phone = data["phone"].strip()
+			email = (data.get("email") or "").strip() or None
+			grade = (data.get("grade") or "").strip() or None
+			gender = (data.get("gender") or "").strip() or None
+			dob = data.get("dob")
+			school_id = data.get("school_id")
+
+			try:
+				school = School.objects.get(id=school_id)
+			except School.DoesNotExist:
+				results.append({**row_result, "status": "error", "errors": {"school_id": ["School not found."]}})
+				failed_count += 1
+				continue
+
+			import secrets
+			import string
+			alphabet = string.ascii_letters + string.digits
+			temp_password = "".join(secrets.choice(alphabet) for _ in range(10))
+
+			try:
+				with transaction.atomic():
+					user = User(
+						name=name,
+						phone=phone,
+						email=email,
+						role=UserRole.STUDENT.value,
+						dob=dob,
+						gender=gender,
+					)
+					user.set_password(temp_password)
+					user.save()
+
+					student_kwargs = {"profile": user, "school": school}
+					if grade:
+						student_kwargs["grade"] = grade
+					student = StudentModel.objects.create(**student_kwargs)
+			except Exception as exc:
+				results.append({**row_result, "status": "error", "errors": {"non_field_errors": [str(exc)]}})
+				failed_count += 1
+				continue
+
+			message = (
+				f"Hi {name}, your Liberia eLearn student account has been created.\n"
+				f"Login with phone: {phone} and password: {temp_password}.\n"
+				"Please change this password after your first login."
+			)
+			try:
+				if phone:
+					send_sms(message, [phone])
+			except Exception:
+				pass
+
+			try:
+				if email:
+					from_email = getattr(settings, "DEFAULT_FROM_EMAIL", None) or None
+					if from_email:
+						send_mail(
+							subject="Your Liberia eLearn student account",
+							message=message,
+							from_email=from_email,
+							recipient_list=[email],
+							fail_silently=True,
+						)
+			except Exception:
+				pass
+
+			created_count += 1
+			results.append({
+				**row_result,
+				"status": "created",
+				"student_db_id": student.id,
+				"student_id": student.student_id,
+				"name": name,
+				"phone": phone,
+			})
+
+		return Response({
+			"summary": {
+				"total_rows": len(results),
+				"created": created_count,
+				"failed": failed_count,
+			},
+			"results": results,
+		})
+
+	@extend_schema(
+		description=(
+			"Download a sample CSV template for bulk student creation via content endpoints. "
+			"The file includes the correct header columns and example rows."
+		),
+		responses={
+			200: OpenApiResponse(
+				description="CSV file with header row and two sample student records.",
+			),
+		},
+	)
+	@action(detail=False, methods=['get'], url_path='students/bulk-template')
+	def content_bulk_students_template(self, request):
+		"""Return a CSV template for bulk student creation via content endpoints.
+
+		The template contains a header row with all supported columns and
+		two example rows to guide content managers/admins on the expected format.
+		"""
+		deny = self._require_creator(request)
+		if deny:
+			return deny
+
+		header = [
+			"name",
+			"phone",
+			"email",
+			"grade",
+			"gender",
+			"dob",
+			"school_id",
+		]
+		example_rows = [
+			{
+				"name": "Jane Doe",
+				"phone": "231770000001",
+				"email": "jane@example.com",
+				"grade": "PRIMARY_3",
+				"gender": "F",
+				"dob": "2013-05-10",
+				"school_id": "",
+			},
+			{
+				"name": "John Doe",
+				"phone": "231770000002",
+				"email": "john@example.com",
+				"grade": "PRIMARY_4",
+				"gender": "M",
+				"dob": "2012-09-02",
+				"school_id": "5",
+			},
+		]
+
+		buffer = io.StringIO()
+		writer = csv.DictWriter(buffer, fieldnames=header)
+		writer.writeheader()
+		for row in example_rows:
+			writer.writerow(row)
+
+		csv_content = buffer.getvalue()
+		response = HttpResponse(csv_content, content_type="text/csv")
+		response["Content-Disposition"] = "attachment; filename=students_bulk_template.csv"
+		return response
 
 	@extend_schema(
 		operation_id="content_moderate",
