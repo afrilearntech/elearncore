@@ -1,7 +1,7 @@
 from typing import Iterable, Dict, List, Set
 
 from rest_framework import permissions, viewsets, status, filters, serializers
-from drf_spectacular.utils import extend_schema, OpenApiResponse, OpenApiExample
+from drf_spectacular.utils import extend_schema, OpenApiResponse, OpenApiExample, OpenApiParameter
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from django.views.decorators.cache import cache_page
@@ -424,6 +424,96 @@ class AIAbuseReportViewSet(viewsets.ReadOnlyModelViewSet):
 		return AIAbuseReport.objects.none()
 
 
+class ParentDashboardChildSerializer(serializers.Serializer):
+	name = serializers.CharField(allow_null=True)
+	student_id = serializers.CharField(allow_null=True)
+	student_db_id = serializers.IntegerField()
+	grade = serializers.CharField(allow_null=True)
+	school = serializers.CharField(allow_null=True)
+
+
+class ParentDashboardGradeOverviewSerializer(serializers.Serializer):
+	child_name = serializers.CharField(allow_null=True)
+	student_id = serializers.CharField(allow_null=True)
+	subject = serializers.CharField()
+	overall_score = serializers.FloatField()
+	score_grade = serializers.CharField()
+	score_remark = serializers.CharField()
+
+
+class ParentDashboardSerializer(serializers.Serializer):
+	children = ParentDashboardChildSerializer(many=True)
+	grades_overview = ParentDashboardGradeOverviewSerializer(many=True)
+
+
+class ParentAssessmentItemSerializer(serializers.Serializer):
+	child_name = serializers.CharField(allow_null=True)
+	assessment_title = serializers.CharField()
+	subject = serializers.CharField(allow_null=True)
+	assessment_type = serializers.CharField()
+	assessment_score = serializers.FloatField()
+	child_score = serializers.FloatField(allow_null=True)
+	assessment_status = serializers.CharField()
+	start_date = serializers.DateTimeField()
+	due_date = serializers.DateTimeField(allow_null=True)
+
+
+class ParentAssessmentsSummarySerializer(serializers.Serializer):
+	completed = serializers.IntegerField()
+	pending = serializers.IntegerField()
+	in_progress = serializers.IntegerField()
+
+
+class ParentAssessmentsResponseSerializer(serializers.Serializer):
+	assessments = ParentAssessmentItemSerializer(many=True)
+	summary = ParentAssessmentsSummarySerializer()
+
+
+class ParentSubmissionSolutionSerializer(serializers.Serializer):
+	solution = serializers.CharField(allow_null=True)
+	attachment = serializers.CharField(allow_null=True)
+
+
+class ParentSubmissionItemSerializer(serializers.Serializer):
+	child_name = serializers.CharField(allow_null=True)
+	assessment_title = serializers.CharField(allow_null=True)
+	subject = serializers.CharField(allow_null=True)
+	score = serializers.FloatField(allow_null=True)
+	assessment_score = serializers.FloatField()
+	submission_status = serializers.CharField()
+	solution = ParentSubmissionSolutionSerializer()
+	date_submitted = serializers.DateTimeField()
+
+
+class ParentSubmissionsSummarySerializer(serializers.Serializer):
+	graded = serializers.IntegerField()
+	pending = serializers.IntegerField()
+
+
+class ParentSubmissionsResponseSerializer(serializers.Serializer):
+	submissions = ParentSubmissionItemSerializer(many=True)
+	summary = ParentSubmissionsSummarySerializer()
+
+
+class ParentAnalyticsSummaryCardsSerializer(serializers.Serializer):
+	total_assessments = serializers.IntegerField()
+	total_completed_assessments = serializers.IntegerField()
+	overall_average_score = serializers.FloatField()
+	total_subjects_touched = serializers.IntegerField()
+	estimated_total_hours = serializers.FloatField()
+
+
+class ParentAnalyticsTimeItemSerializer(serializers.Serializer):
+	subject = serializers.CharField(allow_null=True)
+	time = serializers.CharField()
+	percentage = serializers.FloatField()
+
+
+class ParentAnalyticsResponseSerializer(serializers.Serializer):
+	summarycards = ParentAnalyticsSummaryCardsSerializer()
+	estimated_time_spent = ParentAnalyticsTimeItemSerializer(many=True)
+
+
 class ParentViewSet(viewsets.ViewSet):
 	"""Endpoints for parents to see information about their wards."""
 	permission_classes = [permissions.IsAuthenticated]
@@ -462,7 +552,53 @@ class ParentViewSet(viewsets.ViewSet):
 	@extend_schema(
 		operation_id="parent_dashboard",
 		request=None,
-		responses={200: serializers.Serializer},
+		responses={
+			200: OpenApiResponse(
+				description="Parent dashboard with children list and grades overview across all wards.",
+				response=ParentDashboardSerializer,
+				examples=[
+					OpenApiExample(
+						name="ParentDashboardExample",
+						value={
+							"children": [
+								{
+									"name": "Jane Doe",
+									"student_id": "STU0000001",
+									"student_db_id": 1,
+									"grade": "PRIMARY_3",
+									"school": "Afrilearn Academy",
+								},
+								{
+									"name": "John Doe",
+									"student_id": "STU0000002",
+									"student_db_id": 2,
+									"grade": "PRIMARY_4",
+									"school": "Afrilearn Academy",
+								},
+							],
+							"grades_overview": [
+								{
+									"child_name": "Jane Doe",
+									"student_id": "STU0000001",
+									"subject": "Mathematics",
+									"overall_score": 92.5,
+									"score_grade": "A-",
+									"score_remark": "Very good",
+								},
+								{
+									"child_name": "John Doe",
+									"student_id": "STU0000002",
+									"subject": "Science",
+									"overall_score": 78.0,
+									"score_grade": "C+",
+									"score_remark": "Fair",
+								},
+							],
+						},
+					),
+				],
+			),
+		},
 		description="Parent dashboard with children list and grades overview across all wards.",
 	)
 	@action(detail=False, methods=['get'], url_path='dashboard')
@@ -586,7 +722,48 @@ class ParentViewSet(viewsets.ViewSet):
 	@extend_schema(
 		operation_id="parent_assessments",
 		request=None,
-		responses={200: OpenApiResponse(description="Assessments list with summary.")},
+		responses={
+			200: OpenApiResponse(
+				description="Assessments list with summary.",
+				response=ParentAssessmentsResponseSerializer,
+				examples=[
+					OpenApiExample(
+						name="ParentAssessmentsExample",
+						value={
+							"assessments": [
+								{
+									"child_name": "Jane Doe",
+									"assessment_title": "Midterm Math Test",
+									"subject": "Mathematics",
+									"assessment_type": "EXAM",
+									"assessment_score": 100.0,
+									"child_score": 92.5,
+									"assessment_status": "Completed",
+									"start_date": "2025-01-10T08:00:00Z",
+									"due_date": "2025-01-15T08:00:00Z",
+								},
+								{
+									"child_name": "John Doe",
+									"assessment_title": "Science Quiz 1",
+									"subject": "Science",
+									"assessment_type": "QUIZ",
+									"assessment_score": 20.0,
+									"child_score": None,
+									"assessment_status": "In Progress",
+									"start_date": "2025-01-20T08:00:00Z",
+									"due_date": "2025-01-22T08:00:00Z",
+								},
+							],
+							"summary": {
+								"completed": 1,
+								"pending": 0,
+								"in_progress": 1,
+							},
+						},
+					),
+				],
+			),
+		},
 		description=(
 			"List all assessments (general and lesson) relevant to the parent's children, "
 			"including child scores when available, and a summary of completion status."
@@ -705,7 +882,51 @@ class ParentViewSet(viewsets.ViewSet):
 	@extend_schema(
 		operation_id="parent_submissions",
 		request=None,
-		responses={200: OpenApiResponse(description="Submissions list with summary.")},
+		responses={
+			200: OpenApiResponse(
+				description="Submissions list with summary.",
+				response=ParentSubmissionsResponseSerializer,
+				examples=[
+					OpenApiExample(
+						name="ParentSubmissionsExample",
+						value={
+							"submissions": [
+								{
+									"child_name": "Jane Doe",
+									"assessment_title": "Midterm Essay",
+									"subject": None,
+									"score": 18.0,
+									"assessment_score": 20.0,
+									"submission_status": "Graded",
+									"solution": {
+										"solution": "My essay answer...",
+										"attachment": "https://example.com/uploads/essay.pdf",
+									},
+									"date_submitted": "2025-01-12T10:00:00Z",
+								},
+								{
+									"child_name": "John Doe",
+									"assessment_title": "Science Project",
+									"subject": None,
+									"score": None,
+									"assessment_score": 30.0,
+									"submission_status": "Pending Review",
+									"solution": {
+										"solution": "Project details...",
+										"attachment": None,
+									},
+									"date_submitted": "2025-01-18T14:30:00Z",
+								},
+							],
+							"summary": {
+								"graded": 1,
+								"pending": 1,
+							},
+						},
+					),
+				],
+			),
+		},
 		description=(
 			"List all assessment submissions made by the parent's children, "
 			"including grading status and solution details."
@@ -872,6 +1093,141 @@ class ParentViewSet(viewsets.ViewSet):
 				"created_at": stu.created_at,
 			})
 		return Response(payload)
+
+	@extend_schema(
+		operation_id="parent_analytics",
+		request=None,
+		parameters=[
+			OpenApiParameter(
+				name="child",
+				type=str,
+				description="Optional student_id to filter analytics for a single child.",
+				required=False,
+			),
+		],
+		responses={
+			200: OpenApiResponse(
+				response=ParentAnalyticsResponseSerializer,
+				description=(
+					"Analytics summary for the parent's children, including summary cards "
+					"and estimated time spent per subject."
+				),
+			),
+		},
+		description=(
+			"Get analytics for the parent's children, including total assessments, "
+			"completed assessments, overall average score, subjects touched, and "
+			"estimated time spent per subject. Optionally filter by a single child via "
+			"?child=<student_id>."
+		),
+	)
+	@action(detail=False, methods=['get'], url_path='analytics')
+	def analytics(self, request):
+		"""Return analytics for the parent's children.
+
+		By default aggregates across all wards. Pass ?child=<student_id>
+		to restrict to a single child.
+		"""
+		user: User = request.user
+		parent = getattr(user, 'parent', None)
+		if not parent:
+			return Response({"detail": "Parent profile required."}, status=status.HTTP_403_FORBIDDEN)
+
+		students_qs = parent.wards.all()
+		child_param = request.query_params.get('child')
+		if child_param:
+			child_id = child_param.strip()
+			students_qs = students_qs.filter(student_id=child_id)
+		if not students_qs.exists():
+			return Response({
+				"summarycards": {
+					"total_assessments": 0,
+					"total_completed_assessments": 0,
+					"overall_average_score": 0.0,
+					"total_subjects_touched": 0,
+					"estimated_total_hours": 0.0,
+				},
+				"estimated_time_spent": [],
+			})
+
+		student_ids = list(students_qs.values_list('id', flat=True))
+
+		# Assessments and completion stats (reuse LessonAssessmentGrade and GeneralAssessmentGrade)
+		lag_qs = LessonAssessmentGrade.objects.filter(student_id__in=student_ids)
+		gag_qs = GeneralAssessmentGrade.objects.filter(student_id__in=student_ids)
+
+		all_scores = []
+		completed_assessments = 0
+		# For total assessments we count unique (assessment, student) pairs across both types
+		total_assessments = lag_qs.count() + gag_qs.count()
+
+		for g in lag_qs:
+			if g.score is not None:
+				completed_assessments += 1
+				all_scores.append(float(g.score))
+		for g in gag_qs:
+			if g.score is not None:
+				completed_assessments += 1
+				all_scores.append(float(g.score))
+
+		overall_average_score = sum(all_scores) / len(all_scores) if all_scores else 0.0
+
+		# Subjects touched based on lessons taken
+		lessons_taken = (
+			TakeLesson.objects
+			.filter(student_id__in=student_ids)
+			.select_related('lesson__subject')
+		)
+		subject_ids = set()
+		for tl in lessons_taken:
+			if getattr(getattr(tl.lesson, 'subject', None), 'id', None):
+				subject_ids.add(tl.lesson.subject.id)
+		total_subjects_touched = len(subject_ids)
+
+		# Estimate time spent: assume each TakeLesson has a duration field in minutes; if not, fall back to a constant
+		DEFAULT_DURATION_MINUTES = 10
+		from collections import defaultdict
+		subject_time_minutes = defaultdict(float)
+
+		for tl in lessons_taken:
+			subject = getattr(getattr(tl.lesson, 'subject', None), 'name', None)
+			if not subject:
+				continue
+			# Prefer an explicit duration field if present
+			duration = getattr(tl, 'duration_minutes', None)
+			try:
+				duration_val = float(duration) if duration is not None else float(DEFAULT_DURATION_MINUTES)
+			except (TypeError, ValueError):
+				duration_val = float(DEFAULT_DURATION_MINUTES)
+			subject_time_minutes[subject] += duration_val
+
+		# Total time in hours
+		total_minutes = sum(subject_time_minutes.values())
+		estimated_total_hours = round(total_minutes / 60.0, 2) if total_minutes else 0.0
+
+		estimated_time_spent = []
+		for subject, minutes in subject_time_minutes.items():
+			percentage = (minutes / total_minutes * 100.0) if total_minutes else 0.0
+			hours = int(minutes // 60)
+			remaining_minutes = int(minutes % 60)
+			time_str = f"{hours}h {remaining_minutes}m"
+			estimated_time_spent.append({
+				"subject": subject,
+				"time": time_str,
+				"percentage": round(percentage, 2),
+			})
+
+		response_data = {
+			"summarycards": {
+				"total_assessments": total_assessments,
+				"total_completed_assessments": completed_assessments,
+				"overall_average_score": round(overall_average_score, 2),
+				"total_subjects_touched": total_subjects_touched,
+				"estimated_total_hours": estimated_total_hours,
+			},
+			"estimated_time_spent": estimated_time_spent,
+		}
+		return Response(response_data)
 
 
 class GameViewSet(viewsets.ModelViewSet):
