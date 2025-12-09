@@ -78,9 +78,10 @@ class SubjectWriteSerializer(serializers.ModelSerializer):
 
 
 class TopicSerializer(serializers.ModelSerializer):
+	subject_name = serializers.CharField(source='subject.name', read_only=True)
 	class Meta:
 		model = Topic
-		fields = ['id', 'subject', 'name', 'created_at', 'updated_at']
+		fields = ['id', 'subject', 'subject_name', 'name', 'created_at', 'updated_at']
 		read_only_fields = ['created_at', 'updated_at']
 
 

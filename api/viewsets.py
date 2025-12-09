@@ -1,7 +1,12 @@
+import csv
+import io
 from typing import Iterable, Dict, List, Set
 
 from rest_framework import permissions, viewsets, status, filters, serializers
 from drf_spectacular.utils import extend_schema, OpenApiResponse, OpenApiExample, OpenApiParameter
+from django.conf import settings
+from django.core.mail import send_mail
+from django.http import HttpResponse
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from django.views.decorators.cache import cache_page
@@ -53,7 +58,10 @@ from .serializers import (
 	ContentModerationResponseSerializer,
 	ContentAssessmentItemSerializer,
 	ContentDashboardSerializer,
+	TeacherCreateStudentSerializer,
+	TeacherBulkStudentUploadSerializer,
 )
+from messsaging.services import send_sms
 
 
 class ParentChildSerializer(serializers.Serializer):
@@ -512,6 +520,68 @@ class ParentAnalyticsTimeItemSerializer(serializers.Serializer):
 class ParentAnalyticsResponseSerializer(serializers.Serializer):
 	summarycards = ParentAnalyticsSummaryCardsSerializer()
 	estimated_time_spent = ParentAnalyticsTimeItemSerializer(many=True)
+
+
+class TeacherGradeItemSerializer(serializers.Serializer):
+	student_name = serializers.CharField(allow_null=True)
+	student_id = serializers.CharField(allow_null=True)
+	subject = serializers.CharField(allow_null=True)
+	grade_letter = serializers.CharField()
+	percentage = serializers.FloatField()
+	status = serializers.CharField()
+	updated_at = serializers.DateTimeField()
+
+
+class TeacherGradesSummarySerializer(serializers.Serializer):
+	total_grades = serializers.IntegerField()
+	excellent = serializers.IntegerField()
+	good = serializers.IntegerField()
+	needs_improvement = serializers.IntegerField()
+
+
+class TeacherGradesResponseSerializer(serializers.Serializer):
+	summary = TeacherGradesSummarySerializer()
+	grades = TeacherGradeItemSerializer(many=True)
+
+
+class TeacherDashboardSummaryCardsSerializer(serializers.Serializer):
+	total_students = serializers.IntegerField()
+	class_average = serializers.FloatField()
+	pending_review = serializers.IntegerField()
+	completion_rate = serializers.FloatField()
+
+
+class TeacherDashboardTopPerformerSerializer(serializers.Serializer):
+	student_name = serializers.CharField(allow_null=True)
+	student_id = serializers.CharField(allow_null=True)
+	percentage = serializers.FloatField()
+	improvement = serializers.FloatField()
+
+
+class TeacherDashboardPendingSubmissionSerializer(serializers.Serializer):
+	student_name = serializers.CharField(allow_null=True)
+	student_id = serializers.CharField(allow_null=True)
+	assessment_title = serializers.CharField()
+	subject = serializers.CharField(allow_null=True)
+	due_at = serializers.DateTimeField(allow_null=True)
+	submitted_at = serializers.DateTimeField()
+
+
+class TeacherDashboardUpcomingDeadlineSerializer(serializers.Serializer):
+	assessment_title = serializers.CharField()
+	subject = serializers.CharField(allow_null=True)
+	submissions_done = serializers.IntegerField()
+	submissions_expected = serializers.IntegerField()
+	completion_percentage = serializers.FloatField()
+	due_at = serializers.DateTimeField(allow_null=True)
+	days_left = serializers.IntegerField()
+
+
+class TeacherDashboardResponseSerializer(serializers.Serializer):
+	summarycards = TeacherDashboardSummaryCardsSerializer()
+	top_performers = TeacherDashboardTopPerformerSerializer(many=True)
+	pending_submissions = TeacherDashboardPendingSubmissionSerializer(many=True)
+	upcoming_deadlines = TeacherDashboardUpcomingDeadlineSerializer(many=True)
 
 
 class ParentViewSet(viewsets.ViewSet):
@@ -3616,6 +3686,41 @@ class TeacherViewSet(viewsets.ViewSet):
 			return Response({"detail": "Teacher profile required."}, status=403)
 		return None
 
+	def _grade_for_score(self, score: float):
+		"""Map numeric score (0-100) to grade letter and remark."""
+		if score is None:
+			return "N/A", "No score"
+		if score >= 96:
+			return "A+", "Excellent"
+		if score >= 90:
+			return "A-", "Very good"
+		if score >= 86:
+			return "B+", "Good"
+		if score >= 80:
+			return "B-", "Good"
+		if score >= 76:
+			return "C+", "Fair"
+		if score >= 70:
+			return "C-", "Fair"
+		if score >= 65:
+			return "D+", "Poor"
+		if score >= 60:
+			return "D-", "Poor"
+		return "F", "Fail"
+
+	def _grade_status(self, grade_letter: str, remark: str) -> str:
+		"""Collapse detailed remarks into UI-friendly status buckets.
+
+		Excellent: top scores (Excellent/Very good, A-range).
+		Good: middle scores (Good/Fair).
+		Needs Improvement: Poor/Fail and anything else.
+		"""
+		if remark in {"Excellent", "Very good"} or grade_letter in {"A+", "A", "A-"}:
+			return "Excellent"
+		if remark in {"Good", "Fair"}:
+			return "Good"
+		return "Needs Improvement"
+
 	@extend_schema(
 		description="List subjects for the teacher's grade.",
 		responses={200: SubjectSerializer(many=True)},
@@ -3629,6 +3734,28 @@ class TeacherViewSet(viewsets.ViewSet):
 		# For now, return all subjects linked to this teacher profile.
 		qs = Subject.objects.filter(teachers=teacher).order_by('name')
 		return Response(SubjectSerializer(qs, many=True).data)
+
+	@extend_schema(
+		description=(
+			"List topics for all subjects assigned to this teacher. "
+			"Each topic is returned with its subject information."
+		),
+		responses={200: TopicSerializer(many=True)},
+	)
+	@action(detail=False, methods=['get'], url_path='topics')
+	def my_topics(self, request):
+		"""Return all topics that belong to the teacher's subjects."""
+		deny = self._require_teacher(request)
+		if deny:
+			return deny
+		teacher = request.user.teacher
+		qs = (
+			Topic.objects
+			.filter(subject__teachers=teacher)
+			.select_related('subject')
+			.order_by('subject__name', 'name')
+		)
+		return Response(TopicSerializer(qs, many=True).data)
 
 	@extend_schema(
 		description="List lessons created by this teacher or for their subjects.",
@@ -3755,6 +3882,697 @@ class TeacherViewSet(viewsets.ViewSet):
 		student.moderation_comment = "Approved by teacher"
 		student.save(update_fields=['status', 'moderation_comment', 'updated_at'])
 		return Response(StudentSerializer(student).data)
+
+	@extend_schema(
+		description=(
+			"Teacher dashboard summary: total students, class average, "
+			"pending reviews, completion rate, top performers, pending "
+			"submissions, and upcoming assessment deadlines."
+		),
+		responses={200: TeacherDashboardResponseSerializer},
+	)
+	@action(detail=False, methods=['get'], url_path='dashboard')
+	def dashboard(self, request):
+		"""Return dashboard metrics and lists for the teacher.
+
+		Quick Actions are hard-coded on the frontend and are not returned here.
+		"""
+		deny = self._require_teacher(request)
+		if deny:
+			return deny
+		teacher = request.user.teacher
+
+		# If no school context, return an empty dashboard
+		if not getattr(teacher, 'school_id', None):
+			empty = {
+				"summarycards": {
+					"total_students": 0,
+					"class_average": 0.0,
+					"pending_review": 0,
+					"completion_rate": 0.0,
+				},
+				"top_performers": [],
+				"pending_submissions": [],
+				"upcoming_deadlines": [],
+			}
+			return Response(empty)
+
+		students_qs = Student.objects.filter(
+			school_id=teacher.school_id,
+			status=StatusEnum.APPROVED.value,
+		)
+		student_ids = list(students_qs.values_list('id', flat=True))
+		total_students = len(student_ids)
+
+		# ----- Grades for class average and top performers -----
+		per_student_scores: Dict[int, List[float]] = {}
+		recent_scores: Dict[int, List[float]] = {}
+		past_scores: Dict[int, List[float]] = {}
+		all_scores: List[float] = []
+		cutoff = timezone.now() - timedelta(days=30)
+
+		lesson_grades = (
+			LessonAssessmentGrade.objects
+			.select_related('lesson_assessment__lesson__subject', 'student__profile', 'lesson_assessment__given_by')
+			.filter(lesson_assessment__given_by=teacher, student_id__in=student_ids)
+		)
+
+		for g in lesson_grades:
+			if g.score is None:
+				continue
+			score = float(g.score)
+			student_id = g.student_id
+			per_student_scores.setdefault(student_id, []).append(score)
+			all_scores.append(score)
+			ts = getattr(g, 'updated_at', getattr(g, 'created_at', None)) or timezone.now()
+			bucket = recent_scores if ts >= cutoff else past_scores
+			bucket.setdefault(student_id, []).append(score)
+
+		general_grades = (
+			GeneralAssessmentGrade.objects
+			.select_related('assessment__given_by', 'student__profile')
+			.filter(assessment__given_by=teacher, student_id__in=student_ids)
+		)
+
+		for g in general_grades:
+			if g.score is None:
+				continue
+			score = float(g.score)
+			student_id = g.student_id
+			per_student_scores.setdefault(student_id, []).append(score)
+			all_scores.append(score)
+			ts = getattr(g, 'updated_at', getattr(g, 'created_at', None)) or timezone.now()
+			bucket = recent_scores if ts >= cutoff else past_scores
+			bucket.setdefault(student_id, []).append(score)
+
+		class_average = sum(all_scores) / len(all_scores) if all_scores else 0.0
+
+		# Build top performers list (sorted by average score desc)
+		student_by_id = {s.id: s for s in students_qs.select_related('profile')}
+		top_performers = []
+		for sid, scores in per_student_scores.items():
+			if not scores:
+				continue
+			avg_score = sum(scores) / len(scores)
+			recent_list = recent_scores.get(sid) or []
+			past_list = past_scores.get(sid) or []
+			if past_list:
+				improvement = (sum(recent_list) / len(recent_list) - sum(past_list) / len(past_list)) if recent_list else 0.0
+			else:
+				improvement = 0.0
+			student = student_by_id.get(sid)
+			name = getattr(getattr(student, 'profile', None), 'name', None) if student else None
+			code = getattr(student, 'student_id', None) if student else None
+			top_performers.append({
+				"student_name": name,
+				"student_id": code,
+				"percentage": round(avg_score, 2),
+				"improvement": round(improvement, 2),
+			})
+
+		# Sort by percentage desc and take top 3
+		top_performers.sort(key=lambda x: x.get("percentage", 0.0), reverse=True)
+		top_performers = top_performers[:3]
+
+		# ----- Pending submissions and grading completion -----
+		graded_count = pending_count = 0
+		pending_submissions = []
+
+		solutions = (
+			AssessmentSolution.objects
+			.select_related('assessment', 'student__profile')
+			.filter(assessment__given_by=teacher, student_id__in=student_ids)
+			.order_by('assessment__due_at', 'submitted_at')
+		)
+
+		grade_by_solution_id: Dict[int, GeneralAssessmentGrade] = {}
+		grade_qs = (
+			GeneralAssessmentGrade.objects
+			.filter(assessment__given_by=teacher, student_id__in=student_ids)
+			.select_related('assessment', 'solution')
+		)
+		for g in grade_qs:
+			if g.solution_id:
+				grade_by_solution_id[g.solution_id] = g
+
+		for sol in solutions:
+			grade_obj = grade_by_solution_id.get(sol.id)
+			if grade_obj:
+				graded_count += 1
+				continue
+			pending_count += 1
+			student = sol.student
+			student_name = getattr(getattr(student, 'profile', None), 'name', None)
+			student_code = getattr(student, 'student_id', None)
+			assessment = sol.assessment
+			pending_submissions.append({
+				"student_name": student_name,
+				"student_id": student_code,
+				"assessment_title": getattr(assessment, 'title', None),
+				"subject": None,
+				"due_at": getattr(assessment, 'due_at', None),
+				"submitted_at": getattr(sol, 'submitted_at', None),
+			})
+			if len(pending_submissions) >= 5:
+				break
+
+		total_review = graded_count + pending_count
+		completion_rate = (graded_count / total_review * 100.0) if total_review else 0.0
+
+		# ----- Upcoming deadlines (general and lesson assessments) -----
+		now = timezone.now()
+		from django.db.models import Count as DjangoCount
+
+		general_upcoming = (
+			GeneralAssessment.objects
+			.filter(given_by=teacher, due_at__gte=now)
+			.annotate(submissions_done=DjangoCount('solutions'))
+			.order_by('due_at')
+		)
+
+		lesson_upcoming = (
+			LessonAssessment.objects
+			.filter(given_by=teacher, due_at__gte=now)
+			.annotate(submissions_done=DjangoCount('grades'))
+			.select_related('lesson__subject')
+			.order_by('due_at')
+		)
+
+		upcoming_deadlines = []
+		total_expected = total_students or 0
+
+		for ga in general_upcoming:
+			submissions_done = getattr(ga, 'submissions_done', 0) or 0
+			completion = (submissions_done / total_expected * 100.0) if total_expected else 0.0
+			days_left = (ga.due_at.date() - now.date()).days if ga.due_at else 0
+			upcoming_deadlines.append({
+				"assessment_title": ga.title,
+				"subject": None,
+				"submissions_done": submissions_done,
+				"submissions_expected": total_expected,
+				"completion_percentage": round(completion, 2),
+				"due_at": ga.due_at,
+				"days_left": days_left,
+			})
+
+		for la in lesson_upcoming:
+			submissions_done = getattr(la, 'submissions_done', 0) or 0
+			completion = (submissions_done / total_expected * 100.0) if total_expected else 0.0
+			days_left = (la.due_at.date() - now.date()).days if la.due_at else 0
+			subject_name = getattr(getattr(la.lesson, 'subject', None), 'name', None)
+			upcoming_deadlines.append({
+				"assessment_title": la.title,
+				"subject": subject_name,
+				"submissions_done": submissions_done,
+				"submissions_expected": total_expected,
+				"completion_percentage": round(completion, 2),
+				"due_at": la.due_at,
+				"days_left": days_left,
+			})
+
+		# Sort upcoming deadlines by due date ascending and limit
+		upcoming_deadlines.sort(key=lambda x: x.get("due_at") or now)
+		upcoming_deadlines = upcoming_deadlines[:5]
+
+		response_data = {
+			"summarycards": {
+				"total_students": total_students,
+				"class_average": round(class_average, 2),
+				"pending_review": pending_count,
+				"completion_rate": round(completion_rate, 2),
+			},
+			"top_performers": top_performers,
+			"pending_submissions": pending_submissions,
+			"upcoming_deadlines": upcoming_deadlines,
+		}
+		return Response(response_data)
+
+	@extend_schema(
+		description=(
+			"List all grades recorded by this teacher for their students, "
+			"along with summary cards for Excellent, Good, and Needs Improvement."
+		),
+		responses={200: TeacherGradesResponseSerializer},
+	)
+	@action(detail=False, methods=['get'], url_path='grades')
+	def grades(self, request):
+		"""Return all grades the teacher has recorded, plus summary cards.
+
+		Rows combine lesson assessment grades and general assessment grades
+		where this teacher is the `given_by` teacher.
+		"""
+		deny = self._require_teacher(request)
+		if deny:
+			return deny
+		teacher = request.user.teacher
+
+		items = []
+		total = excellent = good = needs_improvement = 0
+
+		# Lesson assessment grades
+		lesson_grades = (
+			LessonAssessmentGrade.objects
+			.select_related('lesson_assessment__lesson__subject', 'student__profile', 'lesson_assessment__given_by')
+			.filter(lesson_assessment__given_by=teacher)
+		)
+		for g in lesson_grades:
+			if g.score is None:
+				continue
+			score = float(g.score)
+			grade_letter, remark = self._grade_for_score(score)
+			status_bucket = self._grade_status(grade_letter, remark)
+			total += 1
+			if status_bucket == "Excellent":
+				excellent += 1
+			elif status_bucket == "Good":
+				good += 1
+			else:
+				needs_improvement += 1
+
+			student = g.student
+			student_name = getattr(getattr(student, 'profile', None), 'name', None)
+			student_code = getattr(student, 'student_id', None)
+			subject_name = getattr(getattr(getattr(g.lesson_assessment, 'lesson', None), 'subject', None), 'name', None)
+			updated_at = getattr(g, 'updated_at', getattr(g, 'created_at', None))
+
+			items.append({
+				"student_name": student_name,
+				"student_id": student_code,
+				"subject": subject_name,
+				"grade_letter": grade_letter,
+				"percentage": round(score, 2),
+				"status": status_bucket,
+				"updated_at": updated_at,
+			})
+
+		# General assessment grades
+		general_grades = (
+			GeneralAssessmentGrade.objects
+			.select_related('assessment__given_by', 'student__profile')
+			.filter(assessment__given_by=teacher)
+		)
+		for g in general_grades:
+			if g.score is None:
+				continue
+			score = float(g.score)
+			grade_letter, remark = self._grade_for_score(score)
+			status_bucket = self._grade_status(grade_letter, remark)
+			total += 1
+			if status_bucket == "Excellent":
+				excellent += 1
+			elif status_bucket == "Good":
+				good += 1
+			else:
+				needs_improvement += 1
+
+			student = g.student
+			student_name = getattr(getattr(student, 'profile', None), 'name', None)
+			student_code = getattr(student, 'student_id', None)
+			updated_at = getattr(g, 'updated_at', getattr(g, 'created_at', None))
+
+			items.append({
+				"student_name": student_name,
+				"student_id": student_code,
+				"subject": None,
+				"grade_letter": grade_letter,
+				"percentage": round(score, 2),
+				"status": status_bucket,
+				"updated_at": updated_at,
+			})
+
+		# Sort by most recently updated first to match UI expectations
+		try:
+			items.sort(key=lambda x: x.get("updated_at") or timezone.now(), reverse=True)
+		except Exception:
+			pass
+
+		return Response({
+			"summary": {
+				"total_grades": total,
+				"excellent": excellent,
+				"good": good,
+				"needs_improvement": needs_improvement,
+			},
+			"grades": items,
+		})
+
+	@extend_schema(
+		description=(
+			"Create a new student user and profile. "
+			"The student will be associated with the teacher's school by default, "
+			"or with the provided school_id if allowed. A temporary password is "
+			"generated and sent to the student's phone/email."
+		),
+		request=TeacherCreateStudentSerializer,
+		responses={201: StudentSerializer},
+	)
+	@action(detail=False, methods=['post'], url_path='students/create')
+	def create_student(self, request):
+		"""Create a new student (User + Student profile) under this teacher.
+
+		Teachers provide basic user details; the system generates a temp password
+		and sends it via SMS/email.
+		"""
+		from django.db import transaction
+		from accounts.models import User, School
+
+		deny = self._require_teacher(request)
+		if deny:
+			return deny
+		teacher = request.user.teacher
+
+		ser = TeacherCreateStudentSerializer(data=request.data)
+		ser.is_valid(raise_exception=True)
+		data = ser.validated_data
+
+		name = data["name"].strip()
+		phone = data["phone"].strip()
+		email = (data.get("email") or "").strip() or None
+		grade = (data.get("grade") or "").strip() or None
+		school_id = data.get("school_id")
+
+		# Resolve school: default to teacher's school if not explicitly provided
+		school = None
+		if school_id is not None:
+			try:
+				school = School.objects.get(id=school_id)
+			except School.DoesNotExist:
+				return Response({"detail": "School not found."}, status=status.HTTP_400_BAD_REQUEST)
+			# Enforce same-school constraint for non-admin teachers
+			if request.user.role != UserRole.ADMIN.value and teacher.school_id and school.id != teacher.school_id:
+				return Response({"detail": "You can only create students in your own school."}, status=status.HTTP_403_FORBIDDEN)
+		else:
+			school = teacher.school
+
+		if school is None:
+			return Response({"detail": "No school context available to assign to the student."}, status=status.HTTP_400_BAD_REQUEST)
+
+		import secrets
+		import string
+		alphabet = string.ascii_letters + string.digits
+		temp_password = "".join(secrets.choice(alphabet) for _ in range(10))
+
+		with transaction.atomic():
+			user = User(
+				name=name,
+				phone=phone,
+				email=email,
+				role=UserRole.STUDENT.value,
+			)
+			user.set_password(temp_password)
+			user.save()
+
+			student_kwargs = {"profile": user, "school": school}
+			if grade:
+				student_kwargs["grade"] = grade
+			student = Student.objects.create(**student_kwargs)
+
+		# Notify student via SMS/email with temp password
+		message = (
+			f"Hi {name}, your Liberia eLearn student account has been created.\n"
+			f"Login with phone: {phone} and password: {temp_password}.\n"
+			"Please change this password after your first login."
+		)
+		try:
+			if phone:
+				# send_sms expects an iterable of recipients
+				send_sms(message, [phone])
+		except Exception:
+			pass
+
+		try:
+			if email:
+				from_email = getattr(settings, "DEFAULT_FROM_EMAIL", None) or None
+				if from_email:
+					send_mail(
+						subject="Your Liberia eLearn student account",
+						message=message,
+						from_email=from_email,
+						recipient_list=[email],
+						fail_silently=True,
+					)
+		except Exception:
+			pass
+
+		return Response(StudentSerializer(student).data, status=status.HTTP_201_CREATED)
+
+	@extend_schema(
+		description=(
+			"Bulk create students from an uploaded CSV file. "
+			"Each row should at least include 'name' and 'phone'. "
+			"Optional columns: 'email', 'grade', 'gender', 'dob', 'school_id'."
+		),
+		request=TeacherBulkStudentUploadSerializer,
+		responses={
+			200: OpenApiResponse(
+				description=(
+					"Bulk create summary with per-row statuses. "
+					"Each result item includes the CSV row number, status, and basic student info or errors."
+				),
+			),
+		},
+	)
+	@action(detail=False, methods=['post'], url_path='students/bulk-create')
+	def bulk_create_students(self, request):
+		"""Bulk create students for this teacher from a CSV upload.
+
+		The CSV file must have a header row. Required columns:
+		- name
+		- phone
+
+		Optional columns:
+		- email
+		- grade
+		- gender
+		- dob (YYYY-MM-DD)
+		- school_id (if omitted, defaults to the teacher's school)
+		"""
+		from django.db import transaction
+		from rest_framework.exceptions import ValidationError
+
+		deny = self._require_teacher(request)
+		if deny:
+			return deny
+		teacher = request.user.teacher
+
+		upload_ser = TeacherBulkStudentUploadSerializer(data=request.data)
+		upload_ser.is_valid(raise_exception=True)
+		file_obj = upload_ser.validated_data['file']
+
+		try:
+			decoded = file_obj.read().decode('utf-8-sig')
+		except Exception:
+			return Response({"detail": "Unable to read uploaded file as UTF-8 text."}, status=status.HTTP_400_BAD_REQUEST)
+
+		if not decoded.strip():
+			return Response({"detail": "Uploaded file is empty."}, status=status.HTTP_400_BAD_REQUEST)
+
+		reader = csv.DictReader(io.StringIO(decoded))
+		if not reader.fieldnames:
+			return Response({"detail": "CSV file has no header row."}, status=status.HTTP_400_BAD_REQUEST)
+
+		required_columns = ['name', 'phone']
+		missing = [c for c in required_columns if c not in reader.fieldnames]
+		if missing:
+			return Response({"detail": f"Missing required columns: {', '.join(missing)}."}, status=status.HTTP_400_BAD_REQUEST)
+
+		results = []
+		created_count = 0
+		failed_count = 0
+
+		for row_index, row in enumerate(reader, start=2):  # data rows start at line 2
+			row_result = {"row": row_index}
+
+			# Map CSV row to the single-create serializer fields
+			mapped = {
+				"name": (row.get("name") or "").strip(),
+				"phone": (row.get("phone") or "").strip(),
+				"email": (row.get("email") or "").strip() or None,
+				"grade": (row.get("grade") or "").strip() or None,
+				"gender": (row.get("gender") or "").strip() or None,
+				"dob": (row.get("dob") or None),
+			}
+			school_id_value = (row.get("school_id") or "").strip()
+			if school_id_value:
+				try:
+					mapped["school_id"] = int(school_id_value)
+				except ValueError:
+					results.append({**row_result, "status": "error", "errors": {"school_id": ["Invalid integer."]}})
+					failed_count += 1
+					continue
+
+			ser = TeacherCreateStudentSerializer(data=mapped)
+			try:
+				ser.is_valid(raise_exception=True)
+			except ValidationError as exc:
+				results.append({**row_result, "status": "error", "errors": exc.detail})
+				failed_count += 1
+				continue
+
+			data = ser.validated_data
+			name = data["name"].strip()
+			phone = data["phone"].strip()
+			email = (data.get("email") or "").strip() or None
+			grade = (data.get("grade") or "").strip() or None
+			gender = (data.get("gender") or "").strip() or None
+			dob = data.get("dob")
+			school_id = data.get("school_id")
+
+			# Resolve school similar to the single create endpoint
+			school = None
+			if school_id is not None:
+				try:
+					school = School.objects.get(id=school_id)
+				except School.DoesNotExist:
+					results.append({**row_result, "status": "error", "errors": {"school_id": ["School not found."]}})
+					failed_count += 1
+					continue
+				if request.user.role != UserRole.ADMIN.value and teacher.school_id and school.id != teacher.school_id:
+					results.append({**row_result, "status": "error", "errors": {"school_id": ["You can only create students in your own school."]}})
+					failed_count += 1
+					continue
+			else:
+				school = teacher.school
+
+			if school is None:
+				results.append({**row_result, "status": "error", "errors": {"school": ["No school context available to assign to the student."]}})
+				failed_count += 1
+				continue
+
+			import secrets
+			import string
+			alphabet = string.ascii_letters + string.digits
+			temp_password = "".join(secrets.choice(alphabet) for _ in range(10))
+
+			try:
+				with transaction.atomic():
+					user = User(
+						name=name,
+						phone=phone,
+						email=email,
+						role=UserRole.STUDENT.value,
+						dob=dob,
+						gender=gender,
+					)
+					user.set_password(temp_password)
+					user.save()
+
+					student_kwargs = {"profile": user, "school": school}
+					if grade:
+						student_kwargs["grade"] = grade
+					student = Student.objects.create(**student_kwargs)
+			except Exception as exc:
+				results.append({**row_result, "status": "error", "errors": {"non_field_errors": [str(exc)]}})
+				failed_count += 1
+				continue
+
+			# Notify via SMS/email with temp password
+			message = (
+				f"Hi {name}, your Liberia eLearn student account has been created.\n"
+				f"Login with phone: {phone} and password: {temp_password}.\n"
+				"Please change this password after your first login."
+			)
+			try:
+				if phone:
+					send_sms(message, [phone])
+			except Exception:
+				pass
+
+			try:
+				if email:
+					from_email = getattr(settings, "DEFAULT_FROM_EMAIL", None) or None
+					if from_email:
+						send_mail(
+							subject="Your Liberia eLearn student account",
+							message=message,
+							from_email=from_email,
+							recipient_list=[email],
+							fail_silently=True,
+						)
+			except Exception:
+				pass
+
+			created_count += 1
+			results.append({
+				**row_result,
+				"status": "created",
+				"student_db_id": student.id,
+				"student_id": student.student_id,
+				"name": name,
+				"phone": phone,
+			})
+
+		return Response({
+			"summary": {
+				"total_rows": len(results),
+				"created": created_count,
+				"failed": failed_count,
+			},
+			"results": results,
+		})
+
+	@extend_schema(
+		description=(
+			"Download a sample CSV template for bulk student creation. "
+			"The file includes the correct header columns and example rows."
+		),
+		responses={
+			200: OpenApiResponse(
+				description="CSV file with header row and two sample student records.",
+			),
+		},
+	)
+	@action(detail=False, methods=['get'], url_path='students/bulk-template')
+	def bulk_students_template(self, request):
+		"""Return a CSV template for bulk student creation.
+
+		The template contains a header row with all supported columns and
+		two example rows to guide teachers on the expected format.
+		"""
+		deny = self._require_teacher(request)
+		if deny:
+			return deny
+
+		header = [
+			"name",
+			"phone",
+			"email",
+			"grade",
+			"gender",
+			"dob",
+			"school_id",
+		]
+		example_rows = [
+			{
+				"name": "Jane Doe",
+				"phone": "231770000001",
+				"email": "jane@example.com",
+				"grade": "PRIMARY_3",
+				"gender": "F",
+				"dob": "2013-05-10",
+				"school_id": "",
+			},
+			{
+				"name": "John Doe",
+				"phone": "231770000002",
+				"email": "john@example.com",
+				"grade": "PRIMARY_4",
+				"gender": "M",
+				"dob": "2012-09-02",
+				"school_id": "5",
+			},
+		]
+
+		buffer = io.StringIO()
+		writer = csv.DictWriter(buffer, fieldnames=header)
+		writer.writeheader()
+		for row in example_rows:
+			writer.writerow(row)
+
+		csv_content = buffer.getvalue()
+		response = HttpResponse(csv_content, content_type="text/csv")
+		response["Content-Disposition"] = "attachment; filename=students_bulk_template.csv"
+		return response
 
 	@extend_schema(
 		description=(
