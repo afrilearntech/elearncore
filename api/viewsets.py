@@ -3890,6 +3890,149 @@ class TeacherViewSet(viewsets.ViewSet):
 			"score": grade_obj.score,
 		})
 
+	@extend_schema(
+		description=(
+			"List all submissions for assessments created by this teacher. "
+			"Includes grading status and solution details."
+		),
+		responses={
+			200: OpenApiResponse(
+				description="Submissions list with summary.",
+				response=ParentSubmissionsResponseSerializer,
+				examples=[
+					OpenApiExample(
+						name="TeacherSubmissionsExample",
+						value={
+							"submissions": [
+								{
+									"child_name": "Jane Doe",
+									"assessment_title": "Midterm Essay",
+									"subject": "Mathematics",
+									"score": 18.0,
+									"assessment_score": 20.0,
+									"submission_status": "Graded",
+									"solution": {
+										"solution": "My essay answer...",
+										"attachment": "https://example.com/uploads/essay.pdf",
+									},
+									"date_submitted": "2025-01-12T10:00:00Z",
+								},
+								{
+									"child_name": "John Doe",
+									"assessment_title": "Science Project",
+									"subject": None,
+									"score": None,
+									"assessment_score": 30.0,
+									"submission_status": "Pending Review",
+									"solution": {
+										"solution": "Project details...",
+										"attachment": None,
+									},
+									"date_submitted": "2025-01-18T14:30:00Z",
+								},
+							],
+							"summary": {
+								"graded": 1,
+								"pending": 1,
+							},
+						},
+					),
+				],
+			),
+		},
+	)
+	@action(detail=False, methods=['get'], url_path='submissions')
+	def submissions(self, request):
+		"""Return all submissions for assessments created by this teacher.
+
+		Each item includes child name, assessment title, score (if graded),
+		allocated score, submission status, solution details, and submission date.
+		"""
+		deny = self._require_teacher(request)
+		if deny:
+			return deny
+		teacher = request.user.teacher
+
+		# General assessment submissions for assessments given by this teacher
+		solutions = (
+			AssessmentSolution.objects
+			.select_related('assessment', 'student__profile')
+			.filter(assessment__given_by=teacher)
+		)
+
+		# Map grades by solution id
+		grade_by_solution_id: Dict[int, GeneralAssessmentGrade] = {}
+		grade_qs = GeneralAssessmentGrade.objects.filter(assessment__given_by=teacher).select_related('assessment', 'solution')
+		for g in grade_qs:
+			if g.solution_id:
+				grade_by_solution_id[g.solution_id] = g
+
+		items = []
+		graded_count = pending_count = 0
+
+		for sol in solutions:
+			student = sol.student
+			child_name = getattr(getattr(student, 'profile', None), 'name', None)
+			assessment = sol.assessment
+			grade_obj = grade_by_solution_id.get(sol.id)
+			child_score = float(grade_obj.score) if grade_obj else None
+			allocated = float(getattr(assessment, 'marks', 0.0) or 0.0)
+			status_label = "Graded" if grade_obj else "Pending Review"
+			if grade_obj:
+				graded_count += 1
+			else:
+				pending_count += 1
+			items.append({
+				"child_name": child_name,
+				"assessment_title": getattr(assessment, 'title', None),
+				"subject": None,
+				"score": child_score,
+				"assessment_score": allocated,
+				"submission_status": status_label,
+				"solution": {
+					"solution": sol.solution,
+					"attachment": sol.attachment.url if getattr(sol, 'attachment', None) else None,
+				},
+				"date_submitted": sol.submitted_at,
+			})
+
+		# Lesson assessments: we treat graded records as submissions for assessments this teacher created
+		lesson_grades = (
+			LessonAssessmentGrade.objects
+			.select_related('lesson_assessment__lesson__subject', 'student__profile', 'lesson_assessment__given_by')
+			.filter(lesson_assessment__given_by=teacher)
+		)
+		for lg in lesson_grades:
+			student = lg.student
+			child_name = getattr(getattr(student, 'profile', None), 'name', None)
+			la = lg.lesson_assessment
+			subject_name = getattr(getattr(la.lesson, 'subject', None), 'name', None)
+			child_score = float(lg.score) if lg.score is not None else None
+			allocated = float(getattr(la, 'marks', 0.0) or 0.0)
+			status_label = "Graded"
+			graded_count += 1
+			items.append({
+				"child_name": child_name,
+				"assessment_title": getattr(la, 'title', None),
+				"subject": subject_name,
+				"score": child_score,
+				"assessment_score": allocated,
+				"submission_status": status_label,
+				"solution": {
+					"solution": None,
+					"attachment": None,
+				},
+				"date_submitted": lg.created_at,
+			})
+
+		return Response({
+			"submissions": items,
+			"summary": {
+				"graded": graded_count,
+				"pending": pending_count,
+			},
+		})
+
 
 class LookupPagination(filters.BaseFilterBackend):
 	pass

@@ -64,6 +64,8 @@ class SchoolLookupSerializer(serializers.ModelSerializer):
 
 
 class StudentSerializer(serializers.ModelSerializer):
+	profile = UserSerializer(read_only=True)
+	school = SchoolLookupSerializer(read_only=True)
 	class Meta:
 		model = Student
 		fields = ['id', 'student_id', 'profile', 'school', 'grade', 'status', 'moderation_comment', 'created_at', 'updated_at']
