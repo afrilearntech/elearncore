@@ -71,6 +71,7 @@ from .serializers import (
 	AssignSubjectsToTeacherSerializer,
 	AdminCreateContentManagerSerializer,
 	AdminBulkContentManagerUploadSerializer,
+	AdminContentManagerListSerializer,
 	GradeAssessmentSerializer,
 )
 from messsaging.services import send_sms
@@ -5854,6 +5855,20 @@ class AdminSchoolViewSet(viewsets.ModelViewSet):
 	permission_classes = [permissions.IsAuthenticated, IsAdminRole, permissions.IsAdminUser]
 
 
+class AdminUserViewSet(viewsets.ReadOnlyModelViewSet):
+	"""Admin-only read access to all users.
+
+	Provides list and retrieve endpoints for all `User` records.
+	"""
+
+	queryset = User.objects.all().order_by('-created_at')
+	serializer_class = UserSerializer
+	permission_classes = [permissions.IsAuthenticated, IsAdminRole, permissions.IsAdminUser]
+	filter_backends = [filters.SearchFilter, filters.OrderingFilter]
+	search_fields = ['name', 'phone', 'email', 'role']
+	ordering_fields = ['created_at', 'name', 'phone', 'role']
+
+
 class AdminContentManagerViewSet(viewsets.ViewSet):
 	"""Admin-only endpoints to manage content managers (creators/validators).
 
@@ -5864,6 +5879,24 @@ class AdminContentManagerViewSet(viewsets.ViewSet):
 	"""
 
 	permission_classes = [permissions.IsAuthenticated, IsAdminRole, permissions.IsAdminUser]
+
+	@extend_schema(
+		operation_id="admin_list_content_managers",
+		description=(
+			"List all content managers (both content creators and validators). "
+			"Each object includes name, email, role, and status."
+		),
+		responses={200: AdminContentManagerListSerializer(many=True)},
+	)
+	def list(self, request):
+		"""Return all content managers (creators and validators) for admins.
+
+		Status is derived from the underlying user record: ACTIVE/INACTIVE/DELETED.
+		"""
+		roles = {UserRole.CONTENTCREATOR.value, UserRole.CONTENTVALIDATOR.value}
+		qs = User.objects.filter(role__in=roles).order_by('name')
+		ser = AdminContentManagerListSerializer(qs, many=True)
+		return Response(ser.data)
 
 	@extend_schema(
 		operation_id="admin_create_content_manager",

@@ -212,6 +212,30 @@ class AdminBulkContentManagerUploadSerializer(serializers.Serializer):
         return value
 
 
+class AdminContentManagerListSerializer(serializers.Serializer):
+    """Read-only representation of a content manager for admin listing.
+
+    Includes basic identity fields plus a derived status.
+    """
+
+    name = serializers.CharField()
+    email = serializers.EmailField(allow_null=True, required=False)
+    role = serializers.CharField()
+    status = serializers.CharField()
+
+    def to_representation(self, instance):
+        # instance is a User object
+        status = "DELETED" if getattr(instance, "deleted", False) else (
+            "ACTIVE" if getattr(instance, "is_active", False) else "INACTIVE"
+        )
+        return {
+            "name": getattr(instance, "name", None),
+            "email": getattr(instance, "email", None),
+            "role": getattr(instance, "role", None),
+            "status": status,
+        }
+
+
 class GradeAssessmentSerializer(serializers.Serializer):
     """Payload for grading an assessment for a student.
 
