@@ -72,6 +72,8 @@ from .serializers import (
 	AdminCreateContentManagerSerializer,
 	AdminBulkContentManagerUploadSerializer,
 	AdminContentManagerListSerializer,
+	AdminStudentListSerializer,
+	AdminParentListSerializer,
 	GradeAssessmentSerializer,
 )
 from messsaging.services import send_sms
@@ -5853,6 +5855,28 @@ class AdminSchoolViewSet(viewsets.ModelViewSet):
 	queryset = School.objects.select_related('district__county').all().order_by('name')
 	serializer_class = SchoolSerializer
 	permission_classes = [permissions.IsAuthenticated, IsAdminRole, permissions.IsAdminUser]
+
+
+class AdminStudentViewSet(viewsets.ReadOnlyModelViewSet):
+	"""Admin-only read access to all students with summary fields."""
+
+	queryset = Student.objects.select_related('profile', 'school').prefetch_related('guardians__profile').all().order_by('profile__name')
+	serializer_class = AdminStudentListSerializer
+	permission_classes = [permissions.IsAuthenticated, IsAdminRole, permissions.IsAdminUser]
+	filter_backends = [filters.SearchFilter, filters.OrderingFilter]
+	search_fields = ['profile__name', 'profile__email', 'school__name', 'grade', 'status']
+	ordering_fields = ['profile__name', 'school__name', 'grade', 'status', 'created_at']
+
+
+class AdminParentViewSet(viewsets.ReadOnlyModelViewSet):
+	"""Admin-only read access to all parents with summary fields."""
+
+	queryset = Parent.objects.select_related('profile').prefetch_related('wards').all().order_by('profile__name')
+	serializer_class = AdminParentListSerializer
+	permission_classes = [permissions.IsAuthenticated, IsAdminRole, permissions.IsAdminUser]
+	filter_backends = [filters.SearchFilter, filters.OrderingFilter]
+	search_fields = ['profile__name', 'profile__email']
+	ordering_fields = ['profile__name', 'created_at']
 
 
 class AdminUserViewSet(viewsets.ReadOnlyModelViewSet):

@@ -246,3 +246,72 @@ class GradeAssessmentSerializer(serializers.Serializer):
     assessment_id = serializers.IntegerField()
     student_id = serializers.IntegerField()
     score = serializers.FloatField(min_value=0.0)
+
+
+class AdminStudentListSerializer(serializers.Serializer):
+    """Read-only representation of a student for admin listing.
+
+    Fields: name, school (name), email, linked_parents, grade, status.
+    """
+
+    name = serializers.CharField()
+    school = serializers.CharField(allow_null=True, required=False)
+    email = serializers.EmailField(allow_null=True, required=False)
+    linked_parents = serializers.CharField(allow_blank=True, required=False)
+    grade = serializers.CharField()
+    status = serializers.CharField()
+
+    def to_representation(self, instance):
+        # instance is a Student object
+        from accounts.models import Parent
+
+        profile = getattr(instance, "profile", None)
+        school = getattr(instance, "school", None)
+
+        # Collect parent names from the guardians relationship
+        parent_qs = getattr(instance, "guardians", None)
+        parent_names = []
+        if parent_qs is not None:
+            for parent in parent_qs.select_related("profile").all():
+                parent_profile = getattr(parent, "profile", None)
+                if parent_profile and getattr(parent_profile, "name", None):
+                    parent_names.append(parent_profile.name)
+
+        return {
+            "name": getattr(profile, "name", None) if profile else None,
+            "school": getattr(school, "name", None) if school else None,
+            "email": getattr(profile, "email", None) if profile else None,
+            "linked_parents": ", ".join(parent_names) if parent_names else "",
+            "grade": getattr(instance, "grade", None),
+            "status": getattr(instance, "status", None),
+        }
+
+
+class AdminParentListSerializer(serializers.Serializer):
+    """Read-only representation of a parent for admin listing.
+
+    Fields: name, email, linked_students (count), status, date_joined.
+    """
+
+    name = serializers.CharField()
+    email = serializers.EmailField(allow_null=True, required=False)
+    linked_students = serializers.CharField()
+    status = serializers.CharField()
+    date_joined = serializers.DateTimeField()
+
+    def to_representation(self, instance):
+        # instance is a Parent object
+        profile = getattr(instance, "profile", None)
+        user_status = "DELETED" if getattr(profile, "deleted", False) else (
+            "ACTIVE" if getattr(profile, "is_active", False) else "INACTIVE"
+        )
+        students_qs = getattr(instance, "wards", None)
+        count = students_qs.count() if students_qs is not None else 0
+        linked_label = f"{count} Student" if count == 1 else f"{count} Students"
+        return {
+            "name": getattr(profile, "name", None) if profile else None,
+            "email": getattr(profile, "email", None) if profile else None,
+            "linked_students": linked_label,
+            "status": user_status,
+            "date_joined": getattr(profile, "created_at", None) if profile else None,
+        }
