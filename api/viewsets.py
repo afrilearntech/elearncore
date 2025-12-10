@@ -2527,7 +2527,7 @@ class ContentViewSet(viewsets.ViewSet):
 		- action: one of "approve", "reject", "request_changes".
 		- moderation_comment: optional string, required if action is "request_changes" or "request_review".
 		"""
-		deny = self._require_validator(request)
+		deny = self._require_validator(request) or request.user.role == UserRole.TEACHER.value 
 		if deny:
 			return deny
 
