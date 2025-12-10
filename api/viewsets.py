@@ -62,6 +62,7 @@ from .serializers import (
 	TeacherBulkStudentUploadSerializer,
 	ContentCreateTeacherSerializer,
 	ContentBulkTeacherUploadSerializer,
+	AssignSubjectsToTeacherSerializer,
 )
 from messsaging.services import send_sms
 
@@ -2026,6 +2027,49 @@ class ContentViewSet(viewsets.ViewSet):
 		)
 
 	@extend_schema(
+		operation_id="content_assign_subjects_to_teacher",
+		description=(
+			"Assign a set of subjects to a teacher. "
+			"Existing subject assignments for this teacher will be replaced with the provided list."
+		),
+		request=AssignSubjectsToTeacherSerializer,
+		responses={200: TeacherSerializer},
+	)
+	@action(detail=False, methods=['post'], url_path='teachers/assign-subjects')
+	def assign_subjects_to_teacher(self, request):
+		"""Assign subjects to a teacher (content creators/admins only).
+
+		The payload must include a `teacher_id` and a non-empty list of
+		`subject_ids`. The teacher's existing subject assignments are replaced
+		with exactly this list.
+		"""
+		deny = self._require_creator(request)
+		if deny:
+			return deny
+
+		ser = AssignSubjectsToTeacherSerializer(data=request.data)
+		ser.is_valid(raise_exception=True)
+		teacher_id = ser.validated_data["teacher_id"]
+		subject_ids = ser.validated_data["subject_ids"]
+
+		try:
+			teacher = Teacher.objects.get(pk=teacher_id)
+		except Teacher.DoesNotExist:
+			return Response({"detail": "Teacher not found."}, status=status.HTTP_404_NOT_FOUND)
+
+		subjects = list(Subject.objects.filter(id__in=subject_ids))
+		found_ids = {s.id for s in subjects}
+		missing_ids = [sid for sid in subject_ids if sid not in found_ids]
+		if missing_ids:
+			return Response(
+				{"detail": "Some subjects were not found.", "missing_subject_ids": missing_ids},
+				status=status.HTTP_400_BAD_REQUEST,
+			)
+
+		teacher.subjects.set(subjects)
+		return Response(TeacherSerializer(teacher).data)
+
+	@extend_schema(
 		operation_id="content_create_student",
 		description=(
 			"Create a student account (User + Student profile). "
@@ -2325,7 +2369,7 @@ class ContentViewSet(viewsets.ViewSet):
 				"name": "Jane Doe",
 				"phone": "231770000001",
 				"email": "jane@example.com",
-				"grade": "PRIMARY_3",
+				"grade": "GRADE 3",
 				"gender": "F",
 				"dob": "2013-05-10",
 				"school_id": "",
@@ -2334,7 +2378,7 @@ class ContentViewSet(viewsets.ViewSet):
 				"name": "John Doe",
 				"phone": "231770000002",
 				"email": "john@example.com",
-				"grade": "PRIMARY_4",
+				"grade": "GRADE 4",
 				"gender": "M",
 				"dob": "2012-09-02",
 				"school_id": "5",

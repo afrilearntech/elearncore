@@ -156,3 +156,12 @@ class ContentBulkTeacherUploadSerializer(serializers.Serializer):
         if not name.lower().endswith(".csv"):
             raise serializers.ValidationError("Only CSV files with .csv extension are supported.")
         return value
+
+
+class AssignSubjectsToTeacherSerializer(serializers.Serializer):
+	teacher_id = serializers.IntegerField()
+	subject_ids = serializers.ListField(
+		child=serializers.IntegerField(),
+		allow_empty=False,
+		help_text="List of subject IDs to assign to this teacher (will replace existing assignments).",
+	)
