@@ -13,7 +13,7 @@ from django.views.decorators.cache import cache_page
 from django.utils.decorators import method_decorator
 from django.utils.dateparse import parse_date
 from django.utils import timezone
-from datetime import timedelta
+from datetime import timedelta, datetime
 from django.db import models
 from django.db.models import Q, Count, Window, F
 from django.db.models.functions import TruncDate, DenseRank
@@ -65,6 +65,35 @@ from .serializers import (
 	AssignSubjectsToTeacherSerializer,
 )
 from messsaging.services import send_sms
+
+
+def _parse_bulk_date(value: str):
+	"""Parse flexible date formats from CSV into a date object or ISO string.
+
+	Accepted formats include:
+	- YYYY-MM-DD (returned as-is)
+	- DD/MM/YYYY, MM/DD/YYYY
+	- DD-MM-YYYY, MM-DD-YYYY
+
+	If parsing fails, the original value is returned so DRF validation
+	can surface a clear error message.
+	"""
+	if not value:
+		return None
+	value = str(value).strip()
+	if not value:
+		return None
+	# Already in ISO format
+	if len(value) == 10 and value[4] == "-" and value[7] == "-":
+		return value
+
+	for fmt in ("%d/%m/%Y", "%m/%d/%Y", "%d-%m-%Y", "%m-%d-%Y"):
+		try:
+			parsed = datetime.strptime(value, fmt).date()
+			return parsed
+		except ValueError:
+			continue
+	return value
 
 
 class ParentChildSerializer(serializers.Serializer):
@@ -1838,7 +1867,7 @@ class ContentViewSet(viewsets.ViewSet):
 				"phone": (row.get("phone") or "").strip(),
 				"email": (row.get("email") or "").strip() or None,
 				"gender": (row.get("gender") or "").strip() or None,
-				"dob": (row.get("dob") or None),
+				"dob": _parse_bulk_date(row.get("dob")),
 			}
 
 			school_id_raw = (row.get("school_id") or "").strip()
@@ -2219,7 +2248,7 @@ class ContentViewSet(viewsets.ViewSet):
 				"email": (row.get("email") or "").strip() or None,
 				"grade": (row.get("grade") or "").strip() or None,
 				"gender": (row.get("gender") or "").strip() or None,
-				"dob": (row.get("dob") or None),
+				"dob": _parse_bulk_date(row.get("dob")),
 			}
 
 			school_id_raw = (row.get("school_id") or "").strip()
@@ -5016,7 +5045,7 @@ class TeacherViewSet(viewsets.ViewSet):
 				"email": (row.get("email") or "").strip() or None,
 				"grade": (row.get("grade") or "").strip() or None,
 				"gender": (row.get("gender") or "").strip() or None,
-				"dob": (row.get("dob") or None),
+				"dob": _parse_bulk_date(row.get("dob")),
 			}
 			school_id_value = (row.get("school_id") or "").strip()
 			if school_id_value:
