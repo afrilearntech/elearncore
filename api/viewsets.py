@@ -19,6 +19,7 @@ from django.db.models import Q, Count, Window, F
 from django.db.models.functions import TruncDate, DenseRank
 
 from elearncore.sysutils.constants import UserRole, Status as StatusEnum
+from elearncore.sysutils.tasks import fire_and_forget
 
 from content.models import (
 	Subject, Topic, Period, LessonResource, TakeLesson, LessonAssessment,
@@ -94,6 +95,35 @@ def _parse_bulk_date(value: str):
 		except ValueError:
 			continue
 	return value
+
+
+def _send_account_notifications(message: str, phone: str | None, email: str | None, email_subject: str) -> None:
+	"""Send SMS and email notifications for new accounts.
+
+	Designed to be called via ``fire_and_forget`` so that SMS/email I/O
+	does not block API responses. All exceptions are swallowed inside the
+	send functions to avoid impacting the caller.
+	"""
+	try:
+		if phone:
+			# send_sms expects an iterable of recipients
+			send_sms(message, [phone])
+	except Exception:
+		pass
+
+	try:
+		if email:
+			from_email = getattr(settings, "DEFAULT_FROM_EMAIL", None) or None
+			if from_email:
+				send_mail(
+					subject=email_subject,
+					message=message,
+					from_email=from_email,
+					recipient_list=[email],
+					fail_silently=True,
+				)
+	except Exception:
+		pass
 
 
 class ParentChildSerializer(serializers.Serializer):
@@ -1773,25 +1803,13 @@ class ContentViewSet(viewsets.ViewSet):
 			f"Login with phone: {phone} and password: {temp_password}.\n"
 			"Please change this password after your first login."
 		)
-		try:
-			if phone:
-				send_sms(message, [phone])
-		except Exception:
-			pass
-
-		try:
-			if email:
-				from_email = getattr(settings, "DEFAULT_FROM_EMAIL", None) or None
-				if from_email:
-					send_mail(
-						subject="Your Liberia eLearn teacher account",
-						message=message,
-						from_email=from_email,
-						recipient_list=[email],
-						fail_silently=True,
-					)
-		except Exception:
-			pass
+		fire_and_forget(
+			_send_account_notifications,
+			message,
+			phone,
+			email,
+			"Your Liberia eLearn teacher account",
+		)
 
 		return Response(TeacherSerializer(teacher).data, status=status.HTTP_201_CREATED)
 
@@ -1938,25 +1956,13 @@ class ContentViewSet(viewsets.ViewSet):
 				f"Login with phone: {phone} and password: {temp_password}.\n"
 				"Please change this password after your first login."
 			)
-			try:
-				if phone:
-					send_sms(message, [phone])
-			except Exception:
-				pass
-
-			try:
-				if email:
-					from_email = getattr(settings, "DEFAULT_FROM_EMAIL", None) or None
-					if from_email:
-						send_mail(
-							subject="Your Liberia eLearn teacher account",
-							message=message,
-							from_email=from_email,
-							recipient_list=[email],
-							fail_silently=True,
-						)
-			except Exception:
-				pass
+			fire_and_forget(
+				_send_account_notifications,
+				message,
+				phone,
+				email,
+				"Your Liberia eLearn teacher account",
+			)
 
 			created_count += 1
 			results.append({
@@ -2167,25 +2173,13 @@ class ContentViewSet(viewsets.ViewSet):
 			f"Login with phone: {phone} and password: {temp_password}.\n"
 			"Please change this password after your first login."
 		)
-		try:
-			if phone:
-				send_sms(message, [phone])
-		except Exception:
-			pass
-
-		try:
-			if email:
-				from_email = getattr(settings, "DEFAULT_FROM_EMAIL", None) or None
-				if from_email:
-					send_mail(
-						subject="Your Liberia eLearn student account",
-						message=message,
-						from_email=from_email,
-						recipient_list=[email],
-						fail_silently=True,
-					)
-		except Exception:
-			pass
+		fire_and_forget(
+			_send_account_notifications,
+			message,
+			phone,
+			email,
+			"Your Liberia eLearn student account",
+		)
 
 		return Response(StudentSerializer(student).data, status=status.HTTP_201_CREATED)
 
@@ -2323,25 +2317,13 @@ class ContentViewSet(viewsets.ViewSet):
 				f"Login with phone: {phone} and password: {temp_password}.\n"
 				"Please change this password after your first login."
 			)
-			try:
-				if phone:
-					send_sms(message, [phone])
-			except Exception:
-				pass
-
-			try:
-				if email:
-					from_email = getattr(settings, "DEFAULT_FROM_EMAIL", None) or None
-					if from_email:
-						send_mail(
-							subject="Your Liberia eLearn student account",
-							message=message,
-							from_email=from_email,
-							recipient_list=[email],
-							fail_silently=True,
-						)
-			except Exception:
-				pass
+			fire_and_forget(
+				_send_account_notifications,
+				message,
+				phone,
+				email,
+				"Your Liberia eLearn student account",
+			)
 
 			created_count += 1
 			results.append({
@@ -4948,26 +4930,13 @@ class TeacherViewSet(viewsets.ViewSet):
 			f"Login with phone: {phone} and password: {temp_password}.\n"
 			"Please change this password after your first login."
 		)
-		try:
-			if phone:
-				# send_sms expects an iterable of recipients
-				send_sms(message, [phone])
-		except Exception:
-			pass
-
-		try:
-			if email:
-				from_email = getattr(settings, "DEFAULT_FROM_EMAIL", None) or None
-				if from_email:
-					send_mail(
-						subject="Your Liberia eLearn student account",
-						message=message,
-						from_email=from_email,
-						recipient_list=[email],
-						fail_silently=True,
-					)
-		except Exception:
-			pass
+		fire_and_forget(
+			_send_account_notifications,
+			message,
+			phone,
+			email,
+			"Your Liberia eLearn student account",
+		)
 
 		return Response(StudentSerializer(student).data, status=status.HTTP_201_CREATED)
 
@@ -5131,25 +5100,13 @@ class TeacherViewSet(viewsets.ViewSet):
 				f"Login with phone: {phone} and password: {temp_password}.\n"
 				"Please change this password after your first login."
 			)
-			try:
-				if phone:
-					send_sms(message, [phone])
-			except Exception:
-				pass
-
-			try:
-				if email:
-					from_email = getattr(settings, "DEFAULT_FROM_EMAIL", None) or None
-					if from_email:
-						send_mail(
-							subject="Your Liberia eLearn student account",
-							message=message,
-							from_email=from_email,
-							recipient_list=[email],
-							fail_silently=True,
-						)
-			except Exception:
-				pass
+			fire_and_forget(
+				_send_account_notifications,
+				message,
+				phone,
+				email,
+				"Your Liberia eLearn student account",
+			)
 
 			created_count += 1
 			results.append({
