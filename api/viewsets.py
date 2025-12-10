@@ -24,6 +24,7 @@ from elearncore.sysutils.tasks import fire_and_forget
 from content.models import (
 	Subject, Topic, Period, LessonResource, TakeLesson, LessonAssessment,
 	GeneralAssessment, GeneralAssessmentGrade, LessonAssessmentGrade,
+	Question,
 	GameModel, Activity, AssessmentSolution, GamePlay,
 )
 from forum.models import Chat
@@ -38,6 +39,9 @@ from content.serializers import (
 	TakeLessonSerializer,
 	GeneralAssessmentSerializer,
 	LessonAssessmentSerializer,
+	QuestionSerializer,
+	OptionSerializer,
+	QuestionCreateSerializer,
 	GameSerializer,
 )
 from agentic.models import AIRecommendation, AIAbuseReport
@@ -1558,6 +1562,99 @@ class ContentViewSet(viewsets.ViewSet):
 		ser.is_valid(raise_exception=True)
 		obj = ser.save()
 		return Response(LessonAssessmentSerializer(obj).data, status=status.HTTP_201_CREATED)
+
+	@extend_schema(
+		operation_id="content_list_questions",
+		parameters=[
+			OpenApiParameter(
+				name="general_assessment_id",
+				required=False,
+				location=OpenApiParameter.QUERY,
+				description="ID of a GeneralAssessment to list its questions.",
+				type=int,
+			),
+			OpenApiParameter(
+				name="lesson_assessment_id",
+				required=False,
+				location=OpenApiParameter.QUERY,
+				description="ID of a LessonAssessment to list its questions.",
+				type=int,
+			),
+		],
+		responses={200: QuestionSerializer(many=True)},
+		description=(
+			"List questions (with options) for a given assessment. "
+			"Exactly one of general_assessment_id or lesson_assessment_id must be provided."
+		),
+	)
+	@action(detail=False, methods=['get'], url_path='questions')
+	def list_questions(self, request):
+		"""List questions and their options for a specific assessment (content side)."""
+		user = request.user
+		if not (
+			IsContentCreator().has_permission(request, self)
+			or IsContentValidator().has_permission(request, self)
+			or IsAdminRole().has_permission(request, self)
+		):
+			return Response({"detail": "Content creator, validator, or admin role required."}, status=status.HTTP_403_FORBIDDEN)
+
+		ga_id = request.query_params.get('general_assessment_id')
+		la_id = request.query_params.get('lesson_assessment_id')
+		if bool(ga_id) == bool(la_id):
+			return Response(
+				{"detail": "Provide exactly one of general_assessment_id or lesson_assessment_id."},
+				status=status.HTTP_400_BAD_REQUEST,
+			)
+
+		qs = Question.objects.all().prefetch_related('options')
+		if ga_id:
+			try:
+				ga_id_int = int(ga_id)
+			except ValueError:
+				return Response({"detail": "general_assessment_id must be an integer."}, status=status.HTTP_400_BAD_REQUEST)
+			qs = qs.filter(general_assessment_id=ga_id_int)
+		else:
+			try:
+				la_id_int = int(la_id)
+			except ValueError:
+				return Response({"detail": "lesson_assessment_id must be an integer."}, status=status.HTTP_400_BAD_REQUEST)
+			qs = qs.filter(lesson_assessment_id=la_id_int)
+
+		qs = qs.order_by('created_at')
+		return Response(QuestionSerializer(qs, many=True).data)
+
+	@extend_schema(
+		operation_id="content_create_question",
+		request=QuestionCreateSerializer,
+		responses={201: QuestionSerializer},
+		description=(
+			"Create a question (with optional options) for a general or lesson assessment. "
+			"Exactly one of general_assessment_id or lesson_assessment_id must be provided. "
+			"Content creators/validators/admins can attach questions to any assessment."
+		),
+		examples=[
+			OpenApiExample(
+				name="MultipleChoiceQuestionExample",
+				value={
+					"general_assessment_id": 12,
+					"type": "MULTIPLE_CHOICE",
+					"question": "What is 2 + 2?",
+					"answer": "4",
+					"options": ["3", "4", "5", "6"],
+				},
+			),
+		],
+	)
+	@action(detail=False, methods=['post'], url_path='questions/create')
+	def create_question(self, request):
+		"""Create an assessment question and optional options (content side)."""
+		deny = self._require_creator(request)
+		if deny:
+			return deny
+		ser = QuestionCreateSerializer(data=request.data, context={"request": request, "restrict_to_teacher": False})
+		ser.is_valid(raise_exception=True)
+		question = ser.save()
+		return Response(QuestionSerializer(question).data, status=status.HTTP_201_CREATED)
 
 	@extend_schema(
 		operation_id="content_all_assessments",
@@ -4514,6 +4611,98 @@ class TeacherViewSet(viewsets.ViewSet):
 		ser.is_valid(raise_exception=True)
 		la = ser.save(given_by=teacher)
 		return Response(LessonAssessmentSerializer(la).data, status=201)
+
+	@extend_schema(
+		description=(
+			"Create a question (with optional options) for one of this teacher's "
+			"general or lesson assessments. Exactly one of general_assessment_id "
+			"or lesson_assessment_id must be provided."
+		),
+		request=QuestionCreateSerializer,
+		responses={201: QuestionSerializer},
+		examples=[
+			OpenApiExample(
+				name="MultipleChoiceQuestionExample",
+				value={
+					"general_assessment_id": 12,
+					"type": "MULTIPLE_CHOICE",
+					"question": "What is 2 + 2?",
+					"answer": "4",
+					"options": ["3", "4", "5", "6"],
+				},
+			),
+		],
+	)
+	@action(detail=False, methods=['post'], url_path='questions/create')
+	def create_question(self, request):
+		"""Create an assessment question and optional options (teacher side)."""
+		deny = self._require_teacher(request)
+		if deny:
+			return deny
+		ser = QuestionCreateSerializer(
+			data=request.data,
+			context={"request": request, "restrict_to_teacher": True},
+		)
+		ser.is_valid(raise_exception=True)
+		question = ser.save()
+		return Response(QuestionSerializer(question).data, status=201)
+
+	@extend_schema(
+		description=(
+			"List questions (with options) for one of this teacher's general or "
+			"lesson assessments. Exactly one of general_assessment_id or "
+			"lesson_assessment_id must be provided."
+		),
+		parameters=[
+			OpenApiParameter(
+				name="general_assessment_id",
+				required=False,
+				location=OpenApiParameter.QUERY,
+				description="ID of a GeneralAssessment to list its questions.",
+				type=int,
+			),
+			OpenApiParameter(
+				name="lesson_assessment_id",
+				required=False,
+				location=OpenApiParameter.QUERY,
+				description="ID of a LessonAssessment to list its questions.",
+				type=int,
+			),
+		],
+		responses={200: QuestionSerializer(many=True)},
+	)
+	@action(detail=False, methods=['get'], url_path='questions')
+	def list_questions(self, request):
+		"""List questions and options for this teacher's specific assessment."""
+		deny = self._require_teacher(request)
+		if deny:
+			return deny
+		teacher = request.user.teacher
+
+		ga_id = request.query_params.get('general_assessment_id')
+		la_id = request.query_params.get('lesson_assessment_id')
+		if bool(ga_id) == bool(la_id):
+			return Response(
+				{"detail": "Provide exactly one of general_assessment_id or lesson_assessment_id."},
+				status=status.HTTP_400_BAD_REQUEST,
+			)
+
+		qs = Question.objects.all().prefetch_related('options')
+		if ga_id:
+			try:
+				ga_id_int = int(ga_id)
+			except ValueError:
+				return Response({"detail": "general_assessment_id must be an integer."}, status=status.HTTP_400_BAD_REQUEST)
+			qs = qs.filter(general_assessment_id=ga_id_int, general_assessment__given_by=teacher)
+		else:
+			try:
+				la_id_int = int(la_id)
+			except ValueError:
+				return Response({"detail": "lesson_assessment_id must be an integer."}, status=status.HTTP_400_BAD_REQUEST)
+			qs = qs.filter(lesson_assessment_id=la_id_int, lesson_assessment__given_by=teacher)
+
+		qs = qs.order_by('created_at')
+		return Response(QuestionSerializer(qs, many=True).data)
 
 	@extend_schema(
 		description="List students in the teacher's school, including their status.",
