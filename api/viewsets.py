@@ -59,6 +59,7 @@ from .serializers import (
 	AboutUserSerializer,
 	LinkChildSerializer,
 	LoginSerializer,
+	ChangePasswordSerializer,
 	ContentModerationSerializer,
 	ContentModerationResponseSerializer,
 	ContentAssessmentItemSerializer,
@@ -2902,15 +2903,22 @@ class LoginViewSet(viewsets.ViewSet):
 			"Change password for the authenticated user. "
 			"Requires current_password, new_password, and confirm_password."
 		),
-		request=OpenApiExample(
-			name="ChangePasswordRequest",
-			value={
-				"current_password": "oldpass123",
-				"new_password": "newpass456",
-				"confirm_password": "newpass456",
-			},
-		),
-		responses={200: OpenApiResponse(description="Password changed successfully.")},
+		request=ChangePasswordSerializer,
+		responses={
+			200: OpenApiResponse(
+				description="Password changed successfully.",
+			),
+		},
+		examples=[
+			OpenApiExample(
+				name="ChangePasswordRequest",
+				value={
+					"current_password": "oldpass123",
+					"new_password": "newpass456",
+					"confirm_password": "newpass456",
+				},
+			),
+		],
 	)
 	@action(detail=False, methods=['post'], url_path='change-password', permission_classes=[permissions.IsAuthenticated])
 	def change_password(self, request):
@@ -4738,6 +4746,20 @@ class TeacherViewSet(viewsets.ViewSet):
 		student.status = StatusEnum.APPROVED.value
 		student.moderation_comment = "Approved by teacher"
 		student.save(update_fields=['status', 'moderation_comment', 'updated_at'])
+
+		# Notify the student that their account has been approved
+		profile = student.profile
+		message = (
+			f"Hi {profile.name}, your Liberia eLearn student account has been approved.\n"
+			"You can now log in and start learning."
+		)
+		fire_and_forget(
+			_send_account_notifications,
+			message,
+			getattr(profile, "phone", None),
+			getattr(profile, "email", None),
+			"Your Liberia eLearn student account has been approved",
+		)
 		return Response(StudentSerializer(student).data)
 
 	@extend_schema(
@@ -4758,6 +4780,20 @@ class TeacherViewSet(viewsets.ViewSet):
 		student.status = StatusEnum.REJECTED.value
 		student.moderation_comment = "Rejected by teacher"
 		student.save(update_fields=['status', 'moderation_comment', 'updated_at'])
+
+		# Notify the student that their account has been rejected
+		profile = student.profile
+		message = (
+			f"Hi {profile.name}, your Liberia eLearn student account has been rejected.\n"
+			"Please contact your school or teacher for more information."
+		)
+		fire_and_forget(
+			_send_account_notifications,
+			message,
+			getattr(profile, "phone", None),
+			getattr(profile, "email", None),
+			"Your Liberia eLearn student account status",
+		)
 		return Response(StudentSerializer(student).data)
 
 	@extend_schema(

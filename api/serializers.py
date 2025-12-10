@@ -39,6 +39,12 @@ class LoginSerializer(serializers.Serializer):
     password = serializers.CharField(write_only=True, min_length=6)
 
 
+class ChangePasswordSerializer(serializers.Serializer):
+    current_password = serializers.CharField(write_only=True, min_length=6)
+    new_password = serializers.CharField(write_only=True, min_length=6)
+    confirm_password = serializers.CharField(write_only=True, min_length=6)
+
+
 class ContentModerationSerializer(serializers.Serializer):
     model = serializers.ChoiceField(
         choices=[
