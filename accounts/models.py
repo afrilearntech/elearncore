@@ -115,11 +115,18 @@ class Student(TimestampedModel):
     moderation_comment = models.TextField(blank=True, default="")
 
     def save(self, *args, **kwargs):
-        # Ensure we have a primary key before generating the student_id
-        if not self.student_id:
-            super().save(*args, **kwargs)
-            self.student_id = f"STU{self.id:07d}"
+        """Generate stable student_id after first insert.
+
+        This implementation avoids calling the ORM layer twice with force_insert,
+        which previously caused UNIQUE constraint failures when using
+        `Student.objects.create(...)`.
+        """
+        creating = self.pk is None
         super().save(*args, **kwargs)
+        if creating and not self.student_id:
+            self.student_id = f"STU{self.id:07d}"
+            # Call the parent save() directly to avoid re-running this method
+            super(Student, self).save(update_fields=["student_id"])
 
     def __str__(self) -> str:
         return f"Student: {self.profile.name}"
@@ -133,11 +140,12 @@ class Teacher(TimestampedModel):
     moderation_comment = models.TextField(blank=True, default="")
 
     def save(self, *args, **kwargs):
-        # Ensure we have a primary key before generating the teacher_id
-        if not self.teacher_id:
-            super().save(*args, **kwargs)
-            self.teacher_id = f"TEA{self.id:07d}"
+        """Generate stable teacher_id after first insert, without double inserts."""
+        creating = self.pk is None
         super().save(*args, **kwargs)
+        if creating and not self.teacher_id:
+            self.teacher_id = f"TEA{self.id:07d}"
+            super(Teacher, self).save(update_fields=["teacher_id"])
 
     def __str__(self) -> str:
         return f"Teacher: {self.profile.name}"
@@ -149,11 +157,12 @@ class Parent(TimestampedModel):
     wards = models.ManyToManyField(Student, related_name="guardians", blank=True)
 
     def save(self, *args, **kwargs):
-        # Ensure we have a primary key before generating the parent_id
-        if not self.parent_id:
-            super().save(*args, **kwargs)
-            self.parent_id = f"PAR{self.id:07d}"
+        """Generate stable parent_id after first insert, without double inserts."""
+        creating = self.pk is None
         super().save(*args, **kwargs)
+        if creating and not self.parent_id:
+            self.parent_id = f"PAR{self.id:07d}"
+            super(Parent, self).save(update_fields=["parent_id"])
 
     def __str__(self) -> str:
         return f"Parent: {self.profile.name}"

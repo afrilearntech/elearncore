@@ -1732,7 +1732,11 @@ class ContentViewSet(viewsets.ViewSet):
 			user.set_password(temp_password)
 			user.save()
 
-			teacher = TeacherModel.objects.create(profile=user, school=school)
+			teacher = TeacherModel.objects.create(
+				profile=user,
+				school=school,
+				status=StatusEnum.APPROVED.value,
+			)
 
 		message = (
 			f"Hi {name}, your Liberia eLearn teacher account has been created.\n"
@@ -1889,7 +1893,11 @@ class ContentViewSet(viewsets.ViewSet):
 					user.set_password(temp_password)
 					user.save()
 
-					teacher = TeacherModel.objects.create(profile=user, school=school)
+					teacher = TeacherModel.objects.create(
+						profile=user,
+						school=school,
+						status=StatusEnum.APPROVED.value,
+					)
 			except Exception as exc:
 				results.append({**row_result, "status": "error", "errors": {"non_field_errors": [str(exc)]}})
 				failed_count += 1
@@ -2072,7 +2080,11 @@ class ContentViewSet(viewsets.ViewSet):
 			user.set_password(temp_password)
 			user.save()
 
-			student_kwargs = {"profile": user, "school": school}
+			student_kwargs = {
+				"profile": user,
+				"school": school,
+				"status": StatusEnum.APPROVED.value,
+			}
 			if grade:
 				student_kwargs["grade"] = grade
 			student = StudentModel.objects.create(**student_kwargs)
@@ -2220,7 +2232,11 @@ class ContentViewSet(viewsets.ViewSet):
 					user.set_password(temp_password)
 					user.save()
 
-					student_kwargs = {"profile": user, "school": school}
+					student_kwargs = {
+						"profile": user,
+						"school": school,
+						"status": StatusEnum.APPROVED.value,
+					}
 					if grade:
 						student_kwargs["grade"] = grade
 					student = StudentModel.objects.create(**student_kwargs)
@@ -5023,7 +5039,11 @@ class TeacherViewSet(viewsets.ViewSet):
 					user.set_password(temp_password)
 					user.save()
 
-					student_kwargs = {"profile": user, "school": school}
+					student_kwargs = {
+						"profile": user,
+						"school": school,
+						"status": StatusEnum.APPROVED.value,
+					}
 					if grade:
 						student_kwargs["grade"] = grade
 					student = Student.objects.create(**student_kwargs)
