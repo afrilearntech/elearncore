@@ -2527,7 +2527,7 @@ class ContentViewSet(viewsets.ViewSet):
 		- action: one of "approve", "reject", "request_changes".
 		- moderation_comment: optional string, required if action is "request_changes" or "request_review".
 		"""
-		deny = self._require_validator(request) or request.user.role == UserRole.TEACHER.value 
+		deny = self._require_validator(request)
 		if deny:
 			return deny
 
@@ -4737,6 +4737,26 @@ class TeacherViewSet(viewsets.ViewSet):
 			return Response({"detail": "Student not found in your school."}, status=404)
 		student.status = StatusEnum.APPROVED.value
 		student.moderation_comment = "Approved by teacher"
+		student.save(update_fields=['status', 'moderation_comment', 'updated_at'])
+		return Response(StudentSerializer(student).data)
+
+	@extend_schema(
+		description="Reject a pending student in the teacher's school.",
+		request=None,
+		responses={200: StudentSerializer},
+	)
+	@action(detail=True, methods=['post'], url_path='reject-student')
+	def reject_student(self, request, pk=None):
+		deny = self._require_teacher(request)
+		if deny:
+			return deny
+		teacher = request.user.teacher
+		try:
+			student = Student.objects.get(pk=pk, school=teacher.school)
+		except Student.DoesNotExist:
+			return Response({"detail": "Student not found in your school."}, status=404)
+		student.status = StatusEnum.REJECTED.value
+		student.moderation_comment = "Rejected by teacher"
 		student.save(update_fields=['status', 'moderation_comment', 'updated_at'])
 		return Response(StudentSerializer(student).data)
 
