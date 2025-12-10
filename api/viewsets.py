@@ -70,6 +70,7 @@ from .serializers import (
 	AssignSubjectsToTeacherSerializer,
 	AdminCreateContentManagerSerializer,
 	AdminBulkContentManagerUploadSerializer,
+	GradeAssessmentSerializer,
 )
 from messsaging.services import send_sms
 
@@ -5415,13 +5416,11 @@ class TeacherViewSet(viewsets.ViewSet):
 			"Only assessments where this teacher is given_by are allowed. "
 			"Score must be numeric, non-negative, and not exceed the assessment's total marks."
 		),
-		request=OpenApiExample(
-			name="GradeGeneralAssessmentRequest",
-			value={"assessment_id": 1, "student_id": 10, "score": 18.5},
-		),
+		request=GradeAssessmentSerializer,
 		responses={
 			200: OpenApiResponse(
 				description="Grading result.",
+				response=GradeAssessmentSerializer,
 				examples=[
 					OpenApiExample(
 						name="GradeGeneralAssessmentResponse",
@@ -5430,6 +5429,12 @@ class TeacherViewSet(viewsets.ViewSet):
 				],
 			),
 		},
+		examples=[
+			OpenApiExample(
+				name="GradeGeneralAssessmentRequest",
+				value={"assessment_id": 1, "student_id": 10, "score": 18.5},
+			),
+		],
 	)
 	@action(detail=False, methods=['post'], url_path='grade/general')
 	def grade_general_assessment(self, request):
@@ -5482,13 +5487,11 @@ class TeacherViewSet(viewsets.ViewSet):
 			"Only assessments where this teacher is given_by are allowed. "
 			"Score must be numeric, non-negative, and not exceed the assessment's total marks."
 		),
-		request=OpenApiExample(
-			name="GradeLessonAssessmentRequest",
-			value={"assessment_id": 5, "student_id": 10, "score": 9},
-		),
+		request=GradeAssessmentSerializer,
 		responses={
 			200: OpenApiResponse(
 				description="Grading result.",
+				response=GradeAssessmentSerializer,
 				examples=[
 					OpenApiExample(
 						name="GradeLessonAssessmentResponse",
@@ -5497,6 +5500,12 @@ class TeacherViewSet(viewsets.ViewSet):
 				],
 			),
 		},
+		examples=[
+			OpenApiExample(
+				name="GradeLessonAssessmentRequest",
+				value={"assessment_id": 5, "student_id": 10, "score": 9},
+			),
+		],
 	)
 	@action(detail=False, methods=['post'], url_path='grade/lesson')
 	def grade_lesson_assessment(self, request):

@@ -204,3 +204,15 @@ class AdminBulkContentManagerUploadSerializer(serializers.Serializer):
         if not name.lower().endswith(".csv"):
             raise serializers.ValidationError("Only CSV files with .csv extension are supported.")
         return value
+
+
+class GradeAssessmentSerializer(serializers.Serializer):
+    """Payload for grading an assessment for a student.
+
+    Used for both general and lesson assessments (in the latter case,
+    assessment_id refers to the lesson_assessment id).
+    """
+
+    assessment_id = serializers.IntegerField()
+    student_id = serializers.IntegerField()
+    score = serializers.FloatField(min_value=0.0)
