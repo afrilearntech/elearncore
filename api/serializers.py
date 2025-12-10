@@ -165,3 +165,42 @@ class AssignSubjectsToTeacherSerializer(serializers.Serializer):
 		allow_empty=False,
 		help_text="List of subject IDs to assign to this teacher (will replace existing assignments).",
 	)
+
+
+class AdminCreateContentManagerSerializer(serializers.Serializer):
+    """Serializer for admin-created content managers (creators/validators)."""
+
+    ROLE_CHOICES = [
+        ("CONTENTCREATOR", "CONTENTCREATOR"),
+        ("CONTENTVALIDATOR", "CONTENTVALIDATOR"),
+    ]
+
+    name = serializers.CharField(max_length=255)
+    phone = serializers.CharField(max_length=25)
+    email = serializers.EmailField(required=False, allow_blank=True)
+    role = serializers.ChoiceField(choices=ROLE_CHOICES)
+    gender = serializers.CharField(required=False, allow_blank=True, max_length=20)
+    dob = serializers.DateField(required=False)
+
+    def validate(self, attrs):
+        from accounts.models import User
+
+        phone = attrs.get("phone")
+        email = attrs.get("email")
+        if User.objects.filter(phone=phone).exists():
+            raise serializers.ValidationError({"phone": "A user with this phone already exists."})
+        if email and User.objects.filter(email__iexact=email).exists():
+            raise serializers.ValidationError({"email": "A user with this email already exists."})
+        return attrs
+
+
+class AdminBulkContentManagerUploadSerializer(serializers.Serializer):
+    """Serializer for admin bulk content manager CSV uploads."""
+
+    file = serializers.FileField()
+
+    def validate_file(self, value):
+        name = getattr(value, "name", "") or ""
+        if not name.lower().endswith(".csv"):
+            raise serializers.ValidationError("Only CSV files with .csv extension are supported.")
+        return value

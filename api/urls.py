@@ -20,6 +20,7 @@ from .viewsets import (
 	AdminCountyViewSet,
 	AdminDistrictViewSet,
 	AdminSchoolViewSet,
+	AdminContentManagerViewSet,
 	GameViewSet,
 	KidsViewSet,
 	TeacherViewSet,
@@ -43,6 +44,7 @@ router.register(r'auth', LoginViewSet, basename='auth')
 router.register(r'admin/counties', AdminCountyViewSet, basename='admin-counties')
 router.register(r'admin/districts', AdminDistrictViewSet, basename='admin-districts')
 router.register(r'admin/schools', AdminSchoolViewSet, basename='admin-schools')
+router.register(r'admin/content-managers', AdminContentManagerViewSet, basename='admin-content-managers')
 router.register(r'games', GameViewSet, basename='game')
 router.register(r'content', ContentViewSet, basename='content')
 router.register(r'teacher', TeacherViewSet, basename='teacher')

@@ -64,6 +64,8 @@ from .serializers import (
 	ContentCreateTeacherSerializer,
 	ContentBulkTeacherUploadSerializer,
 	AssignSubjectsToTeacherSerializer,
+	AdminCreateContentManagerSerializer,
+	AdminBulkContentManagerUploadSerializer,
 )
 from messsaging.services import send_sms
 
@@ -2537,10 +2539,38 @@ class OnboardingViewSet(viewsets.ViewSet):
 			return Response({"detail": "Email already in use."}, status=400)
 
 		user = User.objects.create_user(email=email, phone=phone, name=name, password=password)
+		# Issue a token so the user can immediately call onboarding endpoints
+		token = AuthToken.objects.create(user)[1]
 		return Response({
 			"detail": "Account created successfully. Please complete onboarding and wait for approval if required.",
+			"token": token,
 			"user": {"id": user.id, "name": user.name, "phone": user.phone, "email": user.email, "role": user.role},
 		}, status=201)
+
+	@extend_schema(
+		description=(
+			"Logout the current onboarding session by revoking the active token. "
+			"Clients should call this after completing onboarding so the user "
+			"can wait for account approval before logging in normally."
+		),
+		responses={200: OpenApiResponse(description="Token revoked; user logged out.")},
+	)
+	@action(detail=False, methods=['post'], permission_classes=[permissions.IsAuthenticated])
+	def logout_after_setup(self, request):
+		"""Revoke the current Knox token used during onboarding.
+
+		This endpoint deletes the AuthToken associated with the current request,
+		effectively logging the user out. Subsequent requests must authenticate
+		again using a fresh login once the account is approved.
+		"""
+		# Knox attaches the token instance to the request when using TokenAuthentication
+		token = getattr(request, "auth", None)
+		if token is not None:
+			try:
+				token.delete()
+			except Exception:
+				pass
+		return Response({"detail": "Logged out after onboarding."})
 
 	@extend_schema(request=UserRoleSerializer)
 	@action(detail=False, methods=['post'], permission_classes=[permissions.IsAuthenticated])
@@ -5568,4 +5598,263 @@ class AdminSchoolViewSet(viewsets.ModelViewSet):
 	queryset = School.objects.select_related('district__county').all().order_by('name')
 	serializer_class = SchoolSerializer
 	permission_classes = [permissions.IsAuthenticated, IsAdminRole, permissions.IsAdminUser]
+
+
+class AdminContentManagerViewSet(viewsets.ViewSet):
+	"""Admin-only endpoints to manage content managers (creators/validators).
+
+	Provides:
+	- create: create a single content manager account with a temp password.
+	- bulk-create: bulk create from CSV.
+	- bulk-template: download a CSV template.
+	"""
+
+	permission_classes = [permissions.IsAuthenticated, IsAdminRole, permissions.IsAdminUser]
+
+	@extend_schema(
+		operation_id="admin_create_content_manager",
+		description=(
+			"Create a content manager account (User with role CONTENTCREATOR or CONTENTVALIDATOR). "
+			"Admins provide name, phone, optional email, role (creator|validator), and optional gender/dob."
+		),
+		request=AdminCreateContentManagerSerializer,
+		responses={201: UserSerializer},
+	)
+	@action(detail=False, methods=['post'], url_path='create')
+	def create_content_manager(self, request):
+		"""Admins create a single content manager (content creator or validator)."""
+		from django.db import transaction
+
+		ser = AdminCreateContentManagerSerializer(data=request.data)
+		ser.is_valid(raise_exception=True)
+		data = ser.validated_data
+
+		name = data["name"].strip()
+		phone = data["phone"].strip()
+		email = (data.get("email") or "").strip() or None
+		gender = (data.get("gender") or "").strip() or None
+		dob = data.get("dob")
+		role_label = str(data.get("role") or "").strip().lower()
+
+		if role_label == "creator":
+			user_role = UserRole.CONTENTCREATOR.value
+		else:
+			user_role = UserRole.CONTENTVALIDATOR.value
+
+		import secrets
+		import string
+		alphabet = string.ascii_letters + string.digits
+		temp_password = "".join(secrets.choice(alphabet) for _ in range(10))
+
+		with transaction.atomic():
+			user = User(
+				name=name,
+				phone=phone,
+				email=email,
+				role=user_role,
+				dob=dob,
+				gender=gender,
+			)
+			user.set_password(temp_password)
+			user.save()
+
+		message = (
+			f"Hi {name}, your Liberia eLearn content manager account has been created.\n"
+			f"Login with phone: {phone} and password: {temp_password}.\n"
+			"Please change this password after your first login."
+		)
+		fire_and_forget(
+			_send_account_notifications,
+			message,
+			phone,
+			email,
+			"Your Liberia eLearn content manager account",
+		)
+
+		return Response(UserSerializer(user).data, status=status.HTTP_201_CREATED)
+
+	@extend_schema(
+		operation_id="admin_bulk_create_content_managers",
+		description=(
+			"Bulk create content manager accounts from a CSV file. "
+			"Each row must include name, phone, and role (creator|validator); "
+			"optional columns are email, gender, and dob (YYYY-MM-DD or common Excel formats)."
+		),
+		request=AdminBulkContentManagerUploadSerializer,
+		responses={
+			200: OpenApiResponse(
+				description="Bulk content manager creation summary with per-row statuses.",
+			),
+		},
+	)
+	@action(detail=False, methods=['post'], url_path='bulk-create')
+	def bulk_create_content_managers(self, request):
+		"""Bulk create content manager accounts from a CSV upload."""
+		from django.db import transaction
+		from rest_framework.exceptions import ValidationError
+
+		upload_ser = AdminBulkContentManagerUploadSerializer(data=request.data)
+		upload_ser.is_valid(raise_exception=True)
+		file_obj = upload_ser.validated_data['file']
+
+		try:
+			decoded = file_obj.read().decode('utf-8-sig')
+		except Exception:
+			return Response({"detail": "Unable to read uploaded file as UTF-8 text."}, status=status.HTTP_400_BAD_REQUEST)
+
+		if not decoded.strip():
+			return Response({"detail": "Uploaded file is empty."}, status=status.HTTP_400_BAD_REQUEST)
+
+		reader = csv.DictReader(io.StringIO(decoded))
+		if not reader.fieldnames:
+			return Response({"detail": "CSV file has no header row."}, status=status.HTTP_400_BAD_REQUEST)
+
+		required_columns = ['name', 'phone', 'role']
+		missing = [c for c in required_columns if c not in reader.fieldnames]
+		if missing:
+			return Response({"detail": f"Missing required columns: {', '.join(missing)}."}, status=status.HTTP_400_BAD_REQUEST)
+
+		results = []
+		created_count = 0
+		failed_count = 0
+
+		for row_index, row in enumerate(reader, start=2):
+			row_result = {"row": row_index}
+
+			mapped = {
+				"name": (row.get("name") or "").strip(),
+				"phone": (row.get("phone") or "").strip(),
+				"email": (row.get("email") or "").strip() or None,
+				"gender": (row.get("gender") or "").strip() or None,
+				"dob": _parse_bulk_date(row.get("dob")),
+				"role": (row.get("role") or "").strip().lower(),
+			}
+
+			ser = AdminCreateContentManagerSerializer(data=mapped)
+			try:
+				ser.is_valid(raise_exception=True)
+			except ValidationError as exc:
+				results.append({**row_result, "status": "error", "errors": exc.detail})
+				failed_count += 1
+				continue
+
+			data = ser.validated_data
+			name = data["name"].strip()
+			phone = data["phone"].strip()
+			email = (data.get("email") or "").strip() or None
+			gender = (data.get("gender") or "").strip() or None
+			dob = data.get("dob")
+			role_label = str(data.get("role") or "").strip().lower()
+
+			if role_label == "creator":
+				user_role = UserRole.CONTENTCREATOR.value
+			else:
+				user_role = UserRole.CONTENTVALIDATOR.value
+
+			import secrets
+			import string
+			alphabet = string.ascii_letters + string.digits
+			temp_password = "".join(secrets.choice(alphabet) for _ in range(10))
+
+			try:
+				with transaction.atomic():
+					user = User(
+						name=name,
+						phone=phone,
+						email=email,
+						role=user_role,
+						dob=dob,
+						gender=gender,
+					)
+					user.set_password(temp_password)
+					user.save()
+			except Exception as exc:
+				results.append({**row_result, "status": "error", "errors": {"non_field_errors": [str(exc)]}})
+				failed_count += 1
+				continue
+
+			message = (
+				f"Hi {name}, your Liberia eLearn content manager account has been created.\n"
+				f"Login with phone: {phone} and password: {temp_password}.\n"
+				"Please change this password after your first login."
+			)
+			fire_and_forget(
+				_send_account_notifications,
+				message,
+				phone,
+				email,
+				"Your Liberia eLearn content manager account",
+			)
+
+			created_count += 1
+			results.append({
+				**row_result,
+				"status": "created",
+				"user_id": user.id,
+				"name": name,
+				"phone": phone,
+				"email": email,
+				"role": role_label,
+			})
+
+		return Response({
+			"summary": {
+				"total_rows": len(results),
+				"created": created_count,
+				"failed": failed_count,
+			},
+			"results": results,
+		})
+
+	@extend_schema(
+		description=(
+			"Download a sample CSV template for bulk content manager creation via admin endpoints. "
+			"The file includes the correct header columns and example rows."
+		),
+		responses={
+			200: OpenApiResponse(
+				description="CSV file with header row and two sample content manager records.",
+			),
+		},
+	)
+	@action(detail=False, methods=['get'], url_path='bulk-template')
+	def bulk_content_managers_template(self, request):
+		"""Return a CSV template for bulk content manager creation via admin endpoints."""
+		header = [
+			"name",
+			"phone",
+			"email",
+			"role",
+			"gender",
+			"dob",
+		]
+		example_rows = [
+			{
+				"name": "Jane Creator",
+				"phone": "231770000010",
+				"email": "jane.creator@example.com",
+				"role": "CONTENTCREATOR",
+				"gender": "F",
+				"dob": "1990-05-10",
+			},
+			{
+				"name": "John Validator",
+				"phone": "231770000011",
+				"email": "john.validator@example.com",
+				"role": "CONTENTVALIDATOR",
+				"gender": "M",
+				"dob": "1988-09-02",
+			},
+		]
+
+		buffer = io.StringIO()
+		writer = csv.DictWriter(buffer, fieldnames=header)
+		writer.writeheader()
+		for row in example_rows:
+			writer.writerow(row)
+
+		csv_content = buffer.getvalue()
+		response = HttpResponse(csv_content, content_type="text/csv")
+		response["Content-Disposition"] = "attachment; filename=content_managers_bulk_template.csv"
+		return response
 
