@@ -75,6 +75,7 @@ from .serializers import (
 	AdminStudentListSerializer,
 	AdminParentListSerializer,
 	GradeAssessmentSerializer,
+	AdminDashboardSerializer,
 )
 from messsaging.services import send_sms
 
@@ -5857,6 +5858,183 @@ class AdminSchoolViewSet(viewsets.ModelViewSet):
 	permission_classes = [permissions.IsAuthenticated, IsAdminRole, permissions.IsAdminUser]
 
 
+class AdminDashboardViewSet(viewsets.ViewSet):
+	"""Admin dashboard endpoints exposed under /admin/dashboard/."""
+
+	permission_classes = [permissions.IsAuthenticated, IsAdminRole, permissions.IsAdminUser]
+	serializer_class = AdminDashboardSerializer
+
+	@extend_schema(
+		operation_id="admin_dashboard",
+		description=(
+			"Admin dashboard metrics including key summary cards, a lessons "
+			"status chart, and a list of high-performing learners."
+		),
+		responses={
+			200: OpenApiResponse(
+				response=AdminDashboardSerializer,
+				examples=[
+					OpenApiExample(
+						name="AdminDashboardExample",
+						value={
+							"summary_cards": {
+								"schools": {"count": 84, "change_pct": 12.0},
+								"districts": {"count": 122, "change_pct": 5.0},
+								"teachers": {"count": 18, "change_pct": -3.0},
+								"parents": {"count": 473, "change_pct": 15.0},
+								"content_creators": {"count": 84, "change_pct": 12.0},
+								"content_validators": {"count": 122, "change_pct": 5.0},
+								"approved_subjects": {"count": 18, "change_pct": -3.0},
+								"lessons_pending_approval": {"count": 473, "change_pct": -3.0},
+							},
+							"lessons_chart": {
+								"granularity": "month",
+								"points": [
+									{"period": "Jan", "submitted": 400000, "approved": 350000, "rejected": 30000},
+									{"period": "Feb", "submitted": 450000, "approved": 380000, "rejected": 32000},
+								],
+							},
+							"high_learners": [
+								{"student_id": 1, "name": "Bertha Jones", "subtitle": "Completed 8 quizzes this week"},
+								{"student_id": 2, "name": "Prince Samuel", "subtitle": "Achieved 95% in maths subject"},
+							],
+						},
+					),
+				],
+			),
+		},
+	)
+	def list(self, request):
+		"""Return high-level metrics for the admin dashboard.
+
+		This includes summary cards, a monthly lessons chart, and a
+		"high learners" list based on recent assessment completions.
+		"""
+		now = timezone.now()
+		current_year = now.year
+		current_month = now.month
+		prev_year = current_year if current_month > 1 else current_year - 1
+		prev_month = current_month - 1 if current_month > 1 else 12
+
+		def _month_counts(qs, year, month, date_field='created_at'):
+			filter_kwargs = {
+				f"{date_field}__year": year,
+				f"{date_field}__month": month,
+			}
+			return qs.filter(**filter_kwargs).count()
+
+		def _summary_card(qs, *, date_field='created_at', base_filter=None):
+			base_qs = qs
+			if base_filter is not None:
+				base_qs = base_qs.filter(**base_filter)
+			total = base_qs.count()
+			current_created = _month_counts(base_qs, current_year, current_month, date_field)
+			prev_created = _month_counts(base_qs, prev_year, prev_month, date_field)
+			if prev_created > 0:
+				change_pct = ((current_created - prev_created) / prev_created) * 100.0
+			elif current_created > 0:
+				change_pct = 100.0
+			else:
+				change_pct = 0.0
+			return {
+				"count": total,
+				"change_pct": round(change_pct, 1),
+			}
+
+		from accounts.models import County, District, School
+
+		summary_cards = {
+			"schools": _summary_card(School.objects.all()),
+			"districts": _summary_card(District.objects.all()),
+			"teachers": _summary_card(Teacher.objects.all()),
+			"parents": _summary_card(Parent.objects.all()),
+			"content_creators": _summary_card(
+				User.objects.filter(role=UserRole.CONTENTCREATOR.value)
+			),
+			"content_validators": _summary_card(
+				User.objects.filter(role=UserRole.CONTENTVALIDATOR.value)
+			),
+			"approved_subjects": _summary_card(
+				Subject.objects.all(),
+				base_filter={"status": StatusEnum.APPROVED.value},
+			),
+			"lessons_pending_approval": _summary_card(
+				LessonResource.objects.all(),
+				base_filter={"status": StatusEnum.PENDING.value},
+			),
+		}
+
+		# Lessons chart: monthly breakdown for current year
+		lessons_chart_points = []
+		for month in range(1, 13):
+			month_qs = LessonResource.objects.filter(
+				created_at__year=current_year,
+				created_at__month=month,
+			)
+			lessons_chart_points.append(
+				{
+					"period": datetime(current_year, month, 1).strftime("%b"),
+					"submitted": month_qs.count(),
+					"approved": month_qs.filter(status=StatusEnum.APPROVED.value).count(),
+					"rejected": month_qs.filter(status=StatusEnum.REJECTED.value).count(),
+				}
+			)
+
+		lessons_chart = {
+			"granularity": "month",
+			"points": lessons_chart_points,
+		}
+
+		# High learners: top students by number of assessment grades in last 7 days
+		week_ago = now - timedelta(days=7)
+		ga_counts = (
+			GeneralAssessmentGrade.objects
+			.filter(created_at__gte=week_ago)
+			.values("student_id")
+			.annotate(c=Count("id"))
+		)
+		la_counts = (
+			LessonAssessmentGrade.objects
+			.filter(created_at__gte=week_ago)
+			.values("student_id")
+			.annotate(c=Count("id"))
+		)
+
+		combined: Dict[int, int] = {}
+		for row in ga_counts:
+			combined[row["student_id"]] = combined.get(row["student_id"], 0) + row["c"]
+		for row in la_counts:
+			combined[row["student_id"]] = combined.get(row["student_id"], 0) + row["c"]
+
+		# Sort by total completions desc and take top 5
+		best_ids = [sid for sid, _ in sorted(combined.items(), key=lambda kv: kv[1], reverse=True)[:5]]
+		students_by_id = {
+			stu.id: stu
+			for stu in Student.objects.filter(id__in=best_ids).select_related("profile")
+		}
+		high_learners = []
+		for sid in best_ids:
+			student = students_by_id.get(sid)
+			if not student or not getattr(student, "profile", None):
+				continue
+			name = student.profile.name
+			count = combined.get(sid, 0)
+			subtitle = f"Completed {count} quizzes this week" if count else "Active learner this week"
+			high_learners.append(
+				{
+					"student_id": sid,
+					"name": name,
+					"subtitle": subtitle,
+				}
+			)
+
+		payload = {
+			"summary_cards": summary_cards,
+			"lessons_chart": lessons_chart,
+			"high_learners": high_learners,
+		}
+		ser = AdminDashboardSerializer(payload)
+		return Response(ser.data)
 class AdminStudentViewSet(viewsets.ReadOnlyModelViewSet):
 	"""Admin-only read access to all students with summary fields."""
 

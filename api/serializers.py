@@ -100,6 +100,41 @@ class ContentDashboardSerializer(serializers.Serializer):
     by_type = serializers.DictField(child=ContentDashboardCountsSerializer())
 
 
+class AdminDashboardSummaryCardSerializer(serializers.Serializer):
+    """Summary card metrics for the admin dashboard.
+
+    count: total items; change_pct: percentage change in items created this
+    month versus last month.
+    """
+
+    count = serializers.IntegerField()
+    change_pct = serializers.FloatField()
+
+
+class AdminLessonsChartPointSerializer(serializers.Serializer):
+    period = serializers.CharField()
+    submitted = serializers.IntegerField()
+    approved = serializers.IntegerField()
+    rejected = serializers.IntegerField()
+
+
+class AdminLessonsChartSerializer(serializers.Serializer):
+    granularity = serializers.ChoiceField(choices=["day", "month", "year"])
+    points = AdminLessonsChartPointSerializer(many=True)
+
+
+class AdminHighLearnerSerializer(serializers.Serializer):
+    student_id = serializers.IntegerField()
+    name = serializers.CharField()
+    subtitle = serializers.CharField()
+
+
+class AdminDashboardSerializer(serializers.Serializer):
+    summary_cards = serializers.DictField(child=AdminDashboardSummaryCardSerializer())
+    lessons_chart = AdminLessonsChartSerializer()
+    high_learners = AdminHighLearnerSerializer(many=True)
+
+
 class TeacherCreateStudentSerializer(serializers.Serializer):
     name = serializers.CharField(max_length=255)
     phone = serializers.CharField(max_length=25)
