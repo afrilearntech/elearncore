@@ -6263,8 +6263,9 @@ class AdminSystemReportViewSet(viewsets.ViewSet):
 		}
 		ser = AdminSystemReportSerializer(payload)
 		return Response(ser.data)
+
 class AdminStudentViewSet(viewsets.ReadOnlyModelViewSet):
-	"""Admin-only read access to all students with summary fields."""
+	"""Admin-only read and moderation access to all students."""
 
 	queryset = Student.objects.select_related('profile', 'school').prefetch_related('guardians__profile').all().order_by('profile__name')
 	serializer_class = AdminStudentListSerializer
@@ -6272,6 +6273,131 @@ class AdminStudentViewSet(viewsets.ReadOnlyModelViewSet):
 	filter_backends = [filters.SearchFilter, filters.OrderingFilter]
 	search_fields = ['profile__name', 'profile__email', 'school__name', 'grade', 'status']
 	ordering_fields = ['profile__name', 'school__name', 'grade', 'status', 'created_at']
+
+	@extend_schema(
+		operation_id="admin_approve_student",
+		description="Approve a pending student account as an admin.",
+		request=None,
+		responses={200: StudentSerializer},
+	)
+	@action(detail=True, methods=['post'], url_path='approve')
+	def approve(self, request, pk=None):
+		"""Approve a student and notify them via SMS/email."""
+		student = self.get_object()
+		student.status = StatusEnum.APPROVED.value
+		student.moderation_comment = "Approved by admin"
+		student.save(update_fields=['status', 'moderation_comment', 'updated_at'])
+
+		profile = student.profile
+		message = (
+			f"Hi {profile.name}, your Liberia eLearn student account has been approved by an administrator.\n"
+			"You can now log in and start learning."
+		)
+		fire_and_forget(
+			_send_account_notifications,
+			message,
+			getattr(profile, "phone", None),
+			getattr(profile, "email", None),
+			"Your Liberia eLearn student account has been approved",
+		)
+		return Response(StudentSerializer(student).data)
+
+	@extend_schema(
+		operation_id="admin_reject_student",
+		description="Reject a pending student account as an admin.",
+		request=None,
+		responses={200: StudentSerializer},
+	)
+	@action(detail=True, methods=['post'], url_path='reject')
+	def reject(self, request, pk=None):
+		"""Reject a student and notify them via SMS/email."""
+		student = self.get_object()
+		moderation_comment = request.data.get('moderation_comment') or "Rejected by admin"
+		student.status = StatusEnum.REJECTED.value
+		student.moderation_comment = moderation_comment
+		student.save(update_fields=['status', 'moderation_comment', 'updated_at'])
+
+		profile = student.profile
+		message = (
+			f"Hi {profile.name}, your Liberia eLearn student account has been rejected by an administrator.\n"
+			"Please contact your school or the Liberia eLearn support team for more information."
+		)
+		fire_and_forget(
+			_send_account_notifications,
+			message,
+			getattr(profile, "phone", None),
+			getattr(profile, "email", None),
+			"Your Liberia eLearn student account status",
+		)
+		return Response(StudentSerializer(student).data)
+
+
+class AdminTeacherViewSet(viewsets.ReadOnlyModelViewSet):
+	"""Admin-only read and moderation access to all teachers."""
+
+	queryset = Teacher.objects.select_related('profile', 'school').all().order_by('profile__name')
+	serializer_class = TeacherSerializer
+	permission_classes = [permissions.IsAuthenticated, IsAdminRole, permissions.IsAdminUser]
+	filter_backends = [filters.SearchFilter, filters.OrderingFilter]
+	search_fields = ['profile__name', 'profile__email', 'school__name', 'status']
+	ordering_fields = ['profile__name', 'school__name', 'status', 'created_at']
+
+	@extend_schema(
+		operation_id="admin_approve_teacher",
+		description="Approve a pending teacher account as an admin.",
+		request=None,
+		responses={200: TeacherSerializer},
+	)
+	@action(detail=True, methods=['post'], url_path='approve')
+	def approve(self, request, pk=None):
+		"""Approve a teacher and notify them via SMS/email."""
+		teacher = self.get_object()
+		teacher.status = StatusEnum.APPROVED.value
+		teacher.moderation_comment = "Approved by admin"
+		teacher.save(update_fields=['status', 'moderation_comment', 'updated_at'])
+
+		profile = teacher.profile
+		message = (
+			f"Hi {profile.name}, your Liberia eLearn teacher account has been approved by an administrator.\n"
+			"You can now log in and start teaching."
+		)
+		fire_and_forget(
+			_send_account_notifications,
+			message,
+			getattr(profile, "phone", None),
+			getattr(profile, "email", None),
+			"Your Liberia eLearn teacher account has been approved",
+		)
+		return Response(TeacherSerializer(teacher).data)
+
+	@extend_schema(
+		operation_id="admin_reject_teacher",
+		description="Reject a pending teacher account as an admin.",
+		request=None,
+		responses={200: TeacherSerializer},
+	)
+	@action(detail=True, methods=['post'], url_path='reject')
+	def reject(self, request, pk=None):
+		"""Reject a teacher and notify them via SMS/email."""
+		teacher = self.get_object()
+		moderation_comment = request.data.get('moderation_comment') or "Rejected by admin"
+		teacher.status = StatusEnum.REJECTED.value
+		teacher.moderation_comment = moderation_comment
+		teacher.save(update_fields=['status', 'moderation_comment', 'updated_at'])
+
+		profile = teacher.profile
+		message = (
+			f"Hi {profile.name}, your Liberia eLearn teacher account has been rejected by an administrator.\n"
+			"Please contact your school or the Liberia eLearn support team for more information."
+		)
+		fire_and_forget(
+			_send_account_notifications,
+			message,
+			getattr(profile, "phone", None),
+			getattr(profile, "email", None),
+			"Your Liberia eLearn teacher account status",
+		)
+		return Response(TeacherSerializer(teacher).data)
 
 
 class AdminParentViewSet(viewsets.ReadOnlyModelViewSet):
