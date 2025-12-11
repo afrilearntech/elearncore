@@ -24,7 +24,7 @@ class AboutUserSerializer(serializers.Serializer):
 
 
 class LinkChildSerializer(serializers.Serializer):
-    student_id = serializers.IntegerField(required=True)
+    student_id = serializers.CharField(required=True, max_length=50)
     student_email = serializers.EmailField(required=False, allow_blank=True)
     student_phone = serializers.CharField(required=False, allow_blank=True, max_length=25)
 

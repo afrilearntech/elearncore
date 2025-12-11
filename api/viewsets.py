@@ -2782,7 +2782,7 @@ class OnboardingViewSet(viewsets.ViewSet):
 		if not (student_id and (child_email or child_phone)):
 			return Response({"detail": "Provide student_id and either student_email or student_phone."}, status=400)
 
-		qs = Student.objects.select_related('profile').filter(id=student_id)
+		qs = Student.objects.select_related('profile').filter(student_id=student_id)
 		if child_email:
 			qs = qs.filter(profile__email__iexact=child_email)
 		if child_phone:
