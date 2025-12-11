@@ -342,7 +342,7 @@ class AdminStudentListSerializer(serializers.Serializer):
 
     Fields: name, school (name), email, linked_parents, grade, status.
     """
-
+    id = serializers.IntegerField()
     name = serializers.CharField()
     school = serializers.CharField(allow_null=True, required=False)
     email = serializers.EmailField(allow_null=True, required=False)
@@ -367,6 +367,7 @@ class AdminStudentListSerializer(serializers.Serializer):
                     parent_names.append(parent_profile.name)
 
         return {
+            "id": getattr(instance, "id", None),
             "name": getattr(profile, "name", None) if profile else None,
             "school": getattr(school, "name", None) if school else None,
             "email": getattr(profile, "email", None) if profile else None,
