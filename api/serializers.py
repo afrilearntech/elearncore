@@ -135,6 +135,60 @@ class AdminDashboardSerializer(serializers.Serializer):
     high_learners = AdminHighLearnerSerializer(many=True)
 
 
+class AdminSystemReportSummarySerializer(serializers.Serializer):
+    total_users = serializers.IntegerField()
+    total_students = serializers.IntegerField()
+    total_teachers = serializers.IntegerField()
+    total_schools = serializers.IntegerField()
+
+
+class AdminSystemReportDetailedRowSerializer(serializers.Serializer):
+    period = serializers.CharField()
+    users = serializers.IntegerField()
+    students = serializers.IntegerField()
+    teachers = serializers.IntegerField()
+    parents = serializers.IntegerField()
+    schools = serializers.IntegerField()
+    subjects = serializers.IntegerField()
+    lessons = serializers.IntegerField()
+    submissions_total = serializers.IntegerField()
+    submissions_graded = serializers.IntegerField()
+
+
+class AdminSystemReportContentStatsSerializer(serializers.Serializer):
+    content_creators = serializers.IntegerField()
+    content_validators = serializers.IntegerField()
+    approved_subjects = serializers.IntegerField()
+    pending_subjects = serializers.IntegerField()
+    approved_lessons = serializers.IntegerField()
+    pending_lessons = serializers.IntegerField()
+    total_games = serializers.IntegerField()
+
+
+class AdminSystemReportActivityStatsSerializer(serializers.Serializer):
+    new_users = serializers.IntegerField()
+    new_students = serializers.IntegerField()
+    new_teachers = serializers.IntegerField()
+    new_parents = serializers.IntegerField()
+    active_users = serializers.IntegerField()
+    total_assessments = serializers.IntegerField()
+    pending_submissions = serializers.IntegerField()
+
+
+class AdminSystemReportSerializer(serializers.Serializer):
+    """Payload for the admin System Reports page (by month).
+
+    The frontend can use this to render summary cards, the detailed
+    report table, and the content/activity statistics sections.
+    """
+
+    period = serializers.CharField()
+    summary = AdminSystemReportSummarySerializer()
+    detailed = AdminSystemReportDetailedRowSerializer(many=True)
+    content_stats = AdminSystemReportContentStatsSerializer()
+    activity_stats = AdminSystemReportActivityStatsSerializer()
+
+
 class TeacherCreateStudentSerializer(serializers.Serializer):
     name = serializers.CharField(max_length=255)
     phone = serializers.CharField(max_length=25)

@@ -76,6 +76,7 @@ from .serializers import (
 	AdminParentListSerializer,
 	GradeAssessmentSerializer,
 	AdminDashboardSerializer,
+	AdminSystemReportSerializer,
 )
 from messsaging.services import send_sms
 
@@ -6035,6 +6036,233 @@ class AdminDashboardViewSet(viewsets.ViewSet):
 		}
 		ser = AdminDashboardSerializer(payload)
 		return Response(ser.data)
+
+
+class AdminSystemReportViewSet(viewsets.ViewSet):
+	"""Admin System Reports exposed under /admin/system-reports/.
+
+	Currently supports monthly reports; year and month can be provided
+	as query parameters (?year=2025&month=12). Defaults to the current
+	year and month when not supplied.
+	"""
+
+	permission_classes = [permissions.IsAuthenticated, IsAdminRole, permissions.IsAdminUser]
+	serializer_class = AdminSystemReportSerializer
+
+	@extend_schema(
+		operation_id="admin_system_reports",
+		description=(
+			"System reports for a given month, including summary cards, a "
+			"detailed row, and content/activity statistics."
+		),
+		parameters=[
+			OpenApiParameter(
+				name="year",
+				required=False,
+				location=OpenApiParameter.QUERY,
+				description="Report year (e.g. 2025). Defaults to current year.",
+				type=int,
+			),
+			OpenApiParameter(
+				name="month",
+				required=False,
+				location=OpenApiParameter.QUERY,
+				description="Report month number (1-12). Defaults to current month.",
+				type=int,
+			),
+		],
+		responses={
+			200: OpenApiResponse(
+				response=AdminSystemReportSerializer,
+				examples=[
+					OpenApiExample(
+						name="SystemReportExample",
+						value={
+							"period": "2025-12",
+							"summary": {
+								"total_users": 1250,
+								"total_students": 850,
+								"total_teachers": 120,
+								"total_schools": 84,
+							},
+							"detailed": [
+								{
+									"period": "2025-12",
+									"users": 1250,
+									"students": 850,
+									"teachers": 120,
+									"parents": 280,
+									"schools": 84,
+									"subjects": 156,
+									"lessons": 892,
+									"submissions_total": 1845,
+									"submissions_graded": 1520,
+								},
+							],
+							"content_stats": {
+								"content_creators": 45,
+								"content_validators": 15,
+								"approved_subjects": 142,
+								"pending_subjects": 14,
+								"approved_lessons": 756,
+								"pending_lessons": 136,
+								"total_games": 45,
+							},
+							"activity_stats": {
+								"new_users": 25,
+								"new_students": 18,
+								"new_teachers": 3,
+								"new_parents": 4,
+								"active_users": 980,
+								"total_assessments": 234,
+								"pending_submissions": 325,
+							},
+						},
+					),
+				],
+			),
+		},
+	)
+	def list(self, request):
+		"""Return monthly system reports for admins (single-period payload)."""
+		now = timezone.now()
+		try:
+			year = int(request.query_params.get("year", now.year))
+			month = int(request.query_params.get("month", now.month))
+		except ValueError:
+			return Response({"detail": "year and month must be integers."}, status=status.HTTP_400_BAD_REQUEST)
+		if month < 1 or month > 12:
+			return Response({"detail": "month must be between 1 and 12."}, status=status.HTTP_400_BAD_REQUEST)
+
+		# Compute month boundaries (inclusive start, exclusive end)
+		tz = timezone.get_current_timezone()
+		period_start = tz.localize(datetime(year, month, 1))
+		if month == 12:
+			period_end = tz.localize(datetime(year + 1, 1, 1))
+		else:
+			period_end = tz.localize(datetime(year, month + 1, 1))
+
+		period_label = f"{year:04d}-{month:02d}"
+
+		date_filter = {"created_at__gte": period_start, "created_at__lt": period_end}
+
+		# Top summary cards
+		users_created = User.objects.filter(**date_filter).count()
+		students_created = Student.objects.filter(**date_filter).count()
+		teachers_created = Teacher.objects.filter(**date_filter).count()
+		schools_created = School.objects.filter(**date_filter).count()
+
+		summary = {
+			"total_users": users_created,
+			"total_students": students_created,
+			"total_teachers": teachers_created,
+			"total_schools": schools_created,
+		}
+
+		# Detailed row (one row for the selected period)
+		parents_created = Parent.objects.filter(**date_filter).count()
+		subjects_created = Subject.objects.filter(**date_filter).count()
+		lessons_created = LessonResource.objects.filter(**date_filter).count()
+
+		from content.models import AssessmentSolution
+
+		submissions_total = AssessmentSolution.objects.filter(
+			submitted_at__gte=period_start,
+			submitted_at__lt=period_end,
+		).count()
+		submissions_graded = AssessmentSolution.objects.filter(
+			submitted_at__gte=period_start,
+			submitted_at__lt=period_end,
+			grade__isnull=False,
+		).count()
+
+		detailed = [
+			{
+				"period": period_label,
+				"users": users_created,
+				"students": students_created,
+				"teachers": teachers_created,
+				"parents": parents_created,
+				"schools": schools_created,
+				"subjects": subjects_created,
+				"lessons": lessons_created,
+				"submissions_total": submissions_total,
+				"submissions_graded": submissions_graded,
+			},
+		]
+
+		# Content statistics for the period
+		content_stats = {
+			"content_creators": User.objects.filter(
+				role=UserRole.CONTENTCREATOR.value,
+				**date_filter,
+			).count(),
+			"content_validators": User.objects.filter(
+				role=UserRole.CONTENTVALIDATOR.value,
+				**date_filter,
+			).count(),
+			"approved_subjects": Subject.objects.filter(
+				status=StatusEnum.APPROVED.value,
+				**date_filter,
+			).count(),
+			"pending_subjects": Subject.objects.filter(
+				status=StatusEnum.PENDING.value,
+				**date_filter,
+			).count(),
+			"approved_lessons": LessonResource.objects.filter(
+				status=StatusEnum.APPROVED.value,
+				**date_filter,
+			).count(),
+			"pending_lessons": LessonResource.objects.filter(
+				status=StatusEnum.PENDING.value,
+				**date_filter,
+			).count(),
+			"total_games": GameModel.objects.filter(**date_filter).count(),
+		}
+
+		# Activity statistics for the period
+		from content.models import GeneralAssessment, LessonAssessment
+		from content.models import Activity as ContentActivity
+
+		new_students = students_created
+		new_teachers = teachers_created
+		new_parents = parents_created
+
+		active_users = User.objects.filter(
+			activities__created_at__gte=period_start,
+			activities__created_at__lt=period_end,
+		).distinct().count()
+
+		total_assessments = (
+			GeneralAssessment.objects.filter(**date_filter).count()
+			+ LessonAssessment.objects.filter(**date_filter).count()
+		)
+
+		pending_submissions = AssessmentSolution.objects.filter(
+			submitted_at__gte=period_start,
+			submitted_at__lt=period_end,
+			grade__isnull=True,
+		).count()
+
+		activity_stats = {
+			"new_users": users_created,
+			"new_students": new_students,
+			"new_teachers": new_teachers,
+			"new_parents": new_parents,
+			"active_users": active_users,
+			"total_assessments": total_assessments,
+			"pending_submissions": pending_submissions,
+		}
+
+		payload = {
+			"period": period_label,
+			"summary": summary,
+			"detailed": detailed,
+			"content_stats": content_stats,
+			"activity_stats": activity_stats,
+		}
+		ser = AdminSystemReportSerializer(payload)
+		return Response(ser.data)
 class AdminStudentViewSet(viewsets.ReadOnlyModelViewSet):
 	"""Admin-only read access to all students with summary fields."""
 
@@ -6173,6 +6401,45 @@ class AdminContentManagerViewSet(viewsets.ViewSet):
 		responses={
 			200: OpenApiResponse(
 				description="Bulk content manager creation summary with per-row statuses.",
+				examples=[
+					OpenApiExample(
+						name="AdminBulkContentManagersResponse",
+						value={
+							"summary": {
+								"total_rows": 3,
+								"created": 2,
+								"failed": 1,
+							},
+							"results": [
+								{
+									"row": 2,
+									"status": "created",
+									"user_id": 101,
+									"name": "Jane Creator",
+									"phone": "231770000010",
+									"email": "jane.creator@example.com",
+									"role": "creator",
+								},
+								{
+									"row": 3,
+									"status": "created",
+									"user_id": 102,
+									"name": "John Validator",
+									"phone": "231770000011",
+									"email": "john.validator@example.com",
+									"role": "validator",
+								},
+								{
+									"row": 4,
+									"status": "error",
+									"errors": {
+										"phone": ["A user with this phone already exists."],
+									},
+								},
+							],
+						},
+					),
+				],
 			),
 		},
 	)
