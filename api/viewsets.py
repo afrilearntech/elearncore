@@ -6401,47 +6401,49 @@ class AdminContentManagerViewSet(viewsets.ViewSet):
 		responses={
 			200: OpenApiResponse(
 				description="Bulk content manager creation summary with per-row statuses.",
-				examples=[
-					OpenApiExample(
-						name="AdminBulkContentManagersResponse",
-						value={
-							"summary": {
-								"total_rows": 3,
-								"created": 2,
-								"failed": 1,
-							},
-							"results": [
-								{
-									"row": 2,
-									"status": "created",
-									"user_id": 101,
-									"name": "Jane Creator",
-									"phone": "231770000010",
-									"email": "jane.creator@example.com",
-									"role": "creator",
-								},
-								{
-									"row": 3,
-									"status": "created",
-									"user_id": 102,
-									"name": "John Validator",
-									"phone": "231770000011",
-									"email": "john.validator@example.com",
-									"role": "validator",
-								},
-								{
-									"row": 4,
-									"status": "error",
-									"errors": {
-										"phone": ["A user with this phone already exists."],
-									},
-								},
-							],
-						},
-					),
-				],
 			),
 		},
+		examples=[
+			OpenApiExample(
+				name="AdminBulkContentManagersResponse",
+				summary="Example of bulk CSV upload result.",
+				response_only=True,
+				value={
+					"summary": {
+						"total_rows": 3,
+						"created": 2,
+						"failed": 1,
+					},
+					"results": [
+						{
+							"row": 2,
+							"status": "created",
+							"user_id": 101,
+							"name": "Jane Creator",
+							"phone": "231770000010",
+							"email": "jane.creator@example.com",
+							"role": "creator",
+						},
+						{
+							"row": 3,
+							"status": "created",
+							"user_id": 102,
+							"name": "John Validator",
+							"phone": "231770000011",
+							"email": "john.validator@example.com",
+							"role": "validator",
+						},
+						{
+							"row": 4,
+							"status": "error",
+							"errors": {
+								"phone": ["A user with this phone already exists."],
+							},
+						},
+					],
+				},
+			),
+		],
 	)
 	@action(detail=False, methods=['post'], url_path='bulk-create')
 	def bulk_create_content_managers(self, request):
