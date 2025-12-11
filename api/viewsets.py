@@ -6136,11 +6136,11 @@ class AdminSystemReportViewSet(viewsets.ViewSet):
 
 		# Compute month boundaries (inclusive start, exclusive end)
 		tz = timezone.get_current_timezone()
-		period_start = tz.localize(datetime(year, month, 1))
+		period_start = timezone.make_aware(datetime(year, month, 1), tz)
 		if month == 12:
-			period_end = tz.localize(datetime(year + 1, 1, 1))
+			period_end = timezone.make_aware(datetime(year + 1, 1, 1), tz)
 		else:
-			period_end = tz.localize(datetime(year, month + 1, 1))
+			period_end = timezone.make_aware(datetime(year, month + 1, 1), tz)
 
 		period_label = f"{year:04d}-{month:02d}"
 
