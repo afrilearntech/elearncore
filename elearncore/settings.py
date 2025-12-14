@@ -19,6 +19,13 @@ DEBUG = True
 
 ALLOWED_HOSTS = ["*"]
 
+# CSRF trusted origins for HTTPS (required when behind a proxy)
+if ENVIRONMENT in ["LIVE", "PRODUCTION", "PROD"]:
+    CSRF_TRUSTED_ORIGINS = [
+        "https://elearnapi.afrilearntech.com",
+        "https://elapi.afrilearntech.com",
+    ]
+
 
 # Application definition
 
