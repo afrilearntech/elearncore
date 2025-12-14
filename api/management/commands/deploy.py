@@ -18,15 +18,14 @@ class Command(BaseCommand):
         subprocess.run(["python", "manage.py", "collectstatic", "--noinput"], check=True)
 
         self.stdout.write(self.style.NOTICE("[DEPLOY] Restarting server and essential services..."))
-        # Example: systemctl restart gunicorn; systemctl restart celery; systemctl restart nginx
-        # You may need to adjust these commands for your environment
+        # Adjusted for Daphne + Nginx deployment
         try:
-            subprocess.run(["systemctl", "restart", "gunicorn"], check=True)
-            # subprocess.run(["systemctl", "restart", "celery"], check=True)
-            # sudo systemctl reload nginx
-            subprocess.run(["sudo", "systemctl", "restart", "nginx"], check=True)
-            subprocess.run(["sudo", "systemctl", "reload", "nginx"], check=True)
-            # subprocess.run(["sudo", "systemctl", "restart", "nginx"], check=True)
+            # Restart Daphne ASGI service
+            subprocess.run(["systemctl", "restart", "elearncore-daphne"], check=True)
+
+            # Restart and reload Nginx to pick up config changes
+            subprocess.run(["systemctl", "restart", "nginx"], check=True)
+            subprocess.run(["systemctl", "reload", "nginx"], check=True)
         except Exception as e:
             self.stdout.write(self.style.WARNING(f"[DEPLOY] Could not restart one or more services: {e}"))
 
