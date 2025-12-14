@@ -73,6 +73,7 @@ class OTP(TimestampedModel):
 class County(TimestampedModel):
     name = models.CharField(max_length=100, unique=True)
     status = models.CharField(max_length=30, choices=[(s.value, s.value) for s in StatusEnum], default=StatusEnum.PENDING.value)
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="counties_created")
     moderation_comment = models.TextField(blank=True, default="")
 
     def __str__(self) -> str:
