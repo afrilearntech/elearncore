@@ -1887,7 +1887,7 @@ class ContentViewSet(viewsets.ViewSet):
 		import secrets
 		import string
 		alphabet = string.ascii_letters + string.digits
-		temp_password = "".join(secrets.choice(alphabet) for _ in range(10))
+		temp_password = "password123"
 
 		with transaction.atomic():
 			user = User(
@@ -2035,7 +2035,7 @@ class ContentViewSet(viewsets.ViewSet):
 			import secrets
 			import string
 			alphabet = string.ascii_letters + string.digits
-			temp_password = "".join(secrets.choice(alphabet) for _ in range(10))
+			temp_password = "password123"
 
 			try:
 				with transaction.atomic():
@@ -2254,7 +2254,7 @@ class ContentViewSet(viewsets.ViewSet):
 		import secrets
 		import string
 		alphabet = string.ascii_letters + string.digits
-		temp_password = "".join(secrets.choice(alphabet) for _ in range(10))
+		temp_password = "password123"
 
 		with transaction.atomic():
 			user = User(
@@ -2393,7 +2393,7 @@ class ContentViewSet(viewsets.ViewSet):
 			import secrets
 			import string
 			alphabet = string.ascii_letters + string.digits
-			temp_password = "".join(secrets.choice(alphabet) for _ in range(10))
+			temp_password = "password123"
 
 			try:
 				with transaction.atomic():
@@ -5191,7 +5191,7 @@ class TeacherViewSet(viewsets.ViewSet):
 		import secrets
 		import string
 		alphabet = string.ascii_letters + string.digits
-		temp_password = "".join(secrets.choice(alphabet) for _ in range(10))
+		temp_password = "password123"
 
 		with transaction.atomic():
 			user = User(
@@ -5350,7 +5350,7 @@ class TeacherViewSet(viewsets.ViewSet):
 			import secrets
 			import string
 			alphabet = string.ascii_letters + string.digits
-			temp_password = "".join(secrets.choice(alphabet) for _ in range(10))
+			temp_password = "password123"
 
 			try:
 				with transaction.atomic():
@@ -6977,7 +6977,7 @@ class AdminContentManagerViewSet(viewsets.ViewSet):
 		import secrets
 		import string
 		alphabet = string.ascii_letters + string.digits
-		temp_password = "".join(secrets.choice(alphabet) for _ in range(10))
+		temp_password = "password123"
 
 		with transaction.atomic():
 			user = User(
@@ -7128,7 +7128,7 @@ class AdminContentManagerViewSet(viewsets.ViewSet):
 			import secrets
 			import string
 			alphabet = string.ascii_letters + string.digits
-			temp_password = "".join(secrets.choice(alphabet) for _ in range(10))
+			temp_password = "password123"
 
 			try:
 				with transaction.atomic():
