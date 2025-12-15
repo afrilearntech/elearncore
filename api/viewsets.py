@@ -77,6 +77,9 @@ from .serializers import (
 	GradeAssessmentSerializer,
 	AdminDashboardSerializer,
 	AdminSystemReportSerializer,
+	AdminBulkCountyUploadSerializer,
+	AdminBulkDistrictUploadSerializer,
+	AdminBulkSchoolUploadSerializer,
 )
 from messsaging.services import send_sms
 
@@ -5846,17 +5849,504 @@ class AdminCountyViewSet(viewsets.ModelViewSet):
 	serializer_class = CountySerializer
 	permission_classes = [permissions.IsAuthenticated, IsAdminRole, permissions.IsAdminUser]
 
+	@extend_schema(
+		operation_id="admin_bulk_create_counties",
+		description=(
+			"Bulk create counties from a CSV file. "
+			"Required columns: name. Optional: status, moderation_comment."
+		),
+		request=AdminBulkCountyUploadSerializer,
+		responses={
+			200: OpenApiResponse(description="Bulk county creation summary with per-row statuses."),
+		},
+		examples=[
+			OpenApiExample(
+				name="AdminBulkCountiesResponse",
+				summary="Example of bulk CSV upload result.",
+				response_only=True,
+				value={
+					"summary": {"total_rows": 3, "created": 2, "failed": 1},
+					"results": [
+						{"row": 2, "status": "created", "county_id": 1, "name": "Montserrado"},
+						{"row": 3, "status": "created", "county_id": 2, "name": "Bong"},
+						{"row": 4, "status": "error", "errors": {"name": ["County with this name already exists."]}},
+					],
+				},
+			),
+		],
+	)
+	@action(detail=False, methods=['post'], url_path='bulk-create')
+	def bulk_create(self, request):
+		"""Bulk create counties from a CSV upload."""
+		from django.db import transaction, IntegrityError
+
+		upload_ser = AdminBulkCountyUploadSerializer(data=request.data)
+		upload_ser.is_valid(raise_exception=True)
+		file_obj = upload_ser.validated_data['file']
+
+		try:
+			decoded = file_obj.read().decode('utf-8-sig')
+		except Exception:
+			return Response({"detail": "Unable to read uploaded file as UTF-8 text."}, status=status.HTTP_400_BAD_REQUEST)
+
+		if not decoded.strip():
+			return Response({"detail": "Uploaded file is empty."}, status=status.HTTP_400_BAD_REQUEST)
+
+		reader = csv.DictReader(io.StringIO(decoded))
+		if not reader.fieldnames:
+			return Response({"detail": "CSV file has no header row."}, status=status.HTTP_400_BAD_REQUEST)
+
+		required_columns = ['name']
+		missing = [c for c in required_columns if c not in reader.fieldnames]
+		if missing:
+			return Response({"detail": f"Missing required columns: {', '.join(missing)}."}, status=status.HTTP_400_BAD_REQUEST)
+
+		valid_statuses: Set[str] = {s.value for s in StatusEnum}
+		results = []
+		created_count = 0
+		failed_count = 0
+
+		for row_index, row in enumerate(reader, start=2):
+			row_result = {"row": row_index}
+			name = (row.get('name') or '').strip()
+			status_raw = (row.get('status') or '').strip()
+			moderation_comment = (row.get('moderation_comment') or '').strip()
+
+			if not name:
+				results.append({**row_result, "status": "error", "errors": {"name": ["This field is required."]}})
+				failed_count += 1
+				continue
+
+			county_kwargs = {
+				"name": name,
+				"moderation_comment": moderation_comment,
+				"created_by": request.user,
+			}
+			if status_raw:
+				if status_raw not in valid_statuses:
+					results.append({**row_result, "status": "error", "errors": {"status": ["Invalid status value."]}})
+					failed_count += 1
+					continue
+				county_kwargs["status"] = status_raw
+
+			try:
+				with transaction.atomic():
+					county = County.objects.create(**county_kwargs)
+			except IntegrityError:
+				results.append({**row_result, "status": "error", "errors": {"name": ["County with this name already exists."]}})
+				failed_count += 1
+				continue
+			except Exception as exc:
+				results.append({**row_result, "status": "error", "errors": {"non_field_errors": [str(exc)]}})
+				failed_count += 1
+				continue
+
+			created_count += 1
+			results.append({**row_result, "status": "created", "county_id": county.id, "name": county.name})
+
+		return Response({
+			"summary": {"total_rows": len(results), "created": created_count, "failed": failed_count},
+			"results": results,
+		})
+
+	@extend_schema(
+		operation_id="admin_bulk_counties_template",
+		description=(
+			"Download a sample CSV template for bulk county creation. "
+			"The file includes the correct header columns and example rows."
+		),
+		responses={200: OpenApiResponse(description="CSV file with header row and two sample counties.")},
+	)
+	@action(detail=False, methods=['get'], url_path='bulk-template')
+	def bulk_template(self, request):
+		"""Return a CSV template for bulk county creation."""
+		header = ["name", "status", "moderation_comment"]
+		example_rows = [
+			{"name": "Montserrado", "status": "APPROVED", "moderation_comment": "Initial import"},
+			{"name": "Bong", "status": "PENDING", "moderation_comment": ""},
+		]
+
+		buffer = io.StringIO()
+		writer = csv.DictWriter(buffer, fieldnames=header)
+		writer.writeheader()
+		for row in example_rows:
+			writer.writerow(row)
+
+		csv_content = buffer.getvalue()
+		response = HttpResponse(csv_content, content_type="text/csv")
+		response["Content-Disposition"] = "attachment; filename=counties_bulk_template.csv"
+		return response
+
 
 class AdminDistrictViewSet(viewsets.ModelViewSet):
 	queryset = District.objects.select_related('county').all().order_by('name')
 	serializer_class = DistrictSerializer
 	permission_classes = [permissions.IsAuthenticated, IsAdminRole, permissions.IsAdminUser]
 
+	@extend_schema(
+		operation_id="admin_bulk_create_districts",
+		description=(
+			"Bulk create districts from a CSV file. "
+			"Required columns: name and either county_id or county_name. "
+			"Optional: status, moderation_comment."
+		),
+		request=AdminBulkDistrictUploadSerializer,
+		responses={200: OpenApiResponse(description="Bulk district creation summary with per-row statuses.")},
+		examples=[
+			OpenApiExample(
+				name="AdminBulkDistrictsResponse",
+				summary="Example of bulk CSV upload result.",
+				response_only=True,
+				value={
+					"summary": {"total_rows": 2, "created": 2, "failed": 0},
+					"results": [
+						{"row": 2, "status": "created", "district_id": 10, "name": "Careysburg", "county": "Montserrado"},
+						{"row": 3, "status": "created", "district_id": 11, "name": "Gbarnga", "county": "Bong"},
+					],
+				},
+			),
+		],
+	)
+	@action(detail=False, methods=['post'], url_path='bulk-create')
+	def bulk_create(self, request):
+		"""Bulk create districts from a CSV upload."""
+		from django.db import transaction, IntegrityError
+
+		upload_ser = AdminBulkDistrictUploadSerializer(data=request.data)
+		upload_ser.is_valid(raise_exception=True)
+		file_obj = upload_ser.validated_data['file']
+
+		try:
+			decoded = file_obj.read().decode('utf-8-sig')
+		except Exception:
+			return Response({"detail": "Unable to read uploaded file as UTF-8 text."}, status=status.HTTP_400_BAD_REQUEST)
+
+		if not decoded.strip():
+			return Response({"detail": "Uploaded file is empty."}, status=status.HTTP_400_BAD_REQUEST)
+
+		reader = csv.DictReader(io.StringIO(decoded))
+		if not reader.fieldnames:
+			return Response({"detail": "CSV file has no header row."}, status=status.HTTP_400_BAD_REQUEST)
+
+		required_columns = ['name']
+		missing = [c for c in required_columns if c not in reader.fieldnames]
+		if missing:
+			return Response({"detail": f"Missing required columns: {', '.join(missing)}."}, status=status.HTTP_400_BAD_REQUEST)
+
+		valid_statuses: Set[str] = {s.value for s in StatusEnum}
+		results = []
+		created_count = 0
+		failed_count = 0
+
+		for row_index, row in enumerate(reader, start=2):
+			row_result = {"row": row_index}
+			name = (row.get('name') or '').strip()
+			county_id_raw = (row.get('county_id') or '').strip()
+			county_name = (row.get('county_name') or '').strip()
+			status_raw = (row.get('status') or '').strip()
+			moderation_comment = (row.get('moderation_comment') or '').strip()
+
+			if not name:
+				results.append({**row_result, "status": "error", "errors": {"name": ["This field is required."]}})
+				failed_count += 1
+				continue
+
+			county = None
+			if county_id_raw:
+				try:
+					county_id = int(county_id_raw)
+				except ValueError:
+					results.append({**row_result, "status": "error", "errors": {"county_id": ["Invalid integer."]}})
+					failed_count += 1
+					continue
+				county = County.objects.filter(id=county_id).first()
+			elif county_name:
+				county = County.objects.filter(name__iexact=county_name).first()
+			else:
+				results.append({**row_result, "status": "error", "errors": {"county": ["Provide county_id or county_name."]}})
+				failed_count += 1
+				continue
+
+			if not county:
+				results.append({**row_result, "status": "error", "errors": {"county": ["County not found."]}})
+				failed_count += 1
+				continue
+
+			district_kwargs = {
+				"county": county,
+				"name": name,
+				"moderation_comment": moderation_comment,
+			}
+			if status_raw:
+				if status_raw not in valid_statuses:
+					results.append({**row_result, "status": "error", "errors": {"status": ["Invalid status value."]}})
+					failed_count += 1
+					continue
+				district_kwargs["status"] = status_raw
+
+			try:
+				with transaction.atomic():
+					district = District.objects.create(**district_kwargs)
+			except IntegrityError:
+				results.append({**row_result, "status": "error", "errors": {"name": ["District with this name already exists for the county."]}})
+				failed_count += 1
+				continue
+			except Exception as exc:
+				results.append({**row_result, "status": "error", "errors": {"non_field_errors": [str(exc)]}})
+				failed_count += 1
+				continue
+
+			created_count += 1
+			results.append({
+				**row_result,
+				"status": "created",
+				"district_id": district.id,
+				"name": district.name,
+				"county": county.name,
+			})
+
+		return Response({
+			"summary": {"total_rows": len(results), "created": created_count, "failed": failed_count},
+			"results": results,
+		})
+
+	@extend_schema(
+		operation_id="admin_bulk_districts_template",
+		description=(
+			"Download a sample CSV template for bulk district creation. "
+			"The file includes the correct header columns and example rows."
+		),
+		responses={200: OpenApiResponse(description="CSV file with header row and two sample districts.")},
+	)
+	@action(detail=False, methods=['get'], url_path='bulk-template')
+	def bulk_template(self, request):
+		"""Return a CSV template for bulk district creation."""
+		header = ["name", "county_id", "county_name", "status", "moderation_comment"]
+		example_rows = [
+			{"name": "Careysburg", "county_id": "", "county_name": "Montserrado", "status": "APPROVED", "moderation_comment": "Bulk import"},
+			{"name": "Gbarnga", "county_id": "", "county_name": "Bong", "status": "PENDING", "moderation_comment": ""},
+		]
+
+		buffer = io.StringIO()
+		writer = csv.DictWriter(buffer, fieldnames=header)
+		writer.writeheader()
+		for row in example_rows:
+			writer.writerow(row)
+
+		csv_content = buffer.getvalue()
+		response = HttpResponse(csv_content, content_type="text/csv")
+		response["Content-Disposition"] = "attachment; filename=districts_bulk_template.csv"
+		return response
+
 
 class AdminSchoolViewSet(viewsets.ModelViewSet):
 	queryset = School.objects.select_related('district__county').all().order_by('name')
 	serializer_class = SchoolSerializer
 	permission_classes = [permissions.IsAuthenticated, IsAdminRole, permissions.IsAdminUser]
+
+	@extend_schema(
+		operation_id="admin_bulk_create_schools",
+		description=(
+			"Bulk create schools from a CSV file. "
+			"Required columns: name and either district_id, or district_name plus county_id/county_name. "
+			"Optional: status, moderation_comment."
+		),
+		request=AdminBulkSchoolUploadSerializer,
+		responses={200: OpenApiResponse(description="Bulk school creation summary with per-row statuses.")},
+		examples=[
+			OpenApiExample(
+				name="AdminBulkSchoolsResponse",
+				summary="Example of bulk CSV upload result.",
+				response_only=True,
+				value={
+					"summary": {"total_rows": 2, "created": 1, "failed": 1},
+					"results": [
+						{"row": 2, "status": "created", "school_id": 55, "name": "Afrilearn Academy", "district": "Careysburg", "county": "Montserrado"},
+						{"row": 3, "status": "error", "errors": {"district": ["District not found."]}},
+					],
+				},
+			),
+		],
+	)
+	@action(detail=False, methods=['post'], url_path='bulk-create')
+	def bulk_create(self, request):
+		"""Bulk create schools from a CSV upload."""
+		from django.db import transaction, IntegrityError
+
+		upload_ser = AdminBulkSchoolUploadSerializer(data=request.data)
+		upload_ser.is_valid(raise_exception=True)
+		file_obj = upload_ser.validated_data['file']
+
+		try:
+			decoded = file_obj.read().decode('utf-8-sig')
+		except Exception:
+			return Response({"detail": "Unable to read uploaded file as UTF-8 text."}, status=status.HTTP_400_BAD_REQUEST)
+
+		if not decoded.strip():
+			return Response({"detail": "Uploaded file is empty."}, status=status.HTTP_400_BAD_REQUEST)
+
+		reader = csv.DictReader(io.StringIO(decoded))
+		if not reader.fieldnames:
+			return Response({"detail": "CSV file has no header row."}, status=status.HTTP_400_BAD_REQUEST)
+
+		required_columns = ['name']
+		missing = [c for c in required_columns if c not in reader.fieldnames]
+		if missing:
+			return Response({"detail": f"Missing required columns: {', '.join(missing)}."}, status=status.HTTP_400_BAD_REQUEST)
+
+		valid_statuses: Set[str] = {s.value for s in StatusEnum}
+		results = []
+		created_count = 0
+		failed_count = 0
+
+		for row_index, row in enumerate(reader, start=2):
+			row_result = {"row": row_index}
+			name = (row.get('name') or '').strip()
+			district_id_raw = (row.get('district_id') or '').strip()
+			district_name = (row.get('district_name') or '').strip()
+			county_id_raw = (row.get('county_id') or '').strip()
+			county_name = (row.get('county_name') or '').strip()
+			status_raw = (row.get('status') or '').strip()
+			moderation_comment = (row.get('moderation_comment') or '').strip()
+
+			if not name:
+				results.append({**row_result, "status": "error", "errors": {"name": ["This field is required."]}})
+				failed_count += 1
+				continue
+
+			district = None
+			if district_id_raw:
+				try:
+					district_id = int(district_id_raw)
+				except ValueError:
+					results.append({**row_result, "status": "error", "errors": {"district_id": ["Invalid integer."]}})
+					failed_count += 1
+					continue
+				district = District.objects.select_related('county').filter(id=district_id).first()
+			else:
+				if not district_name:
+					results.append({**row_result, "status": "error", "errors": {"district": ["Provide district_id or district_name."]}})
+					failed_count += 1
+					continue
+
+				county = None
+				if county_id_raw:
+					try:
+						county_id = int(county_id_raw)
+					except ValueError:
+						results.append({**row_result, "status": "error", "errors": {"county_id": ["Invalid integer."]}})
+						failed_count += 1
+						continue
+					county = County.objects.filter(id=county_id).first()
+				elif county_name:
+					county = County.objects.filter(name__iexact=county_name).first()
+				else:
+					results.append({**row_result, "status": "error", "errors": {"county": ["Provide county_id or county_name when using district_name."]}})
+					failed_count += 1
+					continue
+
+				if not county:
+					results.append({**row_result, "status": "error", "errors": {"county": ["County not found."]}})
+					failed_count += 1
+					continue
+
+				district = District.objects.select_related('county').filter(county=county, name__iexact=district_name).first()
+
+			if not district:
+				results.append({**row_result, "status": "error", "errors": {"district": ["District not found."]}})
+				failed_count += 1
+				continue
+
+			school_kwargs = {
+				"district": district,
+				"name": name,
+				"moderation_comment": moderation_comment,
+			}
+			if status_raw:
+				if status_raw not in valid_statuses:
+					results.append({**row_result, "status": "error", "errors": {"status": ["Invalid status value."]}})
+					failed_count += 1
+					continue
+				school_kwargs["status"] = status_raw
+
+			try:
+				with transaction.atomic():
+					school = School.objects.create(**school_kwargs)
+			except IntegrityError:
+				results.append({**row_result, "status": "error", "errors": {"name": ["School with this name already exists for the district."]}})
+				failed_count += 1
+				continue
+			except Exception as exc:
+				results.append({**row_result, "status": "error", "errors": {"non_field_errors": [str(exc)]}})
+				failed_count += 1
+				continue
+
+			created_count += 1
+			results.append({
+				**row_result,
+				"status": "created",
+				"school_id": school.id,
+				"name": school.name,
+				"district": district.name,
+				"county": district.county.name,
+			})
+
+		return Response({
+			"summary": {"total_rows": len(results), "created": created_count, "failed": failed_count},
+			"results": results,
+		})
+
+	@extend_schema(
+		operation_id="admin_bulk_schools_template",
+		description=(
+			"Download a sample CSV template for bulk school creation. "
+			"The file includes the correct header columns and example rows."
+		),
+		responses={200: OpenApiResponse(description="CSV file with header row and two sample schools.")},
+	)
+	@action(detail=False, methods=['get'], url_path='bulk-template')
+	def bulk_template(self, request):
+		"""Return a CSV template for bulk school creation."""
+		header = [
+			"name",
+			"district_id",
+			"district_name",
+			"county_id",
+			"county_name",
+			"status",
+			"moderation_comment",
+		]
+		example_rows = [
+			{
+				"name": "Afrilearn Academy",
+				"district_id": "",
+				"district_name": "Careysburg",
+				"county_id": "",
+				"county_name": "Montserrado",
+				"status": "APPROVED",
+				"moderation_comment": "Bulk import",
+			},
+			{
+				"name": "Gbarnga Public School",
+				"district_id": "",
+				"district_name": "Gbarnga",
+				"county_id": "",
+				"county_name": "Bong",
+				"status": "PENDING",
+				"moderation_comment": "",
+			},
+		]
+
+		buffer = io.StringIO()
+		writer = csv.DictWriter(buffer, fieldnames=header)
+		writer.writeheader()
+		for row in example_rows:
+			writer.writerow(row)
+
+		csv_content = buffer.getvalue()
+		response = HttpResponse(csv_content, content_type="text/csv")
+		response["Content-Disposition"] = "attachment; filename=schools_bulk_template.csv"
+		return response
 
 
 class AdminDashboardViewSet(viewsets.ViewSet):

@@ -301,6 +301,42 @@ class AdminBulkContentManagerUploadSerializer(serializers.Serializer):
         return value
 
 
+class AdminBulkCountyUploadSerializer(serializers.Serializer):
+    """Serializer for admin bulk county CSV uploads."""
+
+    file = serializers.FileField()
+
+    def validate_file(self, value):
+        name = getattr(value, "name", "") or ""
+        if not name.lower().endswith(".csv"):
+            raise serializers.ValidationError("Only CSV files with .csv extension are supported.")
+        return value
+
+
+class AdminBulkDistrictUploadSerializer(serializers.Serializer):
+    """Serializer for admin bulk district CSV uploads."""
+
+    file = serializers.FileField()
+
+    def validate_file(self, value):
+        name = getattr(value, "name", "") or ""
+        if not name.lower().endswith(".csv"):
+            raise serializers.ValidationError("Only CSV files with .csv extension are supported.")
+        return value
+
+
+class AdminBulkSchoolUploadSerializer(serializers.Serializer):
+    """Serializer for admin bulk school CSV uploads."""
+
+    file = serializers.FileField()
+
+    def validate_file(self, value):
+        name = getattr(value, "name", "") or ""
+        if not name.lower().endswith(".csv"):
+            raise serializers.ValidationError("Only CSV files with .csv extension are supported.")
+        return value
+
+
 class AdminContentManagerListSerializer(serializers.Serializer):
     """Read-only representation of a content manager for admin listing.
 
