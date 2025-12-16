@@ -136,9 +136,10 @@ class GeneralAssessmentGradeSerializer(serializers.ModelSerializer):
 
 
 class LessonAssessmentSerializer(serializers.ModelSerializer):
+	grade =  serializers.CharField(source='lesson.subject.grade', read_only=True)
 	class Meta:
 		model = LessonAssessment
-		fields = ['id', 'lesson', 'type', 'given_by', 'title', 'instructions', 'marks', 'due_at', 'status', 'moderation_comment', 'created_at', 'updated_at']
+		fields = ['id', 'lesson', 'type', 'given_by', 'title', 'grade', 'instructions', 'marks', 'due_at', 'status', 'moderation_comment', 'created_at', 'updated_at']
 		read_only_fields = ['created_at', 'updated_at']
 
 
