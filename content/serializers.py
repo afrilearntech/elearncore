@@ -233,8 +233,11 @@ class QuestionCreateSerializer(serializers.Serializer):
 
 		qtype = attrs.get("type")
 		options = attrs.get("options") or []
-		if qtype in {QTypeEnum.MULTIPLE_CHOICE.value, QTypeEnum.TRUE_FALSE.value} and not options:
+		if qtype in {QTypeEnum.MULTIPLE_CHOICE.value} and not options:
 			raise serializers.ValidationError({"options": ["Options are required for this question type."]})
+		if qtype in {QTypeEnum.TRUE_FALSE.value}:
+			# For true/false, we auto-generate options
+			attrs["options"] = ["True", "False"]
 
 		attrs["general_assessment"] = general_assessment
 		attrs["lesson_assessment"] = lesson_assessment
