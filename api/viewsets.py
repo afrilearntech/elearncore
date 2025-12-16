@@ -3390,6 +3390,29 @@ class DashboardViewSet(viewsets.ViewSet):
 		return Response(data)
 
 
+class KidsAssessmentInfoSerializer(serializers.Serializer):
+	id = serializers.IntegerField()
+	title = serializers.CharField()
+	type = serializers.CharField()
+
+
+class KidsAssessmentOptionSerializer(serializers.Serializer):
+	id = serializers.IntegerField()
+	value = serializers.CharField()
+
+
+class KidsAssessmentQuestionSerializer(serializers.Serializer):
+	id = serializers.IntegerField()
+	type = serializers.CharField()
+	question = serializers.CharField()
+	options = KidsAssessmentOptionSerializer(many=True)
+
+
+class KidsAssessmentQuestionsResponseSerializer(serializers.Serializer):
+	assessment = KidsAssessmentInfoSerializer()
+	questions = KidsAssessmentQuestionSerializer(many=True)
+
+
 class KidsViewSet(viewsets.ViewSet):
 	"""Endpoints tailored for younger students (grades 1–3)."""
 	permission_classes = [permissions.IsAuthenticated]
@@ -4223,7 +4246,32 @@ class KidsViewSet(viewsets.ViewSet):
 			"Get questions and options for a specific assessment. "
 			"Pass either ?general_id=<id> or ?lesson_id=<id>."
 		),
-		responses={200: None},
+		parameters=[
+			OpenApiParameter(
+				name="general_id",
+				location=OpenApiParameter.QUERY,
+				type=int,
+				required=False,
+				description=(
+					"GeneralAssessment ID. Provide exactly one of general_id or lesson_id."
+				),
+			),
+			OpenApiParameter(
+				name="lesson_id",
+				location=OpenApiParameter.QUERY,
+				type=int,
+				required=False,
+				description=(
+					"LessonAssessment ID. Provide exactly one of general_id or lesson_id."
+				),
+			),
+		],
+		responses={
+			200: OpenApiResponse(
+				response=KidsAssessmentQuestionsResponseSerializer,
+				description="Assessment questions payload.",
+			),
+		},
 		examples=[
 			OpenApiExample(
 				name="KidsAssessmentQuestionsExample",
@@ -4242,6 +4290,7 @@ class KidsViewSet(viewsets.ViewSet):
 						},
 					],
 				},
+				response_only=True,
 			),
 		],
 	)
