@@ -26,11 +26,13 @@ from content.models import (
 	GeneralAssessment, GeneralAssessmentGrade, LessonAssessmentGrade,
 	Question,
 	GameModel, Activity, AssessmentSolution, GamePlay,
+	LessonAssessmentSolution,
 )
 from forum.models import Chat
 from django.core.cache import cache
 from content.serializers import (
 	AssessmentSolutionSerializer,
+	LessonAssessmentSolutionSerializer,
 	SubjectSerializer,
 	SubjectWriteSerializer,
 	TopicSerializer,
@@ -3904,6 +3906,11 @@ class KidsViewSet(viewsets.ViewSet):
 			.filter(assessment__in=general_qs, student=student)
 		)
 		general_solution_map = {sol.assessment_id: sol for sol in general_solutions}
+		lesson_solutions = list(
+			LessonAssessmentSolution.objects
+			.filter(lesson_assessment__in=lesson_qs, student=student)
+		)
+		lesson_solution_map = {sol.lesson_assessment_id: sol for sol in lesson_solutions}
 		lesson_grade_ids = set(
 			LessonAssessmentGrade.objects.filter(
 				lesson_assessment__in=lesson_qs,
@@ -3943,7 +3950,8 @@ class KidsViewSet(viewsets.ViewSet):
 			})
 
 		for la in lesson_qs:
-			status = "submitted" if la.id in lesson_grade_ids else "pending"
+			lesson_solution_obj = lesson_solution_map.get(la.id)
+			status = "submitted" if (la.id in lesson_grade_ids or lesson_solution_obj is not None) else "pending"
 			total += 1
 			if status == "submitted":
 				submitted += 1
@@ -3961,9 +3969,8 @@ class KidsViewSet(viewsets.ViewSet):
 				"instructions": la.instructions,
 				"type": "lesson",
 				"status": status,
-				"solution": AssessmentSolutionSerializer(solution_obj).data if solution_obj else None,
+				"solution": LessonAssessmentSolutionSerializer(lesson_solution_obj).data if lesson_solution_obj else None,
 				"due_at": la.due_at.isoformat() if la.due_at else None,
-				"status": status,
 			})
 
 		stats = {
@@ -4448,8 +4455,7 @@ class KidsViewSet(viewsets.ViewSet):
 		- solution: free-text answer (optional)
 		- attachment: file upload (optional)
 
-		Exactly one of general_id or lesson_id must be provided. Currently,
-		this implementation stores solutions only for GeneralAssessment.
+		Exactly one of general_id or lesson_id must be provided.
 		"""
 		user: User = request.user
 		student = getattr(user, 'student', None)
@@ -4492,10 +4498,31 @@ class KidsViewSet(viewsets.ViewSet):
 				"solution_id": solution_obj.id,
 			})
 
-		# Placeholder for future LessonAssessment solution handling
-		return Response({"detail": "Lesson assessment solutions are not yet supported."}, status=400)
+		lesson_assessment = LessonAssessment.objects.filter(id=lesson_id).first()
+		if not lesson_assessment:
+			return Response({"detail": "Lesson assessment not found."}, status=404)
 
+		solution_obj, created = LessonAssessmentSolution.objects.get_or_create(
+			lesson_assessment=lesson_assessment,
+			student=student,
+			defaults={
+				'solution': text_solution or "",
+			}
+		)
+		if not created:
+			if text_solution:
+				solution_obj.solution = text_solution
+			if attachment is not None:
+				solution_obj.attachment = attachment
+			solution_obj.save()
+		elif attachment is not None:
+			solution_obj.attachment = attachment
+			solution_obj.save()
 
+		return Response({
+			"detail": "Solution submitted.",
+			"solution_id": solution_obj.id,
+		})
 
 
 class TeacherViewSet(viewsets.ViewSet):

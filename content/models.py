@@ -207,6 +207,17 @@ class LessonAssessment(TimestampedModel):
 		]
 
 
+class LessonAssessmentSolution(TimestampedModel):
+	lesson_assessment = models.ForeignKey(LessonAssessment, on_delete=models.CASCADE, related_name='solutions')
+	student = models.ForeignKey('accounts.Student', on_delete=models.CASCADE, related_name='lesson_assessment_solutions')
+	solution = models.TextField(blank=True, default="")
+	attachment = models.FileField(upload_to='lesson_assessment_solutions/')
+	submitted_at = models.DateTimeField(auto_now_add=True)
+
+	def __str__(self) -> str:
+		return f"Solution by {getattr(self.student.profile, 'name', 'Student')} for {self.lesson_assessment.title}"
+
+
 class LessonAssessmentGrade(TimestampedModel):
 	lesson_assessment = models.ForeignKey(LessonAssessment, on_delete=models.CASCADE, related_name='grades')
 	student = models.ForeignKey('accounts.Student', on_delete=models.CASCADE, related_name='lesson_assessment_grades')
