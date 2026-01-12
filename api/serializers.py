@@ -86,6 +86,9 @@ class ContentAssessmentItemSerializer(serializers.Serializer):
     subject_id = serializers.IntegerField(allow_null=True, required=False)
     subject_name = serializers.CharField(allow_null=True, required=False)
     given_by_id = serializers.IntegerField(allow_null=True, required=False)
+    ai_recommended = serializers.BooleanField(required=False)
+    is_targeted = serializers.BooleanField(required=False)
+    target_student_id = serializers.IntegerField(allow_null=True, required=False)
 
 
 class ContentDashboardCountsSerializer(serializers.Serializer):

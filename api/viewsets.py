@@ -48,6 +48,7 @@ from content.serializers import (
 )
 from agentic.models import AIRecommendation, AIAbuseReport
 from agentic.serializers import AIRecommendationSerializer, AIAbuseReportSerializer
+from agentic.services import generate_targeted_assessments_for_student
 from knox.models import AuthToken
 from accounts.models import User, Student, Teacher, Parent, School, County, District
 from accounts.serializers import (
@@ -544,6 +545,9 @@ class ParentAssessmentItemSerializer(serializers.Serializer):
 	assessment_status = serializers.CharField()
 	start_date = serializers.DateTimeField()
 	due_date = serializers.DateTimeField(allow_null=True)
+	ai_recommended = serializers.BooleanField(required=False)
+	is_targeted = serializers.BooleanField(required=False)
+	target_student_id = serializers.IntegerField(allow_null=True, required=False)
 
 
 class ParentAssessmentsSummarySerializer(serializers.Serializer):
@@ -969,6 +973,9 @@ class ParentViewSet(viewsets.ViewSet):
 		for la in lesson_assessments:
 			subject = getattr(getattr(la.lesson, 'subject', None), 'name', None)
 			for student in students:
+				# Skip targeted lesson assessments that are meant for a different student
+				if getattr(la, 'is_targeted', False) and getattr(la, 'target_student_id', None) != student.id:
+					continue
 				grade_rec = lag_map.get((la.id, student.id))
 				child_score = float(grade_rec.score) if grade_rec else None
 				status_label = _status_for(child_score, la.due_at, now)
@@ -988,6 +995,9 @@ class ParentViewSet(viewsets.ViewSet):
 					"assessment_status": status_label,
 					"start_date": la.created_at,
 					"due_date": la.due_at,
+					"ai_recommended": bool(getattr(la, 'ai_recommended', False)),
+					"is_targeted": bool(getattr(la, 'is_targeted', False)),
+					"target_student_id": getattr(la.target_student, 'id', None),
 				})
 
 		# General assessments: not subject-specific in the model; we keep subject as None
@@ -999,6 +1009,9 @@ class ParentViewSet(viewsets.ViewSet):
 
 		for ga in general_assessments:
 			for student in students:
+				# Skip targeted assessments that are meant for a different student
+				if getattr(ga, 'is_targeted', False) and getattr(ga, 'target_student_id', None) != student.id:
+					continue
 				grade_rec = gag_map.get((ga.id, student.id))
 				child_score = float(grade_rec.score) if grade_rec else None
 				status_label = _status_for(child_score, ga.due_at, now)
@@ -1018,6 +1031,9 @@ class ParentViewSet(viewsets.ViewSet):
 					"assessment_status": status_label,
 					"start_date": ga.created_at,
 					"due_date": ga.due_at,
+					"ai_recommended": bool(getattr(ga, 'ai_recommended', False)),
+					"is_targeted": bool(getattr(ga, 'is_targeted', False)),
+					"target_student_id": getattr(ga.target_student, 'id', None),
 				})
 
 		return Response({
@@ -1522,12 +1538,47 @@ class ContentViewSet(viewsets.ViewSet):
 		request=GeneralAssessmentSerializer,
 		responses={200: GeneralAssessmentSerializer(many=True)},
 		description="List or create general assessments for content management.",
+		parameters=[
+			OpenApiParameter(
+				name="ai_only",
+				required=False,
+				location=OpenApiParameter.QUERY,
+				description="If set to 1/true, only AI-recommended assessments are returned.",
+				type=bool,
+			),
+			OpenApiParameter(
+				name="targeted_only",
+				required=False,
+				location=OpenApiParameter.QUERY,
+				description="If set to 1/true, only targeted assessments are returned.",
+				type=bool,
+			),
+			OpenApiParameter(
+				name="student_id",
+				required=False,
+				location=OpenApiParameter.QUERY,
+				description="Filter targeted assessments by target student id.",
+				type=int,
+			),
+		],
 	)
 	@action(detail=False, methods=['get', 'post'], url_path='general-assessments')
 	def general_assessments(self, request):
 		"""List or create general assessments."""
 		if request.method == 'GET':
 			qs = GeneralAssessment.objects.select_related('given_by').all().order_by('-created_at')
+			ai_only = request.query_params.get('ai_only')
+			if ai_only in {'1', 'true', 'True'}:
+				qs = qs.filter(ai_recommended=True)
+			targeted_only = request.query_params.get('targeted_only')
+			if targeted_only in {'1', 'true', 'True'}:
+				qs = qs.filter(is_targeted=True)
+			student_id = request.query_params.get('student_id')
+			if student_id:
+				try:
+					qs = qs.filter(target_student_id=int(student_id))
+				except ValueError:
+					qs = qs.none()
 			user = request.user
 			if user and user.is_authenticated and IsContentCreator().has_permission(request, self) and not IsContentValidator().has_permission(request, self):
 				# For creator role, restrict to assessments created by them.
@@ -1552,12 +1603,47 @@ class ContentViewSet(viewsets.ViewSet):
 		request=LessonAssessmentSerializer,
 		responses={200: LessonAssessmentSerializer(many=True)},
 		description="List or create lesson assessments for content management.",
+		parameters=[
+			OpenApiParameter(
+				name="ai_only",
+				required=False,
+				location=OpenApiParameter.QUERY,
+				description="If set to 1/true, only AI-recommended assessments are returned.",
+				type=bool,
+			),
+			OpenApiParameter(
+				name="targeted_only",
+				required=False,
+				location=OpenApiParameter.QUERY,
+				description="If set to 1/true, only targeted assessments are returned.",
+				type=bool,
+			),
+			OpenApiParameter(
+				name="student_id",
+				required=False,
+				location=OpenApiParameter.QUERY,
+				description="Filter targeted assessments by target student id.",
+				type=int,
+			),
+		],
 	)
 	@action(detail=False, methods=['get', 'post'], url_path='lesson-assessments')
 	def lesson_assessments(self, request):
 		"""List or create lesson assessments."""
 		if request.method == 'GET':
 			qs = LessonAssessment.objects.select_related('lesson').all().order_by('-created_at')
+			ai_only = request.query_params.get('ai_only')
+			if ai_only in {'1', 'true', 'True'}:
+				qs = qs.filter(ai_recommended=True)
+			targeted_only = request.query_params.get('targeted_only')
+			if targeted_only in {'1', 'true', 'True'}:
+				qs = qs.filter(is_targeted=True)
+			student_id = request.query_params.get('student_id')
+			if student_id:
+				try:
+					qs = qs.filter(target_student_id=int(student_id))
+				except ValueError:
+					qs = qs.none()
 			user = request.user
 			if user and user.is_authenticated and IsContentCreator().has_permission(request, self) and not IsContentValidator().has_permission(request, self):
 				teacher = getattr(user, 'teacher', None)
@@ -1693,6 +1779,9 @@ class ContentViewSet(viewsets.ViewSet):
 				"due_at": ga.due_at.isoformat() if ga.due_at else None,
 				"grade": ga.grade,
 				"given_by_id": ga.given_by_id,
+				"ai_recommended": bool(getattr(ga, 'ai_recommended', False)),
+				"is_targeted": bool(getattr(ga, 'is_targeted', False)),
+				"target_student_id": getattr(ga.target_student, 'id', None),
 			}
 			for ga in general_qs
 		]
@@ -1711,6 +1800,9 @@ class ContentViewSet(viewsets.ViewSet):
 				"subject_id": getattr(getattr(la.lesson, 'subject', None), 'id', None),
 				"subject_name": getattr(getattr(la.lesson, 'subject', None), 'name', None),
 				"given_by_id": la.given_by_id,
+				"ai_recommended": bool(getattr(la, 'ai_recommended', False)),
+				"is_targeted": bool(getattr(la, 'is_targeted', False)),
+				"target_student_id": getattr(la.target_student, 'id', None),
 			}
 			for la in lesson_qs
 		]
@@ -3885,14 +3977,19 @@ class KidsViewSet(viewsets.ViewSet):
 		# General assessments for grade or global
 		general_qs = (
 			GeneralAssessment.objects
-			.filter(models.Q(grade__isnull=True) | models.Q(grade=student.grade))
+			.filter(
+				(models.Q(grade__isnull=True) | models.Q(grade=student.grade))
+				& (models.Q(is_targeted=False) | models.Q(target_student=student))
+			)
 			.order_by('due_at', 'title')
 		)
 
 		# Lesson assessments for lessons in this grade
 		lesson_qs = (
 			LessonAssessment.objects
-			.filter(lesson__subject__grade=student.grade)
+			.filter(
+				lesson__subject__grade=student.grade,
+			).filter(models.Q(is_targeted=False) | models.Q(target_student=student))
 			.select_related('lesson')
 			.order_by('due_at', 'title')
 		)
@@ -4009,14 +4106,19 @@ class KidsViewSet(viewsets.ViewSet):
 		# General assessments for grade or global
 		general_qs = (
 			GeneralAssessment.objects
-			.filter(models.Q(grade__isnull=True) | models.Q(grade=student.grade))
+			.filter(
+				(models.Q(grade__isnull=True) | models.Q(grade=student.grade))
+				& (models.Q(is_targeted=False) | models.Q(target_student=student))
+			)
 			.order_by('due_at', 'title')
 		)
 
 		# Lesson assessments via lessons in student's grade
 		lesson_qs = (
 			LessonAssessment.objects
-			.filter(lesson__subject__grade=student.grade)
+			.filter(
+				lesson__subject__grade=student.grade,
+			).filter(models.Q(is_targeted=False) | models.Q(target_student=student))
 			.select_related('lesson')
 			.order_by('due_at', 'title')
 		)
@@ -4219,12 +4321,17 @@ class KidsViewSet(viewsets.ViewSet):
 
 		general_qs = (
 			GeneralAssessment.objects
-			.filter(models.Q(grade__isnull=True) | models.Q(grade=student.grade))
+			.filter(
+				(models.Q(grade__isnull=True) | models.Q(grade=student.grade))
+				& (models.Q(is_targeted=False) | models.Q(target_student=student))
+			)
 			.order_by('title')
 		)
 		lesson_qs = (
 			LessonAssessment.objects
-			.filter(lesson__subject__grade=student.grade)
+			.filter(
+				lesson__subject__grade=student.grade,
+			).filter(models.Q(is_targeted=False) | models.Q(target_student=student))
 			.select_related('lesson')
 			.order_by('title')
 		)
@@ -4650,6 +4757,29 @@ class TeacherViewSet(viewsets.ViewSet):
 	@extend_schema(
 		description="List general assessments created by this teacher.",
 		responses={200: GeneralAssessmentSerializer(many=True)},
+		parameters=[
+			OpenApiParameter(
+				name="ai_only",
+				required=False,
+				location=OpenApiParameter.QUERY,
+				description="If set to 1/true, only AI-recommended assessments are returned.",
+				type=bool,
+			),
+			OpenApiParameter(
+				name="targeted_only",
+				required=False,
+				location=OpenApiParameter.QUERY,
+				description="If set to 1/true, only targeted assessments are returned.",
+				type=bool,
+			),
+			OpenApiParameter(
+				name="student_id",
+				required=False,
+				location=OpenApiParameter.QUERY,
+				description="Filter targeted assessments by target student id.",
+				type=int,
+			),
+		],
 	)
 	@action(detail=False, methods=['get'], url_path='general-assessments')
 	def my_general_assessments(self, request):
@@ -4658,6 +4788,18 @@ class TeacherViewSet(viewsets.ViewSet):
 			return deny
 		teacher = request.user.teacher
 		qs = GeneralAssessment.objects.filter(given_by=teacher).order_by('-created_at')
+		ai_only = request.query_params.get('ai_only')
+		if ai_only in {'1', 'true', 'True'}:
+			qs = qs.filter(ai_recommended=True)
+		targeted_only = request.query_params.get('targeted_only')
+		if targeted_only in {'1', 'true', 'True'}:
+			qs = qs.filter(is_targeted=True)
+		student_id = request.query_params.get('student_id')
+		if student_id:
+			try:
+				qs = qs.filter(target_student_id=int(student_id))
+			except ValueError:
+				qs = qs.none()
 		return Response(GeneralAssessmentSerializer(qs, many=True).data)
 
 	@extend_schema(
@@ -4679,6 +4821,29 @@ class TeacherViewSet(viewsets.ViewSet):
 	@extend_schema(
 		description="List lesson assessments created by this teacher.",
 		responses={200: LessonAssessmentSerializer(many=True)},
+		parameters=[
+			OpenApiParameter(
+				name="ai_only",
+				required=False,
+				location=OpenApiParameter.QUERY,
+				description="If set to 1/true, only AI-recommended assessments are returned.",
+				type=bool,
+			),
+			OpenApiParameter(
+				name="targeted_only",
+				required=False,
+				location=OpenApiParameter.QUERY,
+				description="If set to 1/true, only targeted assessments are returned.",
+				type=bool,
+			),
+			OpenApiParameter(
+				name="student_id",
+				required=False,
+				location=OpenApiParameter.QUERY,
+				description="Filter targeted assessments by target student id.",
+				type=int,
+			),
+		],
 	)
 	@action(detail=False, methods=['get'], url_path='lesson-assessments')
 	def my_lesson_assessments(self, request):
@@ -4687,6 +4852,18 @@ class TeacherViewSet(viewsets.ViewSet):
 			return deny
 		teacher = request.user.teacher
 		qs = LessonAssessment.objects.filter(given_by=teacher).select_related('lesson').order_by('-created_at')
+		ai_only = request.query_params.get('ai_only')
+		if ai_only in {'1', 'true', 'True'}:
+			qs = qs.filter(ai_recommended=True)
+		targeted_only = request.query_params.get('targeted_only')
+		if targeted_only in {'1', 'true', 'True'}:
+			qs = qs.filter(is_targeted=True)
+		student_id = request.query_params.get('student_id')
+		if student_id:
+			try:
+				qs = qs.filter(target_student_id=int(student_id))
+			except ValueError:
+				qs = qs.none()
 		return Response(LessonAssessmentSerializer(qs, many=True).data)
 
 	@extend_schema(
@@ -4845,6 +5022,42 @@ class TeacherViewSet(viewsets.ViewSet):
 			"Your Liberia eLearn student account has been approved",
 		)
 		return Response(StudentSerializer(student).data)
+
+	@extend_schema(
+		description=(
+			"Use AI to generate targeted quizzes/assignments for a specific student "
+			"based on their recent activity. Returns the created assessments."
+		),
+		request=None,
+		responses={
+			200: OpenApiResponse(
+				description="AI-generated targeted assessments for the student.",
+				response=serializers.DictField(),
+			),
+		},
+	)
+	@action(detail=True, methods=['post'], url_path='generate-ai-assessments')
+	def generate_ai_assessments(self, request, pk=None):
+		"""Generate AI-targeted assessments (quizzes/assignments) for a student.
+
+		The "pk" here refers to the Student's primary key.
+		"""
+		deny = self._require_teacher(request)
+		if deny:
+			return deny
+		teacher = request.user.teacher
+		try:
+			student = Student.objects.get(pk=pk, school=teacher.school)
+		except Student.DoesNotExist:
+			return Response({"detail": "Student not found in your school."}, status=404)
+
+		result = generate_targeted_assessments_for_student(student)
+		general_ser = GeneralAssessmentSerializer(result.get("general", []), many=True)
+		lesson_ser = LessonAssessmentSerializer(result.get("lesson", []), many=True)
+		return Response({
+			"general_assessments": general_ser.data,
+			"lesson_assessments": lesson_ser.data,
+		})
 
 	@extend_schema(
 		description="Reject a pending student in the teacher's school.",

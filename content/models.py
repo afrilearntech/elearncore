@@ -151,6 +151,9 @@ class GeneralAssessment(TimestampedModel):
 	due_at = models.DateTimeField(null=True, blank=True)
 	# Optional grade scoping; when null, assessment is global
 	grade = models.CharField(max_length=20, choices=[(lvl.value, lvl.value) for lvl in StudentLevel], null=True, blank=True)
+	ai_recommended = models.BooleanField(default=False, help_text="Created or recommended by AI")
+	is_targeted = models.BooleanField(default=False, help_text="If true, this assessment targets a particular student")
+	target_student = models.ForeignKey('accounts.Student', on_delete=models.SET_NULL, null=True, blank=True, related_name='targeted_general_assessments')
 	moderation_comment = models.TextField(blank=True, default="")
 	status = models.CharField(max_length=30, choices=[(s.value, s.value) for s in StatusEnum], default=StatusEnum.PENDING.value)
 
@@ -161,6 +164,7 @@ class GeneralAssessment(TimestampedModel):
 		indexes = [
 			models.Index(fields=["due_at"]),
 			models.Index(fields=["grade", "due_at"]),
+			models.Index(fields=["is_targeted", "target_student"]),
 		]
 
 class AssessmentSolution(TimestampedModel):
@@ -194,6 +198,9 @@ class LessonAssessment(TimestampedModel):
 	instructions = models.TextField(blank=True, default="")
 	marks = models.FloatField(default=0.0)
 	due_at = models.DateTimeField(null=True, blank=True)
+	ai_recommended = models.BooleanField(default=False, help_text="Created or recommended by AI")
+	is_targeted = models.BooleanField(default=False, help_text="If true, this assessment targets a particular student")
+	target_student = models.ForeignKey('accounts.Student', on_delete=models.SET_NULL, null=True, blank=True, related_name='targeted_lesson_assessments')
 	moderation_comment = models.TextField(blank=True, default="")
 	status = models.CharField(max_length=30, choices=[(s.value, s.value) for s in StatusEnum], default=StatusEnum.PENDING.value)
 
@@ -204,6 +211,7 @@ class LessonAssessment(TimestampedModel):
 		indexes = [
 			models.Index(fields=["due_at"]),
 			models.Index(fields=["lesson", "due_at"]),
+			models.Index(fields=["is_targeted", "target_student"]),
 		]
 
 

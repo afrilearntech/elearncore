@@ -116,7 +116,11 @@ class TakeLessonSerializer(serializers.ModelSerializer):
 class GeneralAssessmentSerializer(serializers.ModelSerializer):
 	class Meta:
 		model = GeneralAssessment
-		fields = ['id', 'title', 'type', 'given_by', 'instructions', 'marks', 'due_at', 'grade', 'status', 'moderation_comment', 'created_at', 'updated_at']
+		fields = [
+			'id', 'title', 'type', 'given_by', 'instructions', 'marks', 'due_at', 'grade',
+			'ai_recommended', 'is_targeted', 'target_student',
+			'status', 'moderation_comment', 'created_at', 'updated_at',
+		]
 		read_only_fields = ['created_at', 'updated_at']
 
 
@@ -147,7 +151,11 @@ class LessonAssessmentSerializer(serializers.ModelSerializer):
 	grade =  serializers.CharField(source='lesson.subject.grade', read_only=True)
 	class Meta:
 		model = LessonAssessment
-		fields = ['id', 'lesson', 'type', 'given_by', 'title', 'grade', 'instructions', 'marks', 'due_at', 'status', 'moderation_comment', 'created_at', 'updated_at']
+		fields = [
+			'id', 'lesson', 'type', 'given_by', 'title', 'grade', 'instructions', 'marks', 'due_at',
+			'ai_recommended', 'is_targeted', 'target_student',
+			'status', 'moderation_comment', 'created_at', 'updated_at',
+		]
 		read_only_fields = ['created_at', 'updated_at']
 
 
