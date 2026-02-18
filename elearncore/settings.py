@@ -24,6 +24,9 @@ if ENVIRONMENT in ["LIVE", "PRODUCTION", "PROD"]:
     CSRF_TRUSTED_ORIGINS = [
         "https://elearnapi.afrilearntech.com",
         "https://elapi.afrilearntech.com",
+        "https://digitallearningapi.moe.gov.lr",
+        "https://digitallearning.moe.gov.lr",
+        "https://*.afrilearntech.com",
     ]
 
 
