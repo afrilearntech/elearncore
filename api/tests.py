@@ -156,3 +156,20 @@ class KidsSubjectsAndLessonsProgressionTests(TestCase):
 		self.assertFalse(third['is_completed'])
 		self.assertEqual(third['progression_status'], 'locked')
 		self.assertIsNone(third['next_video_id'])
+
+	def test_lessons_list_hides_locked_lessons_for_students(self):
+		resp = self.client.get('/api-v1/lessons/')
+		self.assertEqual(resp.status_code, 200)
+		returned_ids = [item['id'] for item in resp.json()]
+		self.assertEqual(returned_ids, [self.lesson_1.id, self.lesson_2.id])
+
+	def test_locked_lesson_detail_is_forbidden(self):
+		resp = self.client.get(f'/api-v1/lessons/{self.lesson_3.id}/')
+		self.assertEqual(resp.status_code, 403)
+		self.assertIn('Complete the previous lesson', resp.json()['detail'])
+
+	def test_locked_lesson_cannot_be_started_directly(self):
+		resp = self.client.post('/api-v1/taken-lessons/', {'lesson': self.lesson_3.id}, format='json')
+		self.assertEqual(resp.status_code, 403)
+		self.assertIn('Complete the previous lesson', resp.json()['detail'])
+		self.assertFalse(TakeLesson.objects.filter(student=self.student, lesson=self.lesson_3).exists())

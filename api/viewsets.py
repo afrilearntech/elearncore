@@ -171,6 +171,104 @@ def _user_role_in(user, roles: Iterable[str]) -> bool:
 		return False
 
 
+LESSON_LOCK_REASON = "Complete the previous lesson and submit all of its assessments to unlock this lesson."
+
+
+def _build_student_lesson_progression(student: Student) -> dict:
+	"""Build ordered lesson progression state for a student in one batched pass."""
+	lessons = list(
+		LessonResource.objects
+		.filter(
+			subject__grade=student.grade,
+			subject__status=StatusEnum.APPROVED.value,
+			status=StatusEnum.APPROVED.value,
+		)
+		.select_related('subject', 'topic', 'period')
+		.order_by(
+			'subject__name',
+			'period__start_month',
+			'period__end_month',
+			'topic__name',
+			'title',
+			'id',
+		)
+	)
+
+	lesson_ids = [lesson.id for lesson in lessons]
+	if not lesson_ids:
+		return {
+			"lessons": [],
+			"states": {},
+		}
+
+	taken_lesson_ids = set(
+		TakeLesson.objects
+		.filter(student=student, lesson_id__in=lesson_ids)
+		.values_list('lesson_id', flat=True)
+	)
+
+	visible_lesson_assessments = LessonAssessment.objects.filter(
+		lesson_id__in=lesson_ids,
+		status=StatusEnum.APPROVED.value,
+	).filter(
+		models.Q(is_targeted=False) | models.Q(target_student=student)
+	)
+
+	assessment_totals = {
+		row['lesson_id']: row['total']
+		for row in visible_lesson_assessments
+		.values('lesson_id')
+		.annotate(total=Count('id'))
+	}
+	completed_assessment_totals = {
+		row['lesson_assessment__lesson_id']: row['total']
+		for row in (
+			LessonAssessmentSolution.objects
+			.filter(student=student, lesson_assessment__in=visible_lesson_assessments)
+			.values('lesson_assessment__lesson_id')
+			.annotate(total=Count('lesson_assessment_id', distinct=True))
+		)
+	}
+
+	states = {}
+	previous_lesson_completed = True
+	for index, lesson in enumerate(lessons):
+		assessments_total = int(assessment_totals.get(lesson.id, 0))
+		assessments_completed = int(completed_assessment_totals.get(lesson.id, 0))
+		is_taken = lesson.id in taken_lesson_ids
+		is_completed = is_taken and assessments_completed >= assessments_total
+		is_locked = not previous_lesson_completed
+
+		if is_locked:
+			progression_status = "locked"
+		elif is_completed:
+			progression_status = "completed"
+		elif is_taken:
+			progression_status = "in_progress"
+		else:
+			progression_status = "available"
+
+		next_lesson = lessons[index + 1] if index + 1 < len(lessons) else None
+		states[lesson.id] = {
+			"assessments_total": assessments_total,
+			"assessments_completed": assessments_completed,
+			"is_taken": is_taken,
+			"is_completed": is_completed,
+			"is_locked": is_locked,
+			"progression_status": progression_status,
+			"next_video_id": next_lesson.id if next_lesson else None,
+			"lock_reason": LESSON_LOCK_REASON if is_locked and index > 0 else None,
+			"sequence_position": index + 1,
+		}
+
+		previous_lesson_completed = is_completed
+
+	return {
+		"lessons": lessons,
+		"states": states,
+	}
+
+
 class CanCreateContent(permissions.BasePermission):
 	"""Allow writes if the user has a content-creation capable role."""
 	allowed_roles = {
@@ -390,6 +488,7 @@ class LessonResourceViewSet(viewsets.ModelViewSet):
 	filter_backends = [filters.SearchFilter, filters.OrderingFilter]
 	search_fields = ['title', 'description']
 	ordering_fields = ['created_at', 'updated_at', 'title']
+	_student_progression_cache = None
 
 	@method_decorator(cache_page(60 * 2), name='list')
 	@method_decorator(cache_page(60 * 5), name='retrieve')
@@ -403,6 +502,48 @@ class LessonResourceViewSet(viewsets.ModelViewSet):
 			return [permissions.IsAuthenticatedOrReadOnly()]
 		else:
 			return [permissions.IsAuthenticated(), CanCreateContent()]
+
+	def _get_student_progression(self, student: Student) -> dict:
+		if self._student_progression_cache is None:
+			self._student_progression_cache = _build_student_lesson_progression(student)
+		return self._student_progression_cache
+
+	def get_queryset(self):
+		qs = super().get_queryset()
+		student = getattr(getattr(self, 'request', None), 'user', None)
+		student = getattr(student, 'student', None)
+		if not student:
+			return qs
+
+		progression = self._get_student_progression(student)
+		allowed_lesson_ids = [lesson_id for lesson_id, state in progression['states'].items() if not state['is_locked']]
+		if not allowed_lesson_ids:
+			return qs.none()
+		return qs.filter(id__in=allowed_lesson_ids)
+
+	def retrieve(self, request, *args, **kwargs):
+		student = getattr(request.user, 'student', None)
+		if student:
+			lesson = (
+				LessonResource.objects
+				.select_related('subject', 'topic', 'period', 'created_by')
+				.filter(pk=kwargs.get('pk'))
+				.first()
+			)
+			if lesson is None:
+				return Response({"detail": "Not found."}, status=404)
+
+			progression = self._get_student_progression(student)
+			state = progression['states'].get(lesson.id)
+			if state is None:
+				return Response({"detail": "Not found."}, status=404)
+			if state['is_locked']:
+				return Response({"detail": LESSON_LOCK_REASON}, status=403)
+
+			serializer = self.get_serializer(lesson)
+			return Response(serializer.data)
+
+		return super().retrieve(request, *args, **kwargs)
 
 	def perform_create(self, serializer):
 		lesson = serializer.save(created_by=self.request.user, status=StatusEnum.DRAFT.value)
@@ -466,9 +607,32 @@ class TakeLessonViewSet(viewsets.ModelViewSet):
 			return qs.filter(student=student)
 		return TakeLesson.objects.none()
 
+	def create(self, request, *args, **kwargs):
+		student = getattr(request.user, 'student', None)
+		if student is None:
+			return super().create(request, *args, **kwargs)
+
+		payload = request.data.copy()
+		payload['student'] = student.id
+		serializer = self.get_serializer(data=payload)
+		serializer.is_valid(raise_exception=True)
+
+		lesson = serializer.validated_data['lesson']
+		progression = _build_student_lesson_progression(student)
+		state = progression['states'].get(lesson.id)
+		if state is None:
+			return Response({"detail": "Lesson not available for this student."}, status=404)
+		if state['is_locked']:
+			return Response({"detail": LESSON_LOCK_REASON}, status=403)
+
+		self.perform_create(serializer)
+		headers = self.get_success_headers(serializer.data)
+		return Response(serializer.data, status=status.HTTP_201_CREATED, headers=headers)
+
 	def perform_create(self, serializer):
 		"""Create a TakeLesson and log an activity for the student."""
-		instance: TakeLesson = serializer.save()
+		request_student = getattr(self.request.user, 'student', None)
+		instance: TakeLesson = serializer.save(student=request_student) if request_student else serializer.save()
 		user = getattr(getattr(instance, 'student', None), 'profile', None)
 		if user is not None:
 			Activity.objects.create(
@@ -3945,83 +4109,17 @@ class KidsViewSet(viewsets.ViewSet):
 			for s in subjects_qs
 		]
 
-		# Lessons are ordered into a single progression stream across subjects.
-		lessons = list(
-			LessonResource.objects
-			.filter(
-				subject__grade=student.grade,
-				subject__status=StatusEnum.APPROVED.value,
-				status=StatusEnum.APPROVED.value,
-			)
-			.select_related('subject', 'topic', 'period')
-			.order_by(
-				'subject__name',
-				'period__start_month',
-				'period__end_month',
-				'topic__name',
-				'title',
-				'id',
-			)
-		)
-
-		lesson_ids = [lesson.id for lesson in lessons]
-		if not lesson_ids:
+		progression = _build_student_lesson_progression(student)
+		lessons = progression['lessons']
+		if not lessons:
 			return Response({
 				"subjects": subjects_payload,
 				"lessons": [],
 			})
 
-		taken_lesson_ids = set(
-			TakeLesson.objects
-			.filter(student=student, lesson_id__in=lesson_ids)
-			.values_list('lesson_id', flat=True)
-		)
-
-		visible_lesson_assessments = LessonAssessment.objects.filter(
-			lesson_id__in=lesson_ids,
-			status=StatusEnum.APPROVED.value,
-		).filter(
-			models.Q(is_targeted=False) | models.Q(target_student=student)
-		)
-
-		assessment_totals = {
-			row['lesson_id']: row['total']
-			for row in visible_lesson_assessments
-			.values('lesson_id')
-			.annotate(total=Count('id'))
-		}
-		completed_assessment_totals = {
-			row['lesson_assessment__lesson_id']: row['total']
-			for row in (
-				LessonAssessmentSolution.objects
-				.filter(student=student, lesson_assessment__in=visible_lesson_assessments)
-				.values('lesson_assessment__lesson_id')
-				.annotate(total=Count('lesson_assessment_id', distinct=True))
-			)
-		}
-
 		lessons_payload = []
-		previous_lesson_completed = True
-		for index, lesson in enumerate(lessons):
-			assessments_total = int(assessment_totals.get(lesson.id, 0))
-			assessments_completed = int(completed_assessment_totals.get(lesson.id, 0))
-			is_taken = lesson.id in taken_lesson_ids
-			is_completed = is_taken and assessments_completed >= assessments_total
-			is_locked = not previous_lesson_completed
-
-			if is_locked:
-				progression_status = "locked"
-			elif is_completed:
-				progression_status = "completed"
-			elif is_taken:
-				progression_status = "in_progress"
-			else:
-				progression_status = "available"
-
-			next_lesson = lessons[index + 1] if index + 1 < len(lessons) else None
-			lock_reason = None
-			if is_locked and index > 0:
-				lock_reason = "Complete the previous lesson and submit all of its assessments to unlock this lesson."
+		for lesson in lessons:
+			state = progression['states'][lesson.id]
 
 			lessons_payload.append({
 				"id": lesson.id,
@@ -4036,18 +4134,16 @@ class KidsViewSet(viewsets.ViewSet):
 				"resource_type": lesson.type,
 				"thumbnail": lesson.thumbnail.url if lesson.thumbnail else None,
 				"resource": lesson.resource.url if lesson.resource else None,
-				"status": "taken" if is_taken else "new",
-				"progression_status": progression_status,
-				"is_locked": is_locked,
-				"is_completed": is_completed,
-				"assessments_total": assessments_total,
-				"assessments_completed": assessments_completed,
-				"next_video_id": next_lesson.id if next_lesson else None,
-				"lock_reason": lock_reason,
-				"sequence_position": index + 1,
+				"status": "taken" if state['is_taken'] else "new",
+				"progression_status": state['progression_status'],
+				"is_locked": state['is_locked'],
+				"is_completed": state['is_completed'],
+				"assessments_total": state['assessments_total'],
+				"assessments_completed": state['assessments_completed'],
+				"next_video_id": state['next_video_id'],
+				"lock_reason": state['lock_reason'],
+				"sequence_position": state['sequence_position'],
 			})
-
-			previous_lesson_completed = is_completed
 
 		return Response({
 			"subjects": subjects_payload,
