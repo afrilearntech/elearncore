@@ -2,8 +2,9 @@ from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase
 from rest_framework.test import APIClient
 
-from accounts.models import User, County, District, School
-from elearncore.sysutils.constants import UserRole
+from accounts.models import User, Student, County, District, School
+from content.models import Subject, Period, LessonResource, LessonAssessment, TakeLesson, LessonAssessmentSolution
+from elearncore.sysutils.constants import UserRole, StudentLevel, ContentType, AssessmentType, Status as StatusEnum
 
 
 class AdminGeographyBulkUploadTests(TestCase):
@@ -49,3 +50,109 @@ class AdminGeographyBulkUploadTests(TestCase):
 		resp = self.client.post('/api-v1/admin/schools/bulk-create/', data={'file': upload}, format='multipart')
 		self.assertEqual(resp.status_code, 200)
 		self.assertEqual(School.objects.filter(name='Afrilearn Academy', district=district).count(), 1)
+
+
+class KidsSubjectsAndLessonsProgressionTests(TestCase):
+	def setUp(self):
+		self.client = APIClient()
+		self.user = User.objects.create_user(
+			phone='231770000111',
+			name='Student One',
+			email='student1@example.com',
+			password='pass',
+			role=UserRole.STUDENT.value,
+		)
+		self.student = Student.objects.create(
+			profile=self.user,
+			grade=StudentLevel.GRADE3.value,
+			status=StatusEnum.APPROVED.value,
+		)
+		self.client.force_authenticate(user=self.user)
+
+		self.subject_math = Subject.objects.create(
+			name='Mathematics',
+			grade=StudentLevel.GRADE3.value,
+			status=StatusEnum.APPROVED.value,
+		)
+		self.subject_science = Subject.objects.create(
+			name='Science',
+			grade=StudentLevel.GRADE3.value,
+			status=StatusEnum.APPROVED.value,
+		)
+		self.period_jan = Period.objects.create(name='January', start_month=1, end_month=1)
+		self.period_feb = Period.objects.create(name='February', start_month=2, end_month=2)
+
+		resource_file = lambda name: SimpleUploadedFile(name, b'lesson-bytes', content_type='video/mp4')
+
+		self.lesson_1 = LessonResource.objects.create(
+			subject=self.subject_math,
+			period=self.period_jan,
+			title='Counting Numbers',
+			type=ContentType.VIDEO.value,
+			status=StatusEnum.APPROVED.value,
+			resource=resource_file('counting.mp4'),
+		)
+		self.lesson_2 = LessonResource.objects.create(
+			subject=self.subject_math,
+			period=self.period_feb,
+			title='Adding Numbers',
+			type=ContentType.VIDEO.value,
+			status=StatusEnum.APPROVED.value,
+			resource=resource_file('adding.mp4'),
+		)
+		self.lesson_3 = LessonResource.objects.create(
+			subject=self.subject_science,
+			period=self.period_jan,
+			title='Plants Around Us',
+			type=ContentType.VIDEO.value,
+			status=StatusEnum.APPROVED.value,
+			resource=resource_file('plants.mp4'),
+		)
+
+		self.lesson_1_assessment = LessonAssessment.objects.create(
+			lesson=self.lesson_1,
+			title='Counting Quiz',
+			type=AssessmentType.QUIZ.value,
+			status=StatusEnum.APPROVED.value,
+		)
+		self.lesson_2_assessment = LessonAssessment.objects.create(
+			lesson=self.lesson_2,
+			title='Adding Quiz',
+			type=AssessmentType.QUIZ.value,
+			status=StatusEnum.APPROVED.value,
+		)
+
+		TakeLesson.objects.create(student=self.student, lesson=self.lesson_1)
+		TakeLesson.objects.create(student=self.student, lesson=self.lesson_2)
+		LessonAssessmentSolution.objects.create(
+			lesson_assessment=self.lesson_1_assessment,
+			student=self.student,
+			solution='Done',
+			attachment=SimpleUploadedFile('counting-answer.txt', b'done', content_type='text/plain'),
+		)
+
+	def test_subjects_and_lessons_returns_progression_lock_state(self):
+		resp = self.client.get('/api-v1/kids/subjectsandlessons/')
+		self.assertEqual(resp.status_code, 200)
+
+		payload = resp.json()
+		lessons = payload['lessons']
+		self.assertEqual([lesson['id'] for lesson in lessons], [self.lesson_1.id, self.lesson_2.id, self.lesson_3.id])
+
+		first, second, third = lessons
+		self.assertFalse(first['is_locked'])
+		self.assertTrue(first['is_completed'])
+		self.assertEqual(first['progression_status'], 'completed')
+		self.assertEqual(first['next_video_id'], self.lesson_2.id)
+
+		self.assertFalse(second['is_locked'])
+		self.assertFalse(second['is_completed'])
+		self.assertEqual(second['progression_status'], 'in_progress')
+		self.assertEqual(second['assessments_total'], 1)
+		self.assertEqual(second['assessments_completed'], 0)
+		self.assertEqual(second['next_video_id'], self.lesson_3.id)
+
+		self.assertTrue(third['is_locked'])
+		self.assertFalse(third['is_completed'])
+		self.assertEqual(third['progression_status'], 'locked')
+		self.assertIsNone(third['next_video_id'])

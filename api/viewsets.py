@@ -83,6 +83,7 @@ from .serializers import (
 	AdminBulkCountyUploadSerializer,
 	AdminBulkDistrictUploadSerializer,
 	AdminBulkSchoolUploadSerializer,
+	KidsSubjectsAndLessonsResponseSerializer,
 )
 from messsaging.services import send_sms
 
@@ -3865,14 +3866,14 @@ class KidsViewSet(viewsets.ViewSet):
 
 	@extend_schema(
 		description="Subjects and lessons for the student's grade (kids view).",
-		responses={200: None},
+		responses={200: KidsSubjectsAndLessonsResponseSerializer},
 		examples=[
 			OpenApiExample(
 				name="KidsSubjectsAndLessonsExample",
 				value={
 					"subjects": [
-						{"id": 1, "name": "Mathematics", "grade": "PRIMARY_3"},
-						{"id": 2, "name": "Science", "grade": "PRIMARY_3"},
+						{"id": 1, "name": "Mathematics", "grade": "GRADE 3", "thumbnail": None},
+						{"id": 2, "name": "Science", "grade": "GRADE 3", "thumbnail": None},
 					],
 					"lessons": [
 						{
@@ -3880,12 +3881,46 @@ class KidsViewSet(viewsets.ViewSet):
 							"title": "Addition Basics",
 							"subject_id": 1,
 							"subject_name": "Mathematics",
+							"grade": "GRADE 3",
+							"topic_id": 3,
+							"topic_name": "Numbers",
+							"period_id": 1,
+							"period_name": "January",
+							"resource_type": "VIDEO",
+							"thumbnail": None,
+							"resource": "/media/lesson_resources/addition-basics.mp4",
+							"status": "taken",
+							"progression_status": "completed",
+							"is_locked": False,
+							"is_completed": True,
+							"assessments_total": 1,
+							"assessments_completed": 1,
+							"next_video_id": 11,
+							"lock_reason": None,
+							"sequence_position": 1,
 						},
 						{
 							"id": 11,
 							"title": "Animals Around Us",
 							"subject_id": 2,
 							"subject_name": "Science",
+							"grade": "GRADE 3",
+							"topic_id": None,
+							"topic_name": None,
+							"period_id": 2,
+							"period_name": "February",
+							"resource_type": "VIDEO",
+							"thumbnail": None,
+							"resource": "/media/lesson_resources/animals-around-us.mp4",
+							"status": "new",
+							"progression_status": "locked",
+							"is_locked": True,
+							"is_completed": False,
+							"assessments_total": 2,
+							"assessments_completed": 0,
+							"next_video_id": None,
+							"lock_reason": "Complete the previous lesson and submit all of its assessments to unlock this lesson.",
+							"sequence_position": 2,
 						},
 					],
 				},
@@ -3894,46 +3929,125 @@ class KidsViewSet(viewsets.ViewSet):
 	)
 	@action(detail=False, methods=['get'], url_path='subjectsandlessons')
 	def subjects_and_lessons(self, request):
-		"""Return subjects and lessons for the student's grade in a simple shape."""
+		"""Return ordered lessons with progression lock state for the student."""
 		user: User = request.user
 		student = getattr(user, 'student', None)
 		if not student:
 			return Response({"detail": "Student profile required."}, status=403)
 
 		# Subjects for the student's grade
-		subjects_qs = Subject.objects.filter(grade=student.grade).order_by('name')
+		subjects_qs = Subject.objects.filter(
+			grade=student.grade,
+			status=StatusEnum.APPROVED.value,
+		).order_by('name')
 		subjects_payload = [
 			{"id": s.id, "name": s.name, "grade": s.grade, "thumbnail": s.thumbnail.url if s.thumbnail else None}
 			for s in subjects_qs
 		]
 
-		# Lessons for the student's grade (via subject)
-		lessons_qs = (
+		# Lessons are ordered into a single progression stream across subjects.
+		lessons = list(
 			LessonResource.objects
-			.filter(subject__grade=student.grade)
-			.select_related('subject')
-			.order_by('subject__name', 'title')
+			.filter(
+				subject__grade=student.grade,
+				subject__status=StatusEnum.APPROVED.value,
+				status=StatusEnum.APPROVED.value,
+			)
+			.select_related('subject', 'topic', 'period')
+			.order_by(
+				'subject__name',
+				'period__start_month',
+				'period__end_month',
+				'topic__name',
+				'title',
+				'id',
+			)
 		)
-		# Determine which lessons the student has already taken
+
+		lesson_ids = [lesson.id for lesson in lessons]
+		if not lesson_ids:
+			return Response({
+				"subjects": subjects_payload,
+				"lessons": [],
+			})
+
 		taken_lesson_ids = set(
 			TakeLesson.objects
-			.filter(student=student)
+			.filter(student=student, lesson_id__in=lesson_ids)
 			.values_list('lesson_id', flat=True)
 		)
-		lessons_payload = [
-			{
-				"id": l.id,
-				"title": l.title,
-				"subject_id": l.subject_id,
-				"grade": getattr(l.subject, 'grade', None),
-				"resource_type": l.type,
-				"thumbnail": l.thumbnail.url if l.thumbnail else None,
-				"resource": l.resource.url if l.resource else None,
-				"subject_name": getattr(l.subject, 'name', None),
-				"status": "taken" if l.id in taken_lesson_ids else "new",
-			}
-			for l in lessons_qs
-		]
+
+		visible_lesson_assessments = LessonAssessment.objects.filter(
+			lesson_id__in=lesson_ids,
+			status=StatusEnum.APPROVED.value,
+		).filter(
+			models.Q(is_targeted=False) | models.Q(target_student=student)
+		)
+
+		assessment_totals = {
+			row['lesson_id']: row['total']
+			for row in visible_lesson_assessments
+			.values('lesson_id')
+			.annotate(total=Count('id'))
+		}
+		completed_assessment_totals = {
+			row['lesson_assessment__lesson_id']: row['total']
+			for row in (
+				LessonAssessmentSolution.objects
+				.filter(student=student, lesson_assessment__in=visible_lesson_assessments)
+				.values('lesson_assessment__lesson_id')
+				.annotate(total=Count('lesson_assessment_id', distinct=True))
+			)
+		}
+
+		lessons_payload = []
+		previous_lesson_completed = True
+		for index, lesson in enumerate(lessons):
+			assessments_total = int(assessment_totals.get(lesson.id, 0))
+			assessments_completed = int(completed_assessment_totals.get(lesson.id, 0))
+			is_taken = lesson.id in taken_lesson_ids
+			is_completed = is_taken and assessments_completed >= assessments_total
+			is_locked = not previous_lesson_completed
+
+			if is_locked:
+				progression_status = "locked"
+			elif is_completed:
+				progression_status = "completed"
+			elif is_taken:
+				progression_status = "in_progress"
+			else:
+				progression_status = "available"
+
+			next_lesson = lessons[index + 1] if index + 1 < len(lessons) else None
+			lock_reason = None
+			if is_locked and index > 0:
+				lock_reason = "Complete the previous lesson and submit all of its assessments to unlock this lesson."
+
+			lessons_payload.append({
+				"id": lesson.id,
+				"title": lesson.title,
+				"subject_id": lesson.subject_id,
+				"subject_name": getattr(lesson.subject, 'name', None),
+				"grade": getattr(lesson.subject, 'grade', None),
+				"topic_id": lesson.topic_id,
+				"topic_name": getattr(lesson.topic, 'name', None),
+				"period_id": lesson.period_id,
+				"period_name": getattr(lesson.period, 'name', None),
+				"resource_type": lesson.type,
+				"thumbnail": lesson.thumbnail.url if lesson.thumbnail else None,
+				"resource": lesson.resource.url if lesson.resource else None,
+				"status": "taken" if is_taken else "new",
+				"progression_status": progression_status,
+				"is_locked": is_locked,
+				"is_completed": is_completed,
+				"assessments_total": assessments_total,
+				"assessments_completed": assessments_completed,
+				"next_video_id": next_lesson.id if next_lesson else None,
+				"lock_reason": lock_reason,
+				"sequence_position": index + 1,
+			})
+
+			previous_lesson_completed = is_completed
 
 		return Response({
 			"subjects": subjects_payload,

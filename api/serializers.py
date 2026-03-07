@@ -103,6 +103,42 @@ class ContentDashboardSerializer(serializers.Serializer):
     by_type = serializers.DictField(child=ContentDashboardCountsSerializer())
 
 
+class KidsSubjectItemSerializer(serializers.Serializer):
+    id = serializers.IntegerField()
+    name = serializers.CharField()
+    grade = serializers.CharField()
+    thumbnail = serializers.CharField(allow_null=True)
+
+
+class KidsLessonItemSerializer(serializers.Serializer):
+    id = serializers.IntegerField()
+    title = serializers.CharField()
+    subject_id = serializers.IntegerField()
+    subject_name = serializers.CharField(allow_null=True)
+    grade = serializers.CharField(allow_null=True)
+    topic_id = serializers.IntegerField(allow_null=True)
+    topic_name = serializers.CharField(allow_null=True)
+    period_id = serializers.IntegerField(allow_null=True)
+    period_name = serializers.CharField(allow_null=True)
+    resource_type = serializers.CharField()
+    thumbnail = serializers.CharField(allow_null=True)
+    resource = serializers.CharField(allow_null=True)
+    status = serializers.CharField()
+    progression_status = serializers.CharField()
+    is_locked = serializers.BooleanField()
+    is_completed = serializers.BooleanField()
+    assessments_total = serializers.IntegerField()
+    assessments_completed = serializers.IntegerField()
+    next_video_id = serializers.IntegerField(allow_null=True)
+    lock_reason = serializers.CharField(allow_null=True)
+    sequence_position = serializers.IntegerField()
+
+
+class KidsSubjectsAndLessonsResponseSerializer(serializers.Serializer):
+    subjects = KidsSubjectItemSerializer(many=True)
+    lessons = KidsLessonItemSerializer(many=True)
+
+
 class AdminDashboardSummaryCardSerializer(serializers.Serializer):
     """Summary card metrics for the admin dashboard.
 
