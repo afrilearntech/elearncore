@@ -1,4 +1,5 @@
 from django.core.files.uploadedfile import SimpleUploadedFile
+from django.core.cache import cache
 from django.test import TestCase
 from rest_framework.test import APIClient
 
@@ -9,6 +10,7 @@ from elearncore.sysutils.constants import UserRole, StudentLevel, ContentType, A
 
 class AdminGeographyBulkUploadTests(TestCase):
 	def setUp(self):
+		cache.clear()
 		self.client = APIClient()
 		admin = User(
 			name="Admin",
@@ -132,7 +134,7 @@ class KidsSubjectsAndLessonsProgressionTests(TestCase):
 		)
 
 	def test_subjects_and_lessons_returns_progression_lock_state(self):
-		resp = self.client.get('/api-v1/kids/subjectsandlessons/')
+		resp = self.client.get('/api-v1/kids/subjectsandlessons/?test=progression')
 		self.assertEqual(resp.status_code, 200)
 
 		payload = resp.json()
@@ -160,7 +162,9 @@ class KidsSubjectsAndLessonsProgressionTests(TestCase):
 	def test_lessons_list_hides_locked_lessons_for_students(self):
 		resp = self.client.get('/api-v1/lessons/')
 		self.assertEqual(resp.status_code, 200)
-		returned_ids = [item['id'] for item in resp.json()]
+		payload = resp.json()
+		self.assertEqual(payload['count'], 2)
+		returned_ids = [item['id'] for item in payload['results']]
 		self.assertEqual(returned_ids, [self.lesson_1.id, self.lesson_2.id])
 
 	def test_locked_lesson_detail_is_forbidden(self):
@@ -173,3 +177,23 @@ class KidsSubjectsAndLessonsProgressionTests(TestCase):
 		self.assertEqual(resp.status_code, 403)
 		self.assertIn('Complete the previous lesson', resp.json()['detail'])
 		self.assertFalse(TakeLesson.objects.filter(student=self.student, lesson=self.lesson_3).exists())
+
+	def test_subjects_and_lessons_cache_is_invalidated_after_submission(self):
+		first_resp = self.client.get('/api-v1/kids/subjectsandlessons/?test=cache')
+		self.assertEqual(first_resp.status_code, 200)
+		first_lessons = first_resp.json()['lessons']
+		self.assertTrue(first_lessons[-1]['is_locked'])
+
+		submit_resp = self.client.post(
+			'/api-v1/kids/submit-solution/',
+			{'lesson_id': self.lesson_2_assessment.id, 'solution': 'Submitted'},
+			format='multipart',
+		)
+		self.assertEqual(submit_resp.status_code, 200)
+
+		second_resp = self.client.get('/api-v1/kids/subjectsandlessons/?test=cache')
+		self.assertEqual(second_resp.status_code, 200)
+		second_lessons = second_resp.json()['lessons']
+		self.assertFalse(second_lessons[1]['is_locked'])
+		self.assertTrue(second_lessons[1]['is_completed'])
+		self.assertFalse(second_lessons[2]['is_locked'])

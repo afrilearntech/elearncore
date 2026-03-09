@@ -1,5 +1,6 @@
 import csv
 import io
+from urllib.parse import quote
 from typing import Iterable, Dict, List, Set
 
 from rest_framework import permissions, viewsets, status, filters, serializers
@@ -85,6 +86,7 @@ from .serializers import (
 	AdminBulkSchoolUploadSerializer,
 	KidsSubjectsAndLessonsResponseSerializer,
 )
+from .pagination import StandardResultsSetPagination
 from messsaging.services import send_sms
 
 
@@ -172,6 +174,59 @@ def _user_role_in(user, roles: Iterable[str]) -> bool:
 
 
 LESSON_LOCK_REASON = "Complete the previous lesson and submit all of its assessments to unlock this lesson."
+STUDENT_LESSON_CACHE_TTL = 120
+
+
+def _student_lesson_progress_version_key(student_id: int) -> str:
+	return f"student-lesson-progress-version:{student_id}"
+
+
+def _grade_lesson_content_version_key(grade: str) -> str:
+	return f"grade-lesson-content-version:{quote(str(grade), safe='')}"
+
+
+def _get_cache_version(cache_key: str) -> int:
+	return int(cache.get(cache_key, 1) or 1)
+
+
+def _bump_cache_version(cache_key: str) -> int:
+	new_version = _get_cache_version(cache_key) + 1
+	cache.set(cache_key, new_version, timeout=None)
+	return new_version
+
+
+def _invalidate_student_lesson_cache(student: Student) -> None:
+	_bump_cache_version(_student_lesson_progress_version_key(student.id))
+
+
+def _invalidate_grade_lesson_cache(grade: str | None) -> None:
+	if grade:
+		_bump_cache_version(_grade_lesson_content_version_key(grade))
+
+
+def _student_lesson_cache_key(student: Student, request, suffix: str) -> str:
+	progress_version = _get_cache_version(_student_lesson_progress_version_key(student.id))
+	grade_version = _get_cache_version(_grade_lesson_content_version_key(student.grade))
+	query = quote(request.META.get('QUERY_STRING', ''), safe='') if request is not None else ''
+	grade_token = quote(str(student.grade), safe='')
+	return (
+		f"student-lesson:{suffix}:student:{student.id}:grade:{grade_token}:"
+		f"progress:{progress_version}:content:{grade_version}:query:{query}"
+	)
+
+
+def _paginate_payload(request, items, results_key: str, *, extra_payload: dict | None = None):
+	paginator = StandardResultsSetPagination()
+	page = paginator.paginate_queryset(list(items), request)
+	payload = dict(extra_payload or {})
+	payload[results_key] = page
+	payload['pagination'] = {
+		'count': paginator.page.paginator.count,
+		'next': paginator.get_next_link(),
+		'previous': paginator.get_previous_link(),
+		'page_size': paginator.get_page_size(request),
+	}
+	return payload
 
 
 def _build_student_lesson_progression(student: Student) -> dict:
@@ -487,13 +542,9 @@ class LessonResourceViewSet(viewsets.ModelViewSet):
 	serializer_class = LessonResourceSerializer
 	filter_backends = [filters.SearchFilter, filters.OrderingFilter]
 	search_fields = ['title', 'description']
+	ordering = ['id']
 	ordering_fields = ['created_at', 'updated_at', 'title']
 	_student_progression_cache = None
-
-	@method_decorator(cache_page(60 * 2), name='list')
-	@method_decorator(cache_page(60 * 5), name='retrieve')
-	def dispatch(self, *args, **kwargs):
-		return super().dispatch(*args, **kwargs)
 
 	def get_permissions(self):
 		if self.action in ['approve', 'reject', 'request_changes']:
@@ -547,6 +598,7 @@ class LessonResourceViewSet(viewsets.ModelViewSet):
 
 	def perform_create(self, serializer):
 		lesson = serializer.save(created_by=self.request.user, status=StatusEnum.DRAFT.value)
+		_invalidate_grade_lesson_cache(getattr(getattr(lesson, 'subject', None), 'grade', None))
 		# Optionally log content creation as an activity for the creator
 		if self.request.user and self.request.user.is_authenticated:
 			Activity.objects.create(
@@ -568,6 +620,7 @@ class LessonResourceViewSet(viewsets.ModelViewSet):
 		obj = self.get_object()
 		obj.status = StatusEnum.APPROVED.value
 		obj.save(update_fields=['status', 'updated_at'])
+		_invalidate_grade_lesson_cache(getattr(getattr(obj, 'subject', None), 'grade', None))
 		return Response({'status': obj.status})
 
 	@action(detail=True, methods=['post'])
@@ -575,6 +628,7 @@ class LessonResourceViewSet(viewsets.ModelViewSet):
 		obj = self.get_object()
 		obj.status = StatusEnum.REJECTED.value
 		obj.save(update_fields=['status', 'updated_at'])
+		_invalidate_grade_lesson_cache(getattr(getattr(obj, 'subject', None), 'grade', None))
 		return Response({'status': obj.status})
 
 	@action(detail=True, methods=['post'], url_path='request-changes')
@@ -582,6 +636,7 @@ class LessonResourceViewSet(viewsets.ModelViewSet):
 		obj = self.get_object()
 		obj.status = StatusEnum.REVIEW_REQUESTED.value
 		obj.save(update_fields=['status', 'updated_at'])
+		_invalidate_grade_lesson_cache(getattr(getattr(obj, 'subject', None), 'grade', None))
 		return Response({'status': obj.status})
 
 
@@ -633,6 +688,8 @@ class TakeLessonViewSet(viewsets.ModelViewSet):
 		"""Create a TakeLesson and log an activity for the student."""
 		request_student = getattr(self.request.user, 'student', None)
 		instance: TakeLesson = serializer.save(student=request_student) if request_student else serializer.save()
+		if request_student is not None:
+			_invalidate_student_lesson_cache(request_student)
 		user = getattr(getattr(instance, 'student', None), 'profile', None)
 		if user is not None:
 			Activity.objects.create(
@@ -3551,6 +3608,11 @@ class DashboardViewSet(viewsets.ViewSet):
 		if not student:
 			return Response({"detail": "Student profile required."}, status=403)
 
+		cache_key = _student_lesson_cache_key(student, request, 'kids-assignments-due')
+		cached_payload = cache.get(cache_key)
+		if cached_payload is not None:
+			return Response(cached_payload)
+
 		now = timezone.now()
 		in_15 = now + timedelta(days=15)
 
@@ -3593,7 +3655,9 @@ class DashboardViewSet(viewsets.ViewSet):
 
 		# Sort combined list by due date ascending
 		items.sort(key=lambda x: (x['due_in_days'] is None, x['due_in_days']))
-		return Response(items)
+		payload = _paginate_payload(request, items, 'assignments')
+		cache.set(cache_key, payload, timeout=STUDENT_LESSON_CACHE_TTL)
+		return Response(payload)
 
 	@action(detail=False, methods=['get'], url_path='studystats')
 	def studystats(self, request):
@@ -3602,6 +3666,11 @@ class DashboardViewSet(viewsets.ViewSet):
 		student = getattr(user, 'student', None)
 		if not student:
 			return Response({"detail": "Student profile required."}, status=403)
+
+		cache_key = _student_lesson_cache_key(student, request, 'kids-study-stats')
+		cached_payload = cache.get(cache_key)
+		if cached_payload is not None:
+			return Response(cached_payload)
 
 		# Active subjects: subjects where student has taken at least one lesson
 		active_subjects = (
@@ -3646,6 +3715,7 @@ class DashboardViewSet(viewsets.ViewSet):
 			'study_time_hours': study_time_hours,
 			'badges': 0,
 		}
+		cache.set(cache_key, data, timeout=STUDENT_LESSON_CACHE_TTL)
 		return Response(data)
 
 
@@ -3729,6 +3799,11 @@ class KidsViewSet(viewsets.ViewSet):
 		if not student:
 			return Response({"detail": "Student profile required."}, status=403)
 
+		cache_key = _student_lesson_cache_key(student, request, 'kids-dashboard')
+		cached_payload = cache.get(cache_key)
+		if cached_payload is not None:
+			return Response(cached_payload)
+
 		# Optionally restrict to lower grades if you encode them in grade string
 		# For now, treat any student as eligible for this kids dashboard.
 
@@ -3797,7 +3872,7 @@ class KidsViewSet(viewsets.ViewSet):
 			for a in Activity.objects.filter(user=user).order_by('-created_at')[:3]
 		]
 
-		return Response({
+		payload = {
 			'lessons_completed': lessons_completed,
 			'streaks_this_week': streak_days,
 			'current_level': current_level.replace('_', ' '),
@@ -3805,7 +3880,9 @@ class KidsViewSet(viewsets.ViewSet):
 			'todays_challenges': todays_challenges,
 			'continue_learning': continue_learning,
 			'recent_activities': recent_activities,
-		})
+		}
+		cache.set(cache_key, payload, timeout=STUDENT_LESSON_CACHE_TTL)
+		return Response(payload)
 
 	@extend_schema(
 		description="Progress garden view showing overall progress and per-subject completion.",
@@ -3826,6 +3903,11 @@ class KidsViewSet(viewsets.ViewSet):
 		student = getattr(user, 'student', None)
 		if not student:
 			return Response({"detail": "Student profile required."}, status=403)
+
+		cache_key = _student_lesson_cache_key(student, request, 'kids-progress-garden')
+		cached_payload = cache.get(cache_key)
+		if cached_payload is not None:
+			return Response(cached_payload)
 
 		# All lessons the student has taken (distinct per lesson)
 		taken_qs = (
@@ -4017,7 +4099,7 @@ class KidsViewSet(viewsets.ViewSet):
 				"percent_complete": percent,
 			})
 
-		return Response({
+		payload = {
 			"lessons_completed": lessons_completed,
 			"longest_streak": longest_streak,
 			"level": level.replace('_', ' '),
@@ -4026,7 +4108,9 @@ class KidsViewSet(viewsets.ViewSet):
 			"rank_in_school": school_rank,
 			"rank_in_district": district_rank,
 			"rank_in_county": county_rank,
-		})
+		}
+		cache.set(cache_key, payload, timeout=STUDENT_LESSON_CACHE_TTL)
+		return Response(payload)
 
 	@extend_schema(
 		description="Subjects and lessons for the student's grade (kids view).",
@@ -4099,6 +4183,11 @@ class KidsViewSet(viewsets.ViewSet):
 		if not student:
 			return Response({"detail": "Student profile required."}, status=403)
 
+		cache_key = _student_lesson_cache_key(student, request, 'kids-subjects-and-lessons')
+		cached_payload = cache.get(cache_key)
+		if cached_payload is not None:
+			return Response(cached_payload)
+
 		# Subjects for the student's grade
 		subjects_qs = Subject.objects.filter(
 			grade=student.grade,
@@ -4112,10 +4201,18 @@ class KidsViewSet(viewsets.ViewSet):
 		progression = _build_student_lesson_progression(student)
 		lessons = progression['lessons']
 		if not lessons:
-			return Response({
+			payload = {
 				"subjects": subjects_payload,
 				"lessons": [],
-			})
+				"pagination": {
+					"count": 0,
+					"next": None,
+					"previous": None,
+					"page_size": StandardResultsSetPagination.page_size,
+				},
+			}
+			cache.set(cache_key, payload, timeout=STUDENT_LESSON_CACHE_TTL)
+			return Response(payload)
 
 		lessons_payload = []
 		for lesson in lessons:
@@ -4145,10 +4242,14 @@ class KidsViewSet(viewsets.ViewSet):
 				"sequence_position": state['sequence_position'],
 			})
 
-		return Response({
-			"subjects": subjects_payload,
-			"lessons": lessons_payload,
-		})
+		payload = _paginate_payload(
+			request,
+			lessons_payload,
+			'lessons',
+			extra_payload={"subjects": subjects_payload},
+		)
+		cache.set(cache_key, payload, timeout=STUDENT_LESSON_CACHE_TTL)
+		return Response(payload)
 
 	@extend_schema(
 		description="All assignments (assessments) for the student's grade.",
@@ -4183,6 +4284,11 @@ class KidsViewSet(viewsets.ViewSet):
 		student = getattr(user, 'student', None)
 		if not student:
 			return Response({"detail": "Student profile required."}, status=403)
+
+		cache_key = _student_lesson_cache_key(student, request, 'kids-assignments')
+		cached_payload = cache.get(cache_key)
+		if cached_payload is not None:
+			return Response(cached_payload)
 
 		# General assessments for grade or global
 		general_qs = (
@@ -4288,7 +4394,9 @@ class KidsViewSet(viewsets.ViewSet):
 			"submitted": submitted,
 		}
 
-		return Response({"assignments": items, "stats": stats})
+		payload = _paginate_payload(request, items, 'assignments', extra_payload={"stats": stats})
+		cache.set(cache_key, payload, timeout=STUDENT_LESSON_CACHE_TTL)
+		return Response(payload)
 
 	@extend_schema(
 		description="List quizzes (assessments) available for the student's grade.",
@@ -4312,6 +4420,11 @@ class KidsViewSet(viewsets.ViewSet):
 		student = getattr(user, 'student', None)
 		if not student:
 			return Response({"detail": "Student profile required."}, status=403)
+
+		cache_key = _student_lesson_cache_key(student, request, 'kids-quizzes')
+		cached_payload = cache.get(cache_key)
+		if cached_payload is not None:
+			return Response(cached_payload)
 
 		# General assessments for grade or global
 		general_qs = (
@@ -4350,7 +4463,9 @@ class KidsViewSet(viewsets.ViewSet):
 				"due_at": la.due_at.isoformat() if la.due_at else None,
 			})
 
-		return Response({"quizzes": payload})
+		response_payload = _paginate_payload(request, payload, 'quizzes')
+		cache.set(cache_key, response_payload, timeout=STUDENT_LESSON_CACHE_TTL)
+		return Response(response_payload)
 
 	@extend_schema(
 		description="List games available for the student's grade.",
@@ -4529,6 +4644,11 @@ class KidsViewSet(viewsets.ViewSet):
 		if not student:
 			return Response({"detail": "Student profile required."}, status=403)
 
+		cache_key = _student_lesson_cache_key(student, request, 'kids-assessments')
+		cached_payload = cache.get(cache_key)
+		if cached_payload is not None:
+			return Response(cached_payload)
+
 		general_qs = (
 			GeneralAssessment.objects
 			.filter(
@@ -4563,7 +4683,9 @@ class KidsViewSet(viewsets.ViewSet):
 				"marks": la.marks,
 			})
 
-		return Response({"assessments": items})
+		payload = _paginate_payload(request, items, 'assessments')
+		cache.set(cache_key, payload, timeout=STUDENT_LESSON_CACHE_TTL)
+		return Response(payload)
 
 	@extend_schema(
 		description=(
@@ -4810,6 +4932,8 @@ class KidsViewSet(viewsets.ViewSet):
 				solution_obj.attachment = attachment
 				solution_obj.save()
 
+			_invalidate_student_lesson_cache(student)
+
 			return Response({
 				"detail": "Solution submitted.",
 				"solution_id": solution_obj.id,
@@ -4835,6 +4959,8 @@ class KidsViewSet(viewsets.ViewSet):
 		elif attachment is not None:
 			solution_obj.attachment = attachment
 			solution_obj.save()
+
+		_invalidate_student_lesson_cache(student)
 
 		return Response({
 			"detail": "Solution submitted.",
@@ -6259,12 +6385,7 @@ class TeacherViewSet(viewsets.ViewSet):
 		})
 
 
-class LookupPagination(filters.BaseFilterBackend):
-	pass
-
-from rest_framework.pagination import PageNumberPagination
-
-class LookupPagination(PageNumberPagination):
+class LookupPagination(StandardResultsSetPagination):
 	page_size = 20
 	page_size_query_param = 'page_size'
 	max_page_size = 100
