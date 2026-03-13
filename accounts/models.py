@@ -112,6 +112,10 @@ class Student(TimestampedModel):
     profile = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="student")
     school = models.ForeignKey(School, on_delete=models.SET_NULL, null=True, blank=True, related_name="students")
     grade = models.CharField(max_length=20, choices=[(lvl.value, lvl.value) for lvl in StudentLevel], default=StudentLevel.OTHER.value)
+    points = models.PositiveIntegerField(default=0)
+    current_login_streak = models.PositiveIntegerField(default=0)
+    max_login_streak = models.PositiveIntegerField(default=0)
+    last_login_activity_date = models.DateField(null=True, blank=True)
     status = models.CharField(max_length=30, choices=[(s.value, s.value) for s in StatusEnum], default=StatusEnum.PENDING.value)
     moderation_comment = models.TextField(blank=True, default="")
 

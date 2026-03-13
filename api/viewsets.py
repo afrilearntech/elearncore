@@ -19,7 +19,14 @@ from django.db import models
 from django.db.models import Q, Count, Window, F
 from django.db.models.functions import TruncDate, DenseRank
 
-from elearncore.sysutils.constants import UserRole, Status as StatusEnum
+from elearncore.sysutils.constants import (
+	UserRole,
+	Status as StatusEnum,
+	ContentType,
+	GAME_PLAY_POINTS,
+	ASSESSMENT_SUBMISSION_POINTS,
+	VIDEO_WATCH_POINTS,
+)
 from elearncore.sysutils.tasks import fire_and_forget
 
 from content.models import (
@@ -177,6 +184,136 @@ LESSON_LOCK_REASON = "Complete the previous lesson and submit all of its assessm
 STUDENT_LESSON_CACHE_TTL = 120
 
 
+def _award_student_points(student: Student | None, points: int) -> int | None:
+	if student is None or points <= 0:
+		return None
+	Student.objects.filter(pk=student.pk).update(points=F('points') + points)
+	student.points = int(getattr(student, 'points', 0) or 0) + points
+	return student.points
+
+
+def _parse_leaderboard_limit(request, default: int = 10, max_limit: int = 100) -> int:
+	raw_limit = request.query_params.get('limit') if request is not None else None
+	if raw_limit in {None, ''}:
+		return default
+	try:
+		limit = int(raw_limit)
+	except (TypeError, ValueError):
+		return default
+	return max(1, min(limit, max_limit))
+
+
+def _parse_leaderboard_timeframe(request, default: str = 'all_time') -> str:
+	raw_timeframe = (request.query_params.get('timeframe') if request is not None else None) or default
+	timeframe = str(raw_timeframe).strip().lower()
+	allowed = {'this_week', 'this_month', 'all_time'}
+	if timeframe not in allowed:
+		raise ValueError("timeframe must be one of: this_week, this_month, all_time.")
+	return timeframe
+
+
+def _points_timeframe_start(timeframe: str):
+	now = timezone.now()
+	if timeframe == 'this_week':
+		return now - timedelta(days=7)
+	if timeframe == 'this_month':
+		return now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+	return None
+
+
+def _student_points_for_timeframe(students: List[Student], timeframe: str) -> Dict[int, int]:
+	if timeframe == 'all_time':
+		return {student.id: int(getattr(student, 'points', 0) or 0) for student in students}
+
+	start_at = _points_timeframe_start(timeframe)
+	if start_at is None:
+		return {student.id: 0 for student in students}
+
+	points_by_student_id = {student.id: 0 for student in students}
+	student_id_by_profile_id = {student.profile_id: student.id for student in students if getattr(student, 'profile_id', None)}
+	if not student_id_by_profile_id:
+		return points_by_student_id
+
+	activities = Activity.objects.filter(user_id__in=list(student_id_by_profile_id.keys()), created_at__gte=start_at)
+	for activity in activities:
+		metadata = getattr(activity, 'metadata', None)
+		if not isinstance(metadata, dict):
+			continue
+		raw_points = metadata.get('points_awarded', 0)
+		try:
+			awarded = int(raw_points)
+		except (TypeError, ValueError):
+			continue
+		if awarded <= 0:
+			continue
+		student_id = student_id_by_profile_id.get(activity.user_id)
+		if student_id is None:
+			continue
+		points_by_student_id[student_id] = points_by_student_id.get(student_id, 0) + awarded
+
+	return points_by_student_id
+
+
+def _build_student_leaderboard_response(queryset, *, scope: dict, limit: int, timeframe: str = 'all_time') -> dict:
+	all_students = list(
+		queryset
+		.select_related('profile', 'school__district__county')
+		.order_by('profile__name', 'id')
+	)
+	points_by_student_id = _student_points_for_timeframe(all_students, timeframe)
+
+	all_students.sort(
+		key=lambda student: (
+			-int(points_by_student_id.get(student.id, 0)),
+			str(getattr(getattr(student, 'profile', None), 'name', '') or '').lower(),
+			student.id,
+		)
+	)
+
+	ordered_students = all_students[:max(0, limit)]
+	total_students = len(all_students)
+	leaderboard = []
+	last_points = None
+	current_rank = 0
+
+	for index, student in enumerate(ordered_students, start=1):
+		points = int(points_by_student_id.get(student.id, 0) or 0)
+		if last_points != points:
+			current_rank = index
+			last_points = points
+
+		school = getattr(student, 'school', None)
+		district = getattr(school, 'district', None) if school is not None else None
+		county = getattr(district, 'county', None) if district is not None else None
+
+		leaderboard.append(
+			{
+				'rank': current_rank,
+				'student_db_id': student.id,
+				'student_id': getattr(student, 'student_id', None),
+				'student_name': getattr(getattr(student, 'profile', None), 'name', None),
+				'grade': getattr(student, 'grade', None),
+				'points': points,
+				'current_login_streak': int(getattr(student, 'current_login_streak', 0) or 0),
+				'school_id': getattr(school, 'id', None),
+				'school_name': getattr(school, 'name', None),
+				'district_id': getattr(district, 'id', None),
+				'district_name': getattr(district, 'name', None),
+				'county_id': getattr(county, 'id', None),
+				'county_name': getattr(county, 'name', None),
+			}
+		)
+
+	scope_payload = dict(scope or {})
+	scope_payload['timeframe'] = timeframe
+
+	return {
+		'scope': scope_payload,
+		'total_students': total_students,
+		'leaderboard': leaderboard,
+	}
+
+
 def _student_lesson_progress_version_key(student_id: int) -> str:
 	return f"student-lesson-progress-version:{student_id}"
 
@@ -330,6 +467,7 @@ class CanCreateContent(permissions.BasePermission):
 		UserRole.CONTENTCREATOR.value,
 		UserRole.CONTENTVALIDATOR.value,
 		UserRole.TEACHER.value,
+		UserRole.HEADTEACHER.value,
 		UserRole.ADMIN.value,
 	}
 
@@ -363,6 +501,7 @@ class IsContentCreator(permissions.BasePermission):
 		UserRole.CONTENTCREATOR.value,
 		UserRole.CONTENTVALIDATOR.value,
 		UserRole.TEACHER.value,
+		UserRole.HEADTEACHER.value,
 		UserRole.ADMIN.value,
 	}
 
@@ -653,6 +792,7 @@ class TakeLessonViewSet(viewsets.ModelViewSet):
 		elevated = _user_role_in(user, {
 			UserRole.ADMIN.value,
 			UserRole.TEACHER.value,
+			UserRole.HEADTEACHER.value,
 			UserRole.CONTENTVALIDATOR.value,
 		})
 		if elevated:
@@ -688,6 +828,10 @@ class TakeLessonViewSet(viewsets.ModelViewSet):
 		"""Create a TakeLesson and log an activity for the student."""
 		request_student = getattr(self.request.user, 'student', None)
 		instance: TakeLesson = serializer.save(student=request_student) if request_student else serializer.save()
+		awarded_points = 0
+		if request_student is not None and getattr(instance.lesson, 'type', None) == ContentType.VIDEO.value:
+			_award_student_points(request_student, VIDEO_WATCH_POINTS)
+			awarded_points = VIDEO_WATCH_POINTS
 		if request_student is not None:
 			_invalidate_student_lesson_cache(request_student)
 		user = getattr(getattr(instance, 'student', None), 'profile', None)
@@ -696,7 +840,11 @@ class TakeLessonViewSet(viewsets.ModelViewSet):
 				user=user,
 				type="take_lesson",
 				description=f"Took lesson '{instance.lesson.title}'",
-				metadata={"lesson_id": instance.lesson_id, "subject_id": getattr(instance.lesson.subject, 'id', None)},
+				metadata={
+					"lesson_id": instance.lesson_id,
+					"subject_id": getattr(instance.lesson.subject, 'id', None),
+					"points_awarded": awarded_points,
+				},
 			)
 
 
@@ -714,7 +862,7 @@ class AIRecommendationViewSet(viewsets.ReadOnlyModelViewSet):
 		student = getattr(user, 'student', None)
 		if student:
 			return qs.filter(student=student)
-		if user and getattr(user, 'role', None) in {UserRole.ADMIN.value, UserRole.CONTENTVALIDATOR.value, UserRole.TEACHER.value}:
+		if user and getattr(user, 'role', None) in {UserRole.ADMIN.value, UserRole.CONTENTVALIDATOR.value, UserRole.TEACHER.value, UserRole.HEADTEACHER.value}:
 			return qs
 		return AIRecommendation.objects.none()
 
@@ -890,6 +1038,43 @@ class TeacherDashboardResponseSerializer(serializers.Serializer):
 	upcoming_deadlines = TeacherDashboardUpcomingDeadlineSerializer(many=True)
 
 
+class LeaderboardEntrySerializer(serializers.Serializer):
+	rank = serializers.IntegerField()
+	student_db_id = serializers.IntegerField()
+	student_id = serializers.CharField(allow_null=True)
+	student_name = serializers.CharField(allow_null=True)
+	grade = serializers.CharField(allow_null=True)
+	points = serializers.IntegerField()
+	current_login_streak = serializers.IntegerField()
+	school_id = serializers.IntegerField(allow_null=True)
+	school_name = serializers.CharField(allow_null=True)
+	district_id = serializers.IntegerField(allow_null=True)
+	district_name = serializers.CharField(allow_null=True)
+	county_id = serializers.IntegerField(allow_null=True)
+	county_name = serializers.CharField(allow_null=True)
+
+
+class LeaderboardResponseSerializer(serializers.Serializer):
+	scope = serializers.DictField()
+	total_students = serializers.IntegerField()
+	leaderboard = LeaderboardEntrySerializer(many=True)
+
+
+class ParentChildLeaderboardContextSerializer(serializers.Serializer):
+	child = serializers.DictField()
+	scope = serializers.DictField()
+	rank = serializers.IntegerField(allow_null=True)
+	total_students = serializers.IntegerField()
+	points = serializers.IntegerField()
+	current_login_streak = serializers.IntegerField()
+	leaderboard_context = LeaderboardEntrySerializer(many=True)
+
+
+class ParentLeaderboardResponseSerializer(serializers.Serializer):
+	timeframe = serializers.CharField()
+	children = ParentChildLeaderboardContextSerializer(many=True)
+
+
 class ParentViewSet(viewsets.ViewSet):
 	"""Endpoints for parents to see information about their wards."""
 	permission_classes = [permissions.IsAuthenticated]
@@ -924,6 +1109,101 @@ class ParentViewSet(viewsets.ViewSet):
 			return "D-", "Poor"
 		# Below 60 F
 		return "F", "Fail"
+
+	def _child_ranking_context(self, child: Student, *, timeframe: str, window: int = 2) -> dict:
+		child_profile = getattr(child, 'profile', None)
+		child_payload = {
+			'student_db_id': child.id,
+			'student_id': getattr(child, 'student_id', None),
+			'student_name': getattr(child_profile, 'name', None),
+			'grade': getattr(child, 'grade', None),
+		}
+
+		if not getattr(child, 'school_id', None) or not getattr(child, 'grade', None):
+			return {
+				'child': child_payload,
+				'scope': {'kind': 'school_grade', 'school_id': getattr(child, 'school_id', None), 'grade': getattr(child, 'grade', None), 'timeframe': timeframe},
+				'rank': None,
+				'total_students': 0,
+				'points': 0,
+				'current_login_streak': int(getattr(child, 'current_login_streak', 0) or 0),
+				'leaderboard_context': [],
+			}
+
+		school = getattr(child, 'school', None)
+		scope = {
+			'kind': 'school_grade',
+			'school_id': child.school_id,
+			'school_name': getattr(school, 'name', None),
+			'grade': child.grade,
+		}
+		qs = Student.objects.filter(
+			school_id=child.school_id,
+			grade=child.grade,
+			status=StatusEnum.APPROVED.value,
+		)
+		total_students = qs.count()
+		payload = _build_student_leaderboard_response(
+			qs,
+			scope=scope,
+			limit=total_students,
+			timeframe=timeframe,
+		)
+		entries = payload.get('leaderboard', [])
+
+		child_index = None
+		for idx, item in enumerate(entries):
+			if item.get('student_db_id') == child.id:
+				child_index = idx
+				break
+
+		if child_index is None:
+			return {
+				'child': child_payload,
+				'scope': payload.get('scope', scope),
+				'rank': None,
+				'total_students': total_students,
+				'points': 0,
+				'current_login_streak': int(getattr(child, 'current_login_streak', 0) or 0),
+				'leaderboard_context': entries[: (window * 2 + 1)],
+			}
+
+		start = max(0, child_index - window)
+		end = child_index + window + 1
+		child_entry = entries[child_index]
+		return {
+			'child': child_payload,
+			'scope': payload.get('scope', scope),
+			'rank': child_entry.get('rank'),
+			'total_students': total_students,
+			'points': child_entry.get('points', 0),
+			'current_login_streak': child_entry.get('current_login_streak', 0),
+			'leaderboard_context': entries[start:end],
+		}
+
+	@extend_schema(
+		operation_id="parent_leaderboard",
+		description="Leaderboard context for each of the parent's children within the child's school and grade cohort.",
+		parameters=[
+			OpenApiParameter(name='timeframe', required=False, location=OpenApiParameter.QUERY, description='Leaderboard window: this_week, this_month, or all_time (default).', type=str),
+		],
+		responses={200: ParentLeaderboardResponseSerializer},
+	)
+	@action(detail=False, methods=['get'], url_path='leaderboard')
+	def leaderboard(self, request):
+		user: User = request.user
+		parent = getattr(user, 'parent', None)
+		if not parent:
+			return Response({"detail": "Parent profile required."}, status=status.HTTP_403_FORBIDDEN)
+
+		try:
+			timeframe = _parse_leaderboard_timeframe(request)
+		except ValueError as exc:
+			return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+		children = list(parent.wards.select_related('profile', 'school__district__county').all())
+		contexts = [self._child_ranking_context(child, timeframe=timeframe) for child in children]
+		return Response({'timeframe': timeframe, 'children': contexts})
 
 	@extend_schema(
 		operation_id="parent_dashboard",
@@ -1682,10 +1962,12 @@ class ContentViewSet(viewsets.ViewSet):
 
 	Content Creators:
 	- can list/create/update subjects, lessons, assessments, games, schools, counties, districts.
+	- can list and update AI-generated assessments (ai_recommended=True) even without a teacher profile.
 
 	Content Validators:
 	- can view everything and perform approve/reject/request-review on content objects
 	  that support a `status` field.
+	- can list AI-generated assessments alongside all other content.
 	"""
 	permission_classes = [permissions.IsAuthenticated]
 
@@ -1803,15 +2085,13 @@ class ContentViewSet(viewsets.ViewSet):
 					qs = qs.none()
 			user = request.user
 			if user and user.is_authenticated and IsContentCreator().has_permission(request, self) and not IsContentValidator().has_permission(request, self):
-				# For creator role, restrict to assessments created by them.
-				# GeneralAssessment does not have created_by; it links to a teacher via given_by.
-				teacher = getattr(user, 'teacher', None)
-				if teacher is not None:
-					qs = qs.filter(given_by=teacher)
-				else:
-					qs = qs.none()
-			return Response(GeneralAssessmentSerializer(qs, many=True).data)
-
+					# For creator role, restrict to their own assessments, but always expose
+					# AI-generated assessments regardless of teacher-ownership.
+					teacher = getattr(user, 'teacher', None)
+					if teacher is not None:
+						qs = qs.filter(Q(given_by=teacher) | Q(ai_recommended=True))
+					else:
+						qs = qs.filter(ai_recommended=True)
 		deny = self._require_creator(request)
 		if deny:
 			return deny
@@ -1868,13 +2148,12 @@ class ContentViewSet(viewsets.ViewSet):
 					qs = qs.none()
 			user = request.user
 			if user and user.is_authenticated and IsContentCreator().has_permission(request, self) and not IsContentValidator().has_permission(request, self):
-				teacher = getattr(user, 'teacher', None)
-				if teacher is not None:
-					qs = qs.filter(given_by=teacher)
-				else:
-					qs = qs.none()
-			return Response(LessonAssessmentSerializer(qs, many=True).data)
-
+					# Same as GeneralAssessment: expose AI-generated items to all creators.
+					teacher = getattr(user, 'teacher', None)
+					if teacher is not None:
+						qs = qs.filter(Q(given_by=teacher) | Q(ai_recommended=True))
+					else:
+						qs = qs.filter(ai_recommended=True)
 		deny = self._require_creator(request)
 		if deny:
 			return deny
@@ -2161,8 +2440,16 @@ class ContentViewSet(viewsets.ViewSet):
 
 		Intended for content managers/validators/admins to see teacher accounts
 		and their moderation status.
+		Teachers and head teachers only see colleagues in their own school.
 		"""
 		qs = Teacher.objects.select_related('profile', 'school').all().order_by('profile__name')
+		user = request.user
+		if user and user.is_authenticated and user.role in (UserRole.TEACHER.value, UserRole.HEADTEACHER.value):
+			teacher = getattr(user, 'teacher', None)
+			if teacher and teacher.school_id:
+				qs = qs.filter(school_id=teacher.school_id)
+			else:
+				qs = qs.none()
 		return Response(TeacherSerializer(qs, many=True).data)
 
 	@extend_schema(
@@ -2926,6 +3213,246 @@ class ContentViewSet(viewsets.ViewSet):
 				"moderation_comment": getattr(obj, 'moderation_comment', None)
 			})
 
+	# ------------------------------------------------------------------ #
+	# Update (PATCH) endpoints                                            #
+	# ------------------------------------------------------------------ #
+
+	@extend_schema(
+		operation_id="content_update_subject",
+		request=SubjectWriteSerializer,
+		responses={200: SubjectSerializer},
+		description=(
+			"Partially update a subject. "
+			"Creators may only update subjects they created; validators/admins can update any."
+		),
+	)
+	@action(detail=False, methods=['patch'], url_path='subjects/(?P<pk>[^/.]+)')
+	def update_subject(self, request, pk=None):
+		deny = self._require_creator(request)
+		if deny:
+			return deny
+		try:
+			obj = Subject.objects.get(pk=pk)
+		except Subject.DoesNotExist:
+			return Response({"detail": "Subject not found."}, status=status.HTTP_404_NOT_FOUND)
+		if not IsContentValidator().has_permission(request, self):
+			if obj.created_by_id != request.user.pk:
+				return Response({"detail": "You can only update subjects you created."}, status=status.HTTP_403_FORBIDDEN)
+		ser = SubjectWriteSerializer(obj, data=request.data, partial=True)
+		ser.is_valid(raise_exception=True)
+		updated = ser.save()
+		return Response(SubjectSerializer(updated).data)
+
+	@extend_schema(
+		operation_id="content_update_lesson",
+		request=LessonResourceSerializer,
+		responses={200: LessonResourceSerializer},
+		description=(
+			"Partially update a lesson. "
+			"Creators may only update lessons they created; validators/admins can update any."
+		),
+	)
+	@action(detail=False, methods=['patch'], url_path='lessons/(?P<pk>[^/.]+)')
+	def update_lesson(self, request, pk=None):
+		deny = self._require_creator(request)
+		if deny:
+			return deny
+		try:
+			obj = LessonResource.objects.get(pk=pk)
+		except LessonResource.DoesNotExist:
+			return Response({"detail": "Lesson not found."}, status=status.HTTP_404_NOT_FOUND)
+		if not IsContentValidator().has_permission(request, self):
+			if obj.created_by_id != request.user.pk:
+				return Response({"detail": "You can only update lessons you created."}, status=status.HTTP_403_FORBIDDEN)
+		ser = LessonResourceSerializer(obj, data=request.data, partial=True)
+		ser.is_valid(raise_exception=True)
+		updated = ser.save()
+		return Response(LessonResourceSerializer(updated).data)
+
+	@extend_schema(
+		operation_id="content_update_general_assessment",
+		request=GeneralAssessmentSerializer,
+		responses={200: GeneralAssessmentSerializer},
+		description=(
+			"Partially update a general assessment. "
+			"Creators may update assessments linked to their teacher profile or any AI-generated assessment; "
+			"validators/admins can update any."
+		),
+	)
+	@action(detail=False, methods=['patch'], url_path='general-assessments/(?P<pk>[^/.]+)')
+	def update_general_assessment(self, request, pk=None):
+		deny = self._require_creator(request)
+		if deny:
+			return deny
+		try:
+			obj = GeneralAssessment.objects.get(pk=pk)
+		except GeneralAssessment.DoesNotExist:
+			return Response({"detail": "General assessment not found."}, status=status.HTTP_404_NOT_FOUND)
+		if not IsContentValidator().has_permission(request, self):
+			teacher = getattr(request.user, 'teacher', None)
+			if not obj.ai_recommended:
+				if teacher is None or obj.given_by_id != teacher.id:
+					return Response(
+						{"detail": "You can only update your own assessments or AI-generated ones."},
+						status=status.HTTP_403_FORBIDDEN,
+					)
+		ser = GeneralAssessmentSerializer(obj, data=request.data, partial=True)
+		ser.is_valid(raise_exception=True)
+		updated = ser.save()
+		return Response(GeneralAssessmentSerializer(updated).data)
+
+	@extend_schema(
+		operation_id="content_update_lesson_assessment",
+		request=LessonAssessmentSerializer,
+		responses={200: LessonAssessmentSerializer},
+		description=(
+			"Partially update a lesson assessment. "
+			"Creators may update assessments linked to their teacher profile or any AI-generated assessment; "
+			"validators/admins can update any."
+		),
+	)
+	@action(detail=False, methods=['patch'], url_path='lesson-assessments/(?P<pk>[^/.]+)')
+	def update_lesson_assessment(self, request, pk=None):
+		deny = self._require_creator(request)
+		if deny:
+			return deny
+		try:
+			obj = LessonAssessment.objects.get(pk=pk)
+		except LessonAssessment.DoesNotExist:
+			return Response({"detail": "Lesson assessment not found."}, status=status.HTTP_404_NOT_FOUND)
+		if not IsContentValidator().has_permission(request, self):
+			teacher = getattr(request.user, 'teacher', None)
+			if not obj.ai_recommended:
+				if teacher is None or obj.given_by_id != teacher.id:
+					return Response(
+						{"detail": "You can only update your own assessments or AI-generated ones."},
+						status=status.HTTP_403_FORBIDDEN,
+					)
+		ser = LessonAssessmentSerializer(obj, data=request.data, partial=True)
+		ser.is_valid(raise_exception=True)
+		updated = ser.save()
+		return Response(LessonAssessmentSerializer(updated).data)
+
+	@extend_schema(
+		operation_id="content_update_game",
+		request=GameSerializer,
+		responses={200: GameSerializer},
+		description=(
+			"Partially update a game. "
+			"Creators may only update games they created; validators/admins can update any."
+		),
+	)
+	@action(detail=False, methods=['patch'], url_path='games/(?P<pk>[^/.]+)')
+	def update_game(self, request, pk=None):
+		deny = self._require_creator(request)
+		if deny:
+			return deny
+		try:
+			obj = GameModel.objects.get(pk=pk)
+		except GameModel.DoesNotExist:
+			return Response({"detail": "Game not found."}, status=status.HTTP_404_NOT_FOUND)
+		if not IsContentValidator().has_permission(request, self):
+			if obj.created_by_id != request.user.pk:
+				return Response({"detail": "You can only update games you created."}, status=status.HTTP_403_FORBIDDEN)
+		ser = GameSerializer(obj, data=request.data, partial=True)
+		ser.is_valid(raise_exception=True)
+		updated = ser.save()
+		return Response(GameSerializer(updated).data)
+
+	@extend_schema(
+		operation_id="content_update_school",
+		request=SchoolSerializer,
+		responses={200: SchoolSerializer},
+		description="Partially update a school. Requires content creator or validator role.",
+	)
+	@action(detail=False, methods=['patch'], url_path='schools/(?P<pk>[^/.]+)')
+	def update_school(self, request, pk=None):
+		deny = self._require_creator(request)
+		if deny:
+			return deny
+		try:
+			obj = School.objects.get(pk=pk)
+		except School.DoesNotExist:
+			return Response({"detail": "School not found."}, status=status.HTTP_404_NOT_FOUND)
+		ser = SchoolSerializer(obj, data=request.data, partial=True)
+		ser.is_valid(raise_exception=True)
+		updated = ser.save()
+		return Response(SchoolSerializer(updated).data)
+
+	@extend_schema(
+		operation_id="content_update_county",
+		request=CountySerializer,
+		responses={200: CountySerializer},
+		description=(
+			"Partially update a county. "
+			"Creators may only update counties they created; validators/admins can update any."
+		),
+	)
+	@action(detail=False, methods=['patch'], url_path='counties/(?P<pk>[^/.]+)')
+	def update_county(self, request, pk=None):
+		deny = self._require_creator(request)
+		if deny:
+			return deny
+		try:
+			obj = County.objects.get(pk=pk)
+		except County.DoesNotExist:
+			return Response({"detail": "County not found."}, status=status.HTTP_404_NOT_FOUND)
+		if not IsContentValidator().has_permission(request, self):
+			if obj.created_by_id != request.user.pk:
+				return Response({"detail": "You can only update counties you created."}, status=status.HTTP_403_FORBIDDEN)
+		ser = CountySerializer(obj, data=request.data, partial=True)
+		ser.is_valid(raise_exception=True)
+		updated = ser.save()
+		return Response(CountySerializer(updated).data)
+
+	@extend_schema(
+		operation_id="content_update_district",
+		request=DistrictSerializer,
+		responses={200: DistrictSerializer},
+		description="Partially update a district. Requires content creator or validator role.",
+	)
+	@action(detail=False, methods=['patch'], url_path='districts/(?P<pk>[^/.]+)')
+	def update_district(self, request, pk=None):
+		deny = self._require_creator(request)
+		if deny:
+			return deny
+		try:
+			obj = District.objects.get(pk=pk)
+		except District.DoesNotExist:
+			return Response({"detail": "District not found."}, status=status.HTTP_404_NOT_FOUND)
+		ser = DistrictSerializer(obj, data=request.data, partial=True)
+		ser.is_valid(raise_exception=True)
+		updated = ser.save()
+		return Response(DistrictSerializer(updated).data)
+
+	@extend_schema(
+		operation_id="content_update_question",
+		request=QuestionCreateSerializer,
+		responses={200: QuestionSerializer},
+		description=(
+			"Partially update a question's type, text, or answer. "
+			"The assessment association (general_assessment / lesson_assessment) cannot be changed here. "
+			"Requires content creator or validator role."
+		),
+	)
+	@action(detail=False, methods=['patch'], url_path='questions/(?P<pk>[^/.]+)')
+	def update_question(self, request, pk=None):
+		deny = self._require_creator(request)
+		if deny:
+			return deny
+		try:
+			obj = Question.objects.prefetch_related('options').get(pk=pk)
+		except Question.DoesNotExist:
+			return Response({"detail": "Question not found."}, status=status.HTTP_404_NOT_FOUND)
+		allowed_fields = {'type', 'question', 'answer'}
+		update_data = {k: v for k, v in request.data.items() if k in allowed_fields}
+		if not update_data:
+			return Response({"detail": "No updatable fields provided. Allowed: type, question, answer."}, status=status.HTTP_400_BAD_REQUEST)
+		for field, value in update_data.items():
+			setattr(obj, field, value)
+		obj.save(update_fields=list(update_data.keys()))
+		return Response(QuestionSerializer(obj).data)
+
 
 class OnboardingViewSet(viewsets.ViewSet):
 	"""Endpoints to onboard users step-by-step.
@@ -2999,7 +3526,7 @@ class OnboardingViewSet(viewsets.ViewSet):
 	@action(detail=False, methods=['post'], permission_classes=[permissions.IsAuthenticated])
 	def userrole(self, request):
 		role = (request.data.get('role') or '').strip().upper()
-		allowed = {UserRole.STUDENT.value, UserRole.TEACHER.value, UserRole.PARENT.value}
+		allowed = {UserRole.STUDENT.value, UserRole.TEACHER.value, UserRole.HEADTEACHER.value, UserRole.PARENT.value}
 		if role not in allowed:
 			return Response({"detail": f"Invalid role. Allowed: {', '.join(sorted(allowed))}"}, status=400)
 		user: User = request.user
@@ -3009,7 +3536,7 @@ class OnboardingViewSet(viewsets.ViewSet):
 		# ensure profile exists
 		if role == UserRole.STUDENT.value and not hasattr(user, 'student'):
 			Student.objects.create(profile=user)
-		elif role == UserRole.TEACHER.value and not hasattr(user, 'teacher'):
+		elif role in {UserRole.TEACHER.value, UserRole.HEADTEACHER.value} and not hasattr(user, 'teacher'):
 			Teacher.objects.create(profile=user)
 		elif role == UserRole.PARENT.value and not hasattr(user, 'parent'):
 			Parent.objects.create(profile=user)
@@ -3062,7 +3589,7 @@ class OnboardingViewSet(viewsets.ViewSet):
 			if school_obj:
 				s.school = school_obj
 			s.save(update_fields=['grade', 'school', 'updated_at'])
-		elif user.role == UserRole.TEACHER.value and hasattr(user, 'teacher'):
+		elif user.role in {UserRole.TEACHER.value, UserRole.HEADTEACHER.value} and hasattr(user, 'teacher'):
 			t = user.teacher
 			# Resolve school assignment
 			school_obj = None
@@ -3123,6 +3650,20 @@ class LoginViewSet(viewsets.ViewSet):
 
 	serializer_class = DummySerializer
 
+	def _school_snapshot(self, school) -> dict | None:
+		if school is None:
+			return None
+		district = getattr(school, 'district', None)
+		county = getattr(district, 'county', None) if district is not None else None
+		return {
+			'id': getattr(school, 'id', None),
+			'name': getattr(school, 'name', None),
+			'district_id': getattr(school, 'district_id', None),
+			'district_name': getattr(district, 'name', None),
+			'county_id': getattr(district, 'county_id', None),
+			'county_name': getattr(county, 'name', None),
+		}
+
 	@extend_schema(
 		description=(
 			"Return the authenticated user's profile, including any attached "
@@ -3157,6 +3698,11 @@ class LoginViewSet(viewsets.ViewSet):
 			payload["student"] = {
 				"id": student.id,
 				"grade": getattr(student, "grade", None),
+				"points": getattr(student, "points", 0),
+				"current_login_streak": getattr(student, "current_login_streak", 0),
+				"max_login_streak": getattr(student, "max_login_streak", 0),
+				"last_login_activity_date": getattr(student, "last_login_activity_date", None),
+				"school": self._school_snapshot(getattr(student, 'school', None)),
 				"status": getattr(student, "status", None),
 			}
 
@@ -3166,6 +3712,7 @@ class LoginViewSet(viewsets.ViewSet):
 			payload["teacher"] = {
 				"id": teacher.id,
 				"school_id": getattr(teacher, "school_id", None),
+				"school": self._school_snapshot(getattr(teacher, 'school', None)),
 				"status": getattr(teacher, "status", None),
 			}
 
@@ -3197,7 +3744,7 @@ class LoginViewSet(viewsets.ViewSet):
 		'''Content creator, validator, and teacher login endpoint.\n
 		[identifier]: email or phone \n
 		[password]: user's password'''
-		allowed = {UserRole.CONTENTCREATOR.value, UserRole.CONTENTVALIDATOR.value, UserRole.TEACHER.value}
+		allowed = {UserRole.CONTENTCREATOR.value, UserRole.CONTENTVALIDATOR.value, UserRole.TEACHER.value, UserRole.HEADTEACHER.value}
 		return self._login_with_role(request, allowed_roles=allowed)
 
 	@extend_schema(request=LoginSerializer, responses={200: OpenApiResponse(description="Token and user payload")})
@@ -3301,47 +3848,75 @@ class LoginViewSet(viewsets.ViewSet):
 					status=403,
 				)
 		# For teacher/content logins, require that the teacher profile is approved
-		if user.role == UserRole.TEACHER.value and hasattr(user, 'teacher') and user.teacher:
+		if user.role in {UserRole.TEACHER.value, UserRole.HEADTEACHER.value} and hasattr(user, 'teacher') and user.teacher:
 			if getattr(user.teacher, 'status', StatusEnum.PENDING.value) != StatusEnum.APPROVED.value:
 				return Response(
 					{"detail": "Your teacher account is awaiting approval by a content validator or administrator."},
 					status=403,
 				)
 
+		# For students, update streak once per calendar day (server timezone).
+		self._update_student_login_streak(user)
+
 		token = AuthToken.objects.create(user)[1]
 
 		student_payload = None
 		if user.role == UserRole.STUDENT.value and hasattr(user, 'student') and user.student:
 			s = user.student
-			school_payload = None
-			if getattr(s, 'school_id', None):
-				sch = s.school
-				# Build a lightweight school snapshot to avoid a full serializer dependency
-				district_name = getattr(getattr(sch, 'district', None), 'name', None)
-				county_id = getattr(getattr(sch, 'district', None), 'county_id', None)
-				county_name = None
-				if getattr(sch, 'district', None) and getattr(sch.district, 'county', None):
-					county_name = getattr(sch.district.county, 'name', None)
-				school_payload = {
-					'id': sch.id,
-					'name': getattr(sch, 'name', None),
-					'district_id': getattr(sch, 'district_id', None),
-					'district_name': district_name,
-					'county_id': county_id,
-					'county_name': county_name,
-				}
+			school_payload = self._school_snapshot(getattr(s, 'school', None))
 
 			student_payload = {
 				'id': s.id,
 				'grade': getattr(s, 'grade', None),
+				'points': getattr(s, 'points', 0),
+				'current_login_streak': getattr(s, 'current_login_streak', 0),
+				'max_login_streak': getattr(s, 'max_login_streak', 0),
+				'last_login_activity_date': getattr(s, 'last_login_activity_date', None),
 				'school': school_payload,
+			}
+
+		teacher_payload = None
+		if user.role in {UserRole.TEACHER.value, UserRole.HEADTEACHER.value} and hasattr(user, 'teacher') and user.teacher:
+			t = user.teacher
+			teacher_payload = {
+				'id': t.id,
+				'school_id': getattr(t, 'school_id', None),
+				'school': self._school_snapshot(getattr(t, 'school', None)),
+				'status': getattr(t, 'status', None),
 			}
 
 		return Response({
 			"token": token,
 			"user": UserSerializer(user).data,
 			**({"student": student_payload} if student_payload else {}),
+			**({"teacher": teacher_payload} if teacher_payload else {}),
 		})
+
+	def _update_student_login_streak(self, user: User) -> None:
+		if user.role != UserRole.STUDENT.value:
+			return
+		student = getattr(user, 'student', None)
+		if student is None:
+			return
+
+		today = timezone.localdate()
+		last_day = getattr(student, 'last_login_activity_date', None)
+
+		# Multiple logins on the same day should only count once.
+		if last_day == today:
+			return
+
+		if last_day is not None and last_day == (today - timedelta(days=1)):
+			student.current_login_streak = int(getattr(student, 'current_login_streak', 0) or 0) + 1
+		else:
+			student.current_login_streak = 1
+
+		student.max_login_streak = max(
+			int(getattr(student, 'max_login_streak', 0) or 0),
+			student.current_login_streak,
+		)
+		student.last_login_activity_date = today
+		student.save(update_fields=['current_login_streak', 'max_login_streak', 'last_login_activity_date'])
 
 
 class DashboardViewSet(viewsets.ViewSet):
@@ -4543,22 +5118,26 @@ class KidsViewSet(viewsets.ViewSet):
 			return Response({"detail": "Game not found."}, status=404)
 
 		# Upsert GamePlay entry for this student/game
-		GamePlay.objects.update_or_create(
+		_, created = GamePlay.objects.update_or_create(
 			student=student,
 			game=game,
 			defaults={},
 		)
+		points_awarded = GAME_PLAY_POINTS if created else 0
+		total_points = _award_student_points(student, GAME_PLAY_POINTS) if created else getattr(student, 'points', 0)
 
 		# Optionally log as an Activity for richer feeds/analytics
 		Activity.objects.create(
 			user=user,
 			type="play_game",
 			description=f"Played game '{game.name}'",
-			metadata={"game_id": game.id, "game_type": game.type},
+			metadata={"game_id": game.id, "game_type": game.type, "points_awarded": points_awarded},
 		)
 
 		return Response({
 			"detail": "Game play recorded.",
+			"points_awarded": points_awarded,
+			"total_points": total_points,
 			"game": {
 				"id": game.id,
 				"name": game.name,
@@ -4932,11 +5511,26 @@ class KidsViewSet(viewsets.ViewSet):
 				solution_obj.attachment = attachment
 				solution_obj.save()
 
+			points_awarded = ASSESSMENT_SUBMISSION_POINTS if created else 0
+			total_points = _award_student_points(student, ASSESSMENT_SUBMISSION_POINTS) if created else getattr(student, 'points', 0)
+
+			Activity.objects.create(
+				user=user,
+				type="submit_general_assessment",
+				description=f"Submitted solution for '{assessment.title}'",
+				metadata={
+					'assessment_id': assessment.id,
+					'points_awarded': points_awarded,
+				},
+			)
+
 			_invalidate_student_lesson_cache(student)
 
 			return Response({
 				"detail": "Solution submitted.",
 				"solution_id": solution_obj.id,
+				"points_awarded": points_awarded,
+				"total_points": total_points,
 			})
 
 		lesson_assessment = LessonAssessment.objects.filter(id=lesson_id).first()
@@ -4960,11 +5554,26 @@ class KidsViewSet(viewsets.ViewSet):
 			solution_obj.attachment = attachment
 			solution_obj.save()
 
+		points_awarded = ASSESSMENT_SUBMISSION_POINTS if created else 0
+		total_points = _award_student_points(student, ASSESSMENT_SUBMISSION_POINTS) if created else getattr(student, 'points', 0)
+
+		Activity.objects.create(
+			user=user,
+			type="submit_lesson_assessment",
+			description=f"Submitted solution for '{lesson_assessment.title}'",
+			metadata={
+				'lesson_assessment_id': lesson_assessment.id,
+				'points_awarded': points_awarded,
+			},
+		)
+
 		_invalidate_student_lesson_cache(student)
 
 		return Response({
 			"detail": "Solution submitted.",
 			"solution_id": solution_obj.id,
+			"points_awarded": points_awarded,
+			"total_points": total_points,
 		})
 
 
@@ -4980,7 +5589,7 @@ class TeacherViewSet(viewsets.ViewSet):
 
 	def _require_teacher(self, request):
 		user: User = request.user
-		if not user or getattr(user, 'role', None) not in {UserRole.TEACHER.value, UserRole.ADMIN.value}:
+		if not user or getattr(user, 'role', None) not in {UserRole.TEACHER.value, UserRole.HEADTEACHER.value, UserRole.ADMIN.value}:
 			return Response({"detail": "Teacher role required."}, status=403)
 		if not hasattr(user, 'teacher'):
 			return Response({"detail": "Teacher profile required."}, status=403)
@@ -5020,6 +5629,78 @@ class TeacherViewSet(viewsets.ViewSet):
 		if remark in {"Good", "Fair"}:
 			return "Good"
 		return "Needs Improvement"
+
+	def _teacher_leaderboard_grades(self, teacher: Teacher) -> List[str]:
+		return list(
+			Subject.objects
+			.filter(teachers=teacher)
+			.order_by()
+			.values_list('grade', flat=True)
+			.distinct()
+		)
+
+	def _leaderboard_student_queryset(self, request):
+		teacher = request.user.teacher
+		if not getattr(teacher, 'school_id', None):
+			return Student.objects.none()
+
+		grades = self._teacher_leaderboard_grades(teacher)
+		if not grades:
+			return Student.objects.none()
+
+		return Student.objects.filter(
+			school_id=teacher.school_id,
+			grade__in=grades,
+			status=StatusEnum.APPROVED.value,
+		)
+
+	def _leaderboard_scope(self, request) -> dict:
+		teacher = request.user.teacher
+		school = getattr(teacher, 'school', None)
+		return {
+			'kind': 'class',
+			'school_id': getattr(school, 'id', None),
+			'school_name': getattr(school, 'name', None),
+			'grades': self._teacher_leaderboard_grades(teacher),
+		}
+
+	@extend_schema(
+		description="Leaderboard for the teacher's class, derived from grades of subjects assigned to the teacher.",
+		parameters=[
+			OpenApiParameter(
+				name='timeframe',
+				required=False,
+				location=OpenApiParameter.QUERY,
+				description='Leaderboard window: this_week, this_month, or all_time (default).',
+				type=str,
+			),
+			OpenApiParameter(
+				name='limit',
+				required=False,
+				location=OpenApiParameter.QUERY,
+				description='Maximum number of students to return. Defaults to 10, max 100.',
+				type=int,
+			),
+		],
+		responses={200: LeaderboardResponseSerializer},
+	)
+	@action(detail=False, methods=['get'], url_path='leaderboard')
+	def leaderboard(self, request):
+		deny = self._require_teacher(request)
+		if deny:
+			return deny
+		try:
+			timeframe = _parse_leaderboard_timeframe(request)
+		except ValueError as exc:
+			return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+		payload = _build_student_leaderboard_response(
+			self._leaderboard_student_queryset(request),
+			scope=self._leaderboard_scope(request),
+			limit=_parse_leaderboard_limit(request),
+			timeframe=timeframe,
+		)
+		return Response(payload)
 
 	@extend_schema(
 		description="List subjects for the teacher's grade.",
@@ -7146,6 +7827,58 @@ class AdminDashboardViewSet(viewsets.ViewSet):
 		}
 		ser = AdminDashboardSerializer(payload)
 		return Response(ser.data)
+
+	@extend_schema(
+		operation_id="admin_leaderboard",
+		description="National student leaderboard with optional county, district, and school filters.",
+		parameters=[
+			OpenApiParameter(name='timeframe', required=False, location=OpenApiParameter.QUERY, description='Leaderboard window: this_week, this_month, or all_time (default).', type=str),
+			OpenApiParameter(name='county_id', required=False, location=OpenApiParameter.QUERY, description='Filter by county id.', type=int),
+			OpenApiParameter(name='district_id', required=False, location=OpenApiParameter.QUERY, description='Filter by district id.', type=int),
+			OpenApiParameter(name='school_id', required=False, location=OpenApiParameter.QUERY, description='Filter by school id.', type=int),
+			OpenApiParameter(name='limit', required=False, location=OpenApiParameter.QUERY, description='Maximum number of students to return. Defaults to 10, max 100.', type=int),
+		],
+		responses={200: LeaderboardResponseSerializer},
+	)
+	@action(detail=False, methods=['get'], url_path='leaderboard')
+	def leaderboard(self, request):
+		def _parse_optional_int(name: str):
+			raw_value = request.query_params.get(name)
+			if raw_value in {None, ''}:
+				return None
+			try:
+				return int(raw_value)
+			except (TypeError, ValueError):
+				raise ValueError(f"{name} must be an integer.")
+
+		try:
+			county_id = _parse_optional_int('county_id')
+			district_id = _parse_optional_int('district_id')
+			school_id = _parse_optional_int('school_id')
+			timeframe = _parse_leaderboard_timeframe(request)
+		except ValueError as exc:
+			return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+		qs = Student.objects.filter(status=StatusEnum.APPROVED.value)
+		if county_id is not None:
+			qs = qs.filter(school__district__county_id=county_id)
+		if district_id is not None:
+			qs = qs.filter(school__district_id=district_id)
+		if school_id is not None:
+			qs = qs.filter(school_id=school_id)
+
+		payload = _build_student_leaderboard_response(
+			qs,
+			scope={
+				'kind': 'national',
+				'county_id': county_id,
+				'district_id': district_id,
+				'school_id': school_id,
+			},
+			limit=_parse_leaderboard_limit(request),
+			timeframe=timeframe,
+		)
+		return Response(payload)
 
 
 class AdminSystemReportViewSet(viewsets.ViewSet):

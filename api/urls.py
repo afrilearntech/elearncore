@@ -31,6 +31,7 @@ from .viewsets import (
 	KidsViewSet,
 	TeacherViewSet,
 )
+from .headteacher_viewset import HeadTeacherViewSet
 
 router = DefaultRouter()
 router.register(r'subjects', SubjectViewSet, basename='subject')
@@ -60,6 +61,7 @@ router.register(r'admin/system-reports', AdminSystemReportViewSet, basename='adm
 router.register(r'games', GameViewSet, basename='game')
 router.register(r'content', ContentViewSet, basename='content')
 router.register(r'teacher', TeacherViewSet, basename='teacher')
+router.register(r'headteacher', HeadTeacherViewSet, basename='headteacher')
 router.register(r'parent', ParentViewSet, basename='parent')
 
 urlpatterns = [
