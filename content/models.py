@@ -77,6 +77,9 @@ class Subject(TimestampedModel):
 
 	class Meta:
 		unique_together = ("name", "grade")
+		indexes = [
+			models.Index(fields=["grade", "status", "name"]),
+		]
 
 	def __str__(self) -> str:
 		return f"{self.name} ({self.grade})"
@@ -123,6 +126,8 @@ class LessonResource(TimestampedModel):
 	class Meta:
 		indexes = [
 			models.Index(fields=["subject", "created_at"]),
+			models.Index(fields=["subject", "status", "period", "topic", "id"]),
+			models.Index(fields=["status", "created_at"]),
 		]
 
 
@@ -139,6 +144,25 @@ class TakeLesson(TimestampedModel):
 
 	def __str__(self) -> str:
 		return f"{getattr(self.student.profile, 'name', 'Student')} -> {self.lesson.title}"
+
+
+class LessonTemporaryUnlock(TimestampedModel):
+	"""Temporary teacher-granted unlock to bypass lesson lock progression for one student."""
+	lesson = models.ForeignKey(LessonResource, on_delete=models.CASCADE, related_name='temporary_unlocks')
+	student = models.ForeignKey('accounts.Student', on_delete=models.CASCADE, related_name='temporary_lesson_unlocks')
+	unlocked_by = models.ForeignKey('accounts.User', on_delete=models.SET_NULL, null=True, related_name='granted_lesson_unlocks')
+	reason = models.CharField(max_length=255, blank=True, default="")
+	expires_at = models.DateTimeField()
+	revoked_at = models.DateTimeField(null=True, blank=True)
+
+	class Meta:
+		indexes = [
+			models.Index(fields=["student", "lesson", "expires_at", "revoked_at"]),
+			models.Index(fields=["lesson", "expires_at"]),
+		]
+
+	def __str__(self) -> str:
+		return f"Unlock: {self.student_id} -> {self.lesson_id} (until {self.expires_at})"
 
 
 # Assessments
@@ -165,6 +189,7 @@ class GeneralAssessment(TimestampedModel):
 			models.Index(fields=["due_at"]),
 			models.Index(fields=["grade", "due_at"]),
 			models.Index(fields=["is_targeted", "target_student"]),
+			models.Index(fields=["status", "grade", "due_at"]),
 		]
 
 class AssessmentSolution(TimestampedModel):
@@ -177,6 +202,11 @@ class AssessmentSolution(TimestampedModel):
 	def __str__(self) -> str:
 		return f"Solution by {getattr(self.student.profile, 'name', 'Student')} for {self.assessment.title}"
 
+	class Meta:
+		indexes = [
+			models.Index(fields=["student", "assessment"]),
+		]
+
 class GeneralAssessmentGrade(TimestampedModel):
 	assessment = models.ForeignKey(GeneralAssessment, on_delete=models.CASCADE, related_name='grades')
 	student = models.ForeignKey('accounts.Student', on_delete=models.CASCADE, related_name='general_assessment_grades')
@@ -185,6 +215,9 @@ class GeneralAssessmentGrade(TimestampedModel):
 
 	class Meta:
 		unique_together = ("assessment", "student")
+		indexes = [
+			models.Index(fields=["student", "assessment"]),
+		]
 
 	def __str__(self) -> str:
 		return f"{getattr(self.student.profile, 'name', 'Student')}: {self.score} / {self.assessment.marks}"
@@ -212,6 +245,7 @@ class LessonAssessment(TimestampedModel):
 			models.Index(fields=["due_at"]),
 			models.Index(fields=["lesson", "due_at"]),
 			models.Index(fields=["is_targeted", "target_student"]),
+			models.Index(fields=["lesson", "status", "is_targeted", "target_student"]),
 		]
 
 
@@ -225,6 +259,11 @@ class LessonAssessmentSolution(TimestampedModel):
 	def __str__(self) -> str:
 		return f"Solution by {getattr(self.student.profile, 'name', 'Student')} for {self.lesson_assessment.title}"
 
+	class Meta:
+		indexes = [
+			models.Index(fields=["student", "lesson_assessment"]),
+		]
+
 
 class LessonAssessmentGrade(TimestampedModel):
 	lesson_assessment = models.ForeignKey(LessonAssessment, on_delete=models.CASCADE, related_name='grades')
@@ -233,6 +272,9 @@ class LessonAssessmentGrade(TimestampedModel):
 
 	class Meta:
 		unique_together = ("lesson_assessment", "student")
+		indexes = [
+			models.Index(fields=["student", "lesson_assessment"]),
+		]
 
 	def __str__(self) -> str:
 		return f"{getattr(self.student.profile, 'name', 'Student')}: {self.score} / {self.lesson_assessment.marks}"

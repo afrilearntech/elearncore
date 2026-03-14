@@ -1,13 +1,15 @@
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.core.cache import cache
+from django.core.management import call_command
 from django.test import TestCase
 from django.utils import timezone
 from datetime import timedelta
+from io import StringIO
 from unittest.mock import patch
 from rest_framework.test import APIClient
 
 from accounts.models import User, Student, Teacher, Parent, County, District, School
-from content.models import Subject, Period, LessonResource, LessonAssessment, LessonAssessmentGrade, TakeLesson, LessonAssessmentSolution, GeneralAssessment, AssessmentSolution, GameModel, Activity
+from content.models import Subject, Period, LessonResource, LessonAssessment, LessonAssessmentGrade, TakeLesson, LessonAssessmentSolution, GeneralAssessment, AssessmentSolution, GameModel, Activity, LessonTemporaryUnlock
 from elearncore.sysutils.constants import UserRole, StudentLevel, ContentType, AssessmentType, Status as StatusEnum
 
 
@@ -201,6 +203,391 @@ class KidsSubjectsAndLessonsProgressionTests(TestCase):
 		self.assertFalse(second_lessons[1]['is_locked'])
 		self.assertTrue(second_lessons[1]['is_completed'])
 		self.assertFalse(second_lessons[2]['is_locked'])
+
+
+class KidsProgressGardenRankingTests(TestCase):
+	def setUp(self):
+		cache.clear()
+		self.client = APIClient()
+
+		county = County.objects.create(name='Montserrado', status=StatusEnum.APPROVED.value)
+		district = District.objects.create(county=county, name='Careysburg', status=StatusEnum.APPROVED.value)
+		school = School.objects.create(district=district, name='Unity Academy', status=StatusEnum.APPROVED.value)
+
+		self.user = User.objects.create_user(
+			phone='231770004111',
+			name='Ranked Student',
+			email='ranked.student@example.com',
+			password='pass',
+			role=UserRole.STUDENT.value,
+		)
+		self.student = Student.objects.create(
+			profile=self.user,
+			school=school,
+			grade=StudentLevel.GRADE3.value,
+			status=StatusEnum.APPROVED.value,
+		)
+
+		other_user = User.objects.create_user(
+			phone='231770004112',
+			name='Peer Student',
+			email='peer.student@example.com',
+			password='pass',
+			role=UserRole.STUDENT.value,
+		)
+		self.peer_student = Student.objects.create(
+			profile=other_user,
+			school=school,
+			grade=StudentLevel.GRADE3.value,
+			status=StatusEnum.APPROVED.value,
+		)
+
+		subject = Subject.objects.create(
+			name='Mathematics',
+			grade=StudentLevel.GRADE3.value,
+			status=StatusEnum.APPROVED.value,
+		)
+		period = Period.objects.create(name='April', start_month=4, end_month=4)
+		lesson_one = LessonResource.objects.create(
+			subject=subject,
+			period=period,
+			title='Place Values',
+			type=ContentType.VIDEO.value,
+			status=StatusEnum.APPROVED.value,
+			resource=SimpleUploadedFile('place-values.mp4', b'video', content_type='video/mp4'),
+		)
+		lesson_two = LessonResource.objects.create(
+			subject=subject,
+			period=period,
+			title='Addition Basics',
+			type=ContentType.VIDEO.value,
+			status=StatusEnum.APPROVED.value,
+			resource=SimpleUploadedFile('addition-basics.mp4', b'video', content_type='video/mp4'),
+		)
+
+		TakeLesson.objects.create(student=self.student, lesson=lesson_one)
+		TakeLesson.objects.create(student=self.student, lesson=lesson_two)
+		TakeLesson.objects.create(student=self.peer_student, lesson=lesson_one)
+
+		self.client.force_authenticate(user=self.user)
+
+	def test_progress_garden_returns_scoped_rank_data(self):
+		response = self.client.get('/api-v1/kids/progressgarden/?test=rank-cache')
+		self.assertEqual(response.status_code, 200)
+
+		payload = response.json()
+		self.assertIsNotNone(payload['rank_in_school'])
+		self.assertEqual(payload['rank_in_school']['out_of'], 2)
+		self.assertEqual(payload['rank_in_school']['rank'], 1)
+		self.assertIsNotNone(payload['rank_in_district'])
+		self.assertEqual(payload['rank_in_district']['out_of'], 2)
+		self.assertIsNotNone(payload['rank_in_county'])
+		self.assertEqual(payload['rank_in_county']['out_of'], 2)
+
+
+class KidsAssessmentListingEndpointsTests(TestCase):
+	def setUp(self):
+		cache.clear()
+		self.client = APIClient()
+		self.user = User.objects.create_user(
+			phone='231770004211',
+			name='Listing Student',
+			email='listing.student@example.com',
+			password='pass',
+			role=UserRole.STUDENT.value,
+		)
+		self.student = Student.objects.create(
+			profile=self.user,
+			grade=StudentLevel.GRADE3.value,
+			status=StatusEnum.APPROVED.value,
+		)
+		self.client.force_authenticate(user=self.user)
+
+		subject = Subject.objects.create(
+			name='Science',
+			grade=StudentLevel.GRADE3.value,
+			status=StatusEnum.APPROVED.value,
+		)
+		period = Period.objects.create(name='May', start_month=5, end_month=5)
+		lesson = LessonResource.objects.create(
+			subject=subject,
+			period=period,
+			title='Living Things',
+			type=ContentType.VIDEO.value,
+			status=StatusEnum.APPROVED.value,
+			resource=SimpleUploadedFile('living-things.mp4', b'video', content_type='video/mp4'),
+		)
+
+		self.general_assessment = GeneralAssessment.objects.create(
+			title='Weekly General Quiz',
+			type=AssessmentType.QUIZ.value,
+			status=StatusEnum.APPROVED.value,
+			grade=StudentLevel.GRADE3.value,
+			due_at=timezone.now() + timedelta(days=3),
+		)
+		self.lesson_assessment = LessonAssessment.objects.create(
+			lesson=lesson,
+			title='Living Things Lesson Quiz',
+			type=AssessmentType.QUIZ.value,
+			status=StatusEnum.APPROVED.value,
+			due_at=timezone.now() + timedelta(days=2),
+		)
+
+		AssessmentSolution.objects.create(
+			assessment=self.general_assessment,
+			student=self.student,
+			solution='Submitted answer',
+			attachment=SimpleUploadedFile('general-solution.txt', b'ans', content_type='text/plain'),
+		)
+
+	def test_quizzes_endpoint_returns_paginated_items(self):
+		resp = self.client.get('/api-v1/kids/quizzes/?test=listing')
+		self.assertEqual(resp.status_code, 200)
+		payload = resp.json()
+		self.assertIn('quizzes', payload)
+		self.assertIn('pagination', payload)
+		self.assertEqual(payload['pagination']['count'], 2)
+
+	def test_assessments_endpoint_returns_paginated_items(self):
+		resp = self.client.get('/api-v1/kids/assessments/?test=listing')
+		self.assertEqual(resp.status_code, 200)
+		payload = resp.json()
+		self.assertIn('assessments', payload)
+		self.assertIn('pagination', payload)
+		self.assertEqual(payload['pagination']['count'], 2)
+
+	def test_assignments_endpoint_includes_stats(self):
+		resp = self.client.get('/api-v1/kids/assignments/?test=listing')
+		self.assertEqual(resp.status_code, 200)
+		payload = resp.json()
+		self.assertIn('stats', payload)
+		self.assertEqual(payload['stats']['total'], 2)
+		self.assertEqual(payload['stats']['submitted'], 1)
+
+
+class TeacherTemporaryLessonUnlockTests(TestCase):
+	def setUp(self):
+		cache.clear()
+
+		county = County.objects.create(name='Bong', status=StatusEnum.APPROVED.value)
+		district = District.objects.create(county=county, name='Gbarnga', status=StatusEnum.APPROVED.value)
+		school = School.objects.create(district=district, name='Central High', status=StatusEnum.APPROVED.value)
+
+		self.student_user = User.objects.create_user(
+			phone='231770006111',
+			name='Unlocked Student',
+			email='unlock.student@example.com',
+			password='pass',
+			role=UserRole.STUDENT.value,
+		)
+		self.student = Student.objects.create(
+			profile=self.student_user,
+			school=school,
+			grade=StudentLevel.GRADE3.value,
+			status=StatusEnum.APPROVED.value,
+		)
+
+		self.teacher_user = User.objects.create_user(
+			phone='231770006112',
+			name='Class Teacher',
+			email='class.teacher@example.com',
+			password='pass',
+			role=UserRole.TEACHER.value,
+		)
+		self.teacher = Teacher.objects.create(
+			profile=self.teacher_user,
+			school=school,
+			status=StatusEnum.APPROVED.value,
+		)
+
+		self.math = Subject.objects.create(
+			name='Math Unlocking',
+			grade=StudentLevel.GRADE3.value,
+			status=StatusEnum.APPROVED.value,
+		)
+		self.math.teachers.add(self.teacher)
+
+		self.other_subject = Subject.objects.create(
+			name='Other Subject',
+			grade=StudentLevel.GRADE3.value,
+			status=StatusEnum.APPROVED.value,
+		)
+
+		period = Period.objects.create(name='June', start_month=6, end_month=6)
+		self.lesson_1 = LessonResource.objects.create(
+			subject=self.math,
+			period=period,
+			title='Lesson One',
+			type=ContentType.VIDEO.value,
+			status=StatusEnum.APPROVED.value,
+			resource=SimpleUploadedFile('unlock-lesson-1.mp4', b'video', content_type='video/mp4'),
+		)
+		self.lesson_2 = LessonResource.objects.create(
+			subject=self.math,
+			period=period,
+			title='Lesson Two',
+			type=ContentType.VIDEO.value,
+			status=StatusEnum.APPROVED.value,
+			resource=SimpleUploadedFile('unlock-lesson-2.mp4', b'video', content_type='video/mp4'),
+		)
+		self.lesson_other = LessonResource.objects.create(
+			subject=self.other_subject,
+			period=period,
+			title='Other Lesson',
+			type=ContentType.VIDEO.value,
+			status=StatusEnum.APPROVED.value,
+			resource=SimpleUploadedFile('unlock-other.mp4', b'video', content_type='video/mp4'),
+		)
+
+		self.lesson_1_assessment = LessonAssessment.objects.create(
+			lesson=self.lesson_1,
+			title='Lesson One Quiz',
+			type=AssessmentType.QUIZ.value,
+			status=StatusEnum.APPROVED.value,
+		)
+
+		TakeLesson.objects.create(student=self.student, lesson=self.lesson_1)
+
+		self.student_client = APIClient()
+		self.student_client.force_authenticate(user=self.student_user)
+		self.teacher_client = APIClient()
+		self.teacher_client.force_authenticate(user=self.teacher_user)
+
+	def test_teacher_unlock_allows_access_and_start_until_revoked(self):
+		before = self.student_client.get(f'/api-v1/lessons/{self.lesson_2.id}/')
+		self.assertEqual(before.status_code, 403)
+
+		unlock_resp = self.teacher_client.post(
+			'/api-v1/teacher/unlock-lesson/',
+			{
+				'student_id': self.student.id,
+				'lesson_id': self.lesson_2.id,
+				'duration_hours': 2,
+				'reason': 'Support intervention',
+			},
+			format='json',
+		)
+		self.assertEqual(unlock_resp.status_code, 200)
+		self.assertEqual(LessonTemporaryUnlock.objects.filter(student=self.student, lesson=self.lesson_2, revoked_at__isnull=True).count(), 1)
+
+		after_unlock = self.student_client.get(f'/api-v1/lessons/{self.lesson_2.id}/')
+		self.assertEqual(after_unlock.status_code, 200)
+
+		start_resp = self.student_client.post('/api-v1/taken-lessons/', {'lesson': self.lesson_2.id}, format='json')
+		self.assertEqual(start_resp.status_code, 201)
+
+		kids_payload = self.student_client.get('/api-v1/kids/subjectsandlessons/?unlock=test').json()
+		lesson_two_item = [item for item in kids_payload['lessons'] if item['id'] == self.lesson_2.id][0]
+		self.assertTrue(lesson_two_item['is_temporarily_unlocked'])
+		self.assertIsNotNone(lesson_two_item['temporary_unlock_expires_at'])
+
+		revoke_resp = self.teacher_client.post(
+			'/api-v1/teacher/revoke-lesson-unlock/',
+			{'student_id': self.student.id, 'lesson_id': self.lesson_2.id},
+			format='json',
+		)
+		self.assertEqual(revoke_resp.status_code, 200)
+
+		after_revoke = self.student_client.get(f'/api-v1/lessons/{self.lesson_2.id}/')
+		self.assertEqual(after_revoke.status_code, 403)
+
+	def test_unlock_duration_cannot_exceed_72_hours(self):
+		resp = self.teacher_client.post(
+			'/api-v1/teacher/unlock-lesson/',
+			{'student_id': self.student.id, 'lesson_id': self.lesson_2.id, 'duration_hours': 73},
+			format='json',
+		)
+		self.assertEqual(resp.status_code, 400)
+		self.assertIn('duration_hours', resp.json())
+
+	def test_teacher_can_only_unlock_subjects_they_teach(self):
+		resp = self.teacher_client.post(
+			'/api-v1/teacher/unlock-lesson/',
+			{'student_id': self.student.id, 'lesson_id': self.lesson_other.id, 'duration_hours': 2},
+			format='json',
+		)
+		self.assertEqual(resp.status_code, 403)
+		self.assertIn('subjects you teach', resp.json()['detail'])
+
+	def test_teacher_can_list_only_active_unlocks(self):
+		self.teacher_client.post(
+			'/api-v1/teacher/unlock-lesson/',
+			{'student_id': self.student.id, 'lesson_id': self.lesson_2.id, 'duration_hours': 2},
+			format='json',
+		)
+
+		resp = self.teacher_client.get('/api-v1/teacher/lesson-unlocks/')
+		self.assertEqual(resp.status_code, 200)
+		payload = resp.json()
+		self.assertEqual(len(payload), 1)
+		self.assertEqual(payload[0]['student_id'], self.student.id)
+		self.assertEqual(payload[0]['lesson_id'], self.lesson_2.id)
+		self.assertEqual(payload[0]['subject_id'], self.math.id)
+
+
+class LessonUnlockCleanupCommandTests(TestCase):
+	def setUp(self):
+		cache.clear()
+		county = County.objects.create(name='Lofa', status=StatusEnum.APPROVED.value)
+		district = District.objects.create(county=county, name='Voinjama', status=StatusEnum.APPROVED.value)
+		school = School.objects.create(district=district, name='Cleanup High', status=StatusEnum.APPROVED.value)
+
+		user = User.objects.create_user(
+			phone='231770006311',
+			name='Cleanup Student',
+			email='cleanup.student@example.com',
+			password='pass',
+			role=UserRole.STUDENT.value,
+		)
+		self.student = Student.objects.create(
+			profile=user,
+			school=school,
+			grade=StudentLevel.GRADE3.value,
+			status=StatusEnum.APPROVED.value,
+		)
+
+		subject = Subject.objects.create(
+			name='Cleanup Subject',
+			grade=StudentLevel.GRADE3.value,
+			status=StatusEnum.APPROVED.value,
+		)
+		period = Period.objects.create(name='July', start_month=7, end_month=7)
+		self.lesson = LessonResource.objects.create(
+			subject=subject,
+			period=period,
+			title='Cleanup Lesson',
+			type=ContentType.VIDEO.value,
+			status=StatusEnum.APPROVED.value,
+			resource=SimpleUploadedFile('cleanup-lesson.mp4', b'video', content_type='video/mp4'),
+		)
+
+	def test_cleanup_command_deletes_expired_unlocks(self):
+		expired = LessonTemporaryUnlock.objects.create(
+			lesson=self.lesson,
+			student=self.student,
+			expires_at=timezone.now() - timedelta(hours=1),
+		)
+		active = LessonTemporaryUnlock.objects.create(
+			lesson=self.lesson,
+			student=self.student,
+			expires_at=timezone.now() + timedelta(hours=1),
+		)
+
+		out = StringIO()
+		call_command('cleanup_lesson_unlocks', stdout=out)
+
+		self.assertFalse(LessonTemporaryUnlock.objects.filter(id=expired.id).exists())
+		self.assertTrue(LessonTemporaryUnlock.objects.filter(id=active.id).exists())
+
+	def test_cleanup_command_dry_run_keeps_rows(self):
+		expired = LessonTemporaryUnlock.objects.create(
+			lesson=self.lesson,
+			student=self.student,
+			expires_at=timezone.now() - timedelta(hours=1),
+		)
+		out = StringIO()
+		call_command('cleanup_lesson_unlocks', '--dry-run', stdout=out)
+		self.assertTrue(LessonTemporaryUnlock.objects.filter(id=expired.id).exists())
 
 
 class StudentGamificationPointsTests(TestCase):

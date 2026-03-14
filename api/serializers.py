@@ -131,6 +131,8 @@ class KidsLessonItemSerializer(serializers.Serializer):
     assessments_completed = serializers.IntegerField()
     next_video_id = serializers.IntegerField(allow_null=True)
     lock_reason = serializers.CharField(allow_null=True)
+    is_temporarily_unlocked = serializers.BooleanField(required=False)
+    temporary_unlock_expires_at = serializers.DateTimeField(allow_null=True, required=False)
     sequence_position = serializers.IntegerField()
 
 

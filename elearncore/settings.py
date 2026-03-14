@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+from datetime import timedelta
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -100,6 +101,9 @@ if ENVIRONMENT in ["LIVE", "PRODUCTION", "PROD"]:
             'PASSWORD': os.getenv('DB_PASSWORD', ''),
             'HOST': os.getenv('DB_HOST', ''),
             'PORT': os.getenv('DB_PORT', '5432'),
+            # Reuse DB connections between requests to reduce connection churn.
+            'CONN_MAX_AGE': int(os.getenv('DB_CONN_MAX_AGE', '300')),
+            'CONN_HEALTH_CHECKS': True,
         }
     }
 else:
@@ -226,9 +230,10 @@ REST_FRAMEWORK = {
     'PAGE_SIZE': 20,
     'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
 }
-# knox - make token non-expiry
+# knox - expire tokens after 3 hours of inactivity (sliding window)
 REST_KNOX = {
-    'TOKEN_TTL': None,
+    'TOKEN_TTL': timedelta(hours=3),
+    'AUTO_REFRESH': True,
 }
 
 # DRF Spectacular Configuration

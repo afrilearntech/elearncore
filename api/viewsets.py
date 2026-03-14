@@ -34,7 +34,7 @@ from content.models import (
 	GeneralAssessment, GeneralAssessmentGrade, LessonAssessmentGrade,
 	Question,
 	GameModel, Activity, AssessmentSolution, GamePlay,
-	LessonAssessmentSolution,
+	LessonAssessmentSolution, LessonTemporaryUnlock,
 )
 from forum.models import Chat
 from django.core.cache import cache
@@ -181,6 +181,8 @@ def _user_role_in(user, roles: Iterable[str]) -> bool:
 
 
 LESSON_LOCK_REASON = "Complete the previous lesson and submit all of its assessments to unlock this lesson."
+TEACHER_UNLOCK_MAX_HOURS = 72
+TEACHER_UNLOCK_REASON = "Temporarily unlocked by teacher."
 STUDENT_LESSON_CACHE_TTL = 120
 
 
@@ -366,6 +368,27 @@ def _paginate_payload(request, items, results_key: str, *, extra_payload: dict |
 	return payload
 
 
+def _active_lesson_unlocks_for_student(student: Student, *, lesson_ids: list[int] | None = None) -> dict[int, LessonTemporaryUnlock]:
+	"""Return active lesson unlocks keyed by lesson_id for a student."""
+	now = timezone.now()
+	qs = (
+		LessonTemporaryUnlock.objects
+		.filter(
+			student=student,
+			revoked_at__isnull=True,
+			expires_at__gt=now,
+		)
+		.order_by('expires_at')
+	)
+	if lesson_ids is not None:
+		qs = qs.filter(lesson_id__in=lesson_ids)
+
+	unlock_map: dict[int, LessonTemporaryUnlock] = {}
+	for unlock in qs:
+		unlock_map[unlock.lesson_id] = unlock
+	return unlock_map
+
+
 def _build_student_lesson_progression(student: Student) -> dict:
 	"""Build ordered lesson progression state for a student in one batched pass."""
 	lessons = list(
@@ -421,6 +444,7 @@ def _build_student_lesson_progression(student: Student) -> dict:
 			.annotate(total=Count('lesson_assessment_id', distinct=True))
 		)
 	}
+	active_unlocks = _active_lesson_unlocks_for_student(student, lesson_ids=lesson_ids)
 
 	states = {}
 	previous_lesson_completed = True
@@ -429,7 +453,9 @@ def _build_student_lesson_progression(student: Student) -> dict:
 		assessments_completed = int(completed_assessment_totals.get(lesson.id, 0))
 		is_taken = lesson.id in taken_lesson_ids
 		is_completed = is_taken and assessments_completed >= assessments_total
-		is_locked = not previous_lesson_completed
+		temporary_unlock = active_unlocks.get(lesson.id)
+		is_temporarily_unlocked = temporary_unlock is not None and not previous_lesson_completed
+		is_locked = (not previous_lesson_completed) and not is_temporarily_unlocked
 
 		if is_locked:
 			progression_status = "locked"
@@ -447,6 +473,8 @@ def _build_student_lesson_progression(student: Student) -> dict:
 			"is_taken": is_taken,
 			"is_completed": is_completed,
 			"is_locked": is_locked,
+			"is_temporarily_unlocked": is_temporarily_unlocked,
+			"temporary_unlock_expires_at": temporary_unlock.expires_at if temporary_unlock else None,
 			"progression_status": progression_status,
 			"next_video_id": next_lesson.id if next_lesson else None,
 			"lock_reason": LESSON_LOCK_REASON if is_locked and index > 0 else None,
@@ -1029,6 +1057,41 @@ class TeacherDashboardUpcomingDeadlineSerializer(serializers.Serializer):
 	completion_percentage = serializers.FloatField()
 	due_at = serializers.DateTimeField(allow_null=True)
 	days_left = serializers.IntegerField()
+
+
+class TeacherLessonUnlockRequestSerializer(serializers.Serializer):
+	student_id = serializers.IntegerField()
+	lesson_id = serializers.IntegerField()
+	duration_hours = serializers.IntegerField(min_value=1, max_value=TEACHER_UNLOCK_MAX_HOURS)
+	reason = serializers.CharField(required=False, allow_blank=True, max_length=255)
+
+
+class TeacherLessonUnlockRevokeSerializer(serializers.Serializer):
+	student_id = serializers.IntegerField()
+	lesson_id = serializers.IntegerField()
+
+
+class TeacherLessonUnlockResponseSerializer(serializers.Serializer):
+	id = serializers.IntegerField()
+	student_id = serializers.IntegerField()
+	lesson_id = serializers.IntegerField()
+	unlocked_by_id = serializers.IntegerField(allow_null=True)
+	reason = serializers.CharField(allow_blank=True)
+	expires_at = serializers.DateTimeField()
+	revoked_at = serializers.DateTimeField(allow_null=True)
+
+
+class TeacherActiveLessonUnlockSerializer(serializers.Serializer):
+	id = serializers.IntegerField()
+	student_id = serializers.IntegerField()
+	student_name = serializers.CharField(allow_null=True)
+	lesson_id = serializers.IntegerField()
+	lesson_title = serializers.CharField()
+	subject_id = serializers.IntegerField()
+	subject_name = serializers.CharField(allow_null=True)
+	reason = serializers.CharField(allow_blank=True)
+	expires_at = serializers.DateTimeField()
+	unlocked_by_id = serializers.IntegerField(allow_null=True)
 
 
 class TeacherDashboardResponseSerializer(serializers.Serializer):
@@ -4030,11 +4093,17 @@ class DashboardViewSet(viewsets.ViewSet):
 
 		# Continue Learning: subjects in progress with progress & hours left
 		continue_learning = []
-		# Make maps for quick lookups
-		lessons_by_subject = {}
-		for subj in in_progress_subjects:
-			subj_lessons = list(LessonResource.objects.filter(subject=subj).values('id', 'title', 'duration_minutes'))
-			lessons_by_subject[subj.id] = subj_lessons
+		# Make maps for quick lookups using one batched lesson query.
+		in_progress_subject_ids = [subj.id for subj in in_progress_subjects]
+		lessons_by_subject: Dict[int, List[dict]] = {sid: [] for sid in in_progress_subject_ids}
+		if in_progress_subject_ids:
+			all_in_progress_lessons = (
+				LessonResource.objects
+				.filter(subject_id__in=in_progress_subject_ids)
+				.values('id', 'subject_id', 'title', 'duration_minutes')
+			)
+			for row in all_in_progress_lessons:
+				lessons_by_subject[row['subject_id']].append(row)
 		taken_lesson_ids = set(taken_qs.values_list('lesson_id', flat=True))
 		# latest lesson per subject
 		latest_by_subject: Dict[int, LessonResource] = {}
@@ -4419,7 +4488,7 @@ class KidsViewSet(viewsets.ViewSet):
 		recent_topics_qs = (
 			TakeLesson.objects
 			.filter(student=student)
-			.select_related('lesson__topic')
+			.select_related('lesson__topic__subject')
 			.order_by('-created_at')
 		)
 		seen_topic_ids = set()
@@ -4543,65 +4612,99 @@ class KidsViewSet(viewsets.ViewSet):
 		# Simple weighted score: lessons*1 + avg_score*2
 		my_perf_score = my_lessons_taken + (avg_score * 2.0)
 
-		def _compute_rank(base_qs, student_field='student'):
-			"""Return (rank, total) within a queryset aggregated by student.
+		student_district_id = getattr(getattr(student.school, 'district', None), 'id', None) if getattr(student, 'school', None) else None
+		student_county_id = None
+		if getattr(student, 'school', None) and getattr(student.school, 'district', None) and getattr(student.school.district, 'county', None):
+			student_county_id = student.school.district.county_id
 
-			base_qs should be a queryset of TakeLesson or Student-related rows
-			within a given scope (school/district/county).
-			"""
-			# Aggregate lessons taken per student
-			agg = (
-				TakeLesson.objects
-				.filter(**base_qs)
-				.values(student_field)
-				.annotate(lessons=DjangoCount('id', distinct=True))
-			)
-			if not agg.exists():
+		# Precompute performance by student once for the broadest available scope,
+		# then reuse for school/district/county rank calculations.
+		county_students_map = {}
+		district_students_map = {}
+		school_students_map = {}
+		student_scope_qs = Student.objects.all()
+		if student_county_id:
+			student_scope_qs = student_scope_qs.filter(school__district__county_id=student_county_id)
+		elif student_district_id:
+			student_scope_qs = student_scope_qs.filter(school__district_id=student_district_id)
+		elif getattr(student, 'school_id', None):
+			student_scope_qs = student_scope_qs.filter(school_id=student.school_id)
+		else:
+			student_scope_qs = student_scope_qs.filter(id=student.id)
+
+		for row in student_scope_qs.values('id', 'school_id', 'school__district_id', 'school__district__county_id'):
+			sid = row['id']
+			if row['school_id'] is not None:
+				school_students_map.setdefault(row['school_id'], set()).add(sid)
+			if row['school__district_id'] is not None:
+				district_students_map.setdefault(row['school__district_id'], set()).add(sid)
+			if row['school__district__county_id'] is not None:
+				county_students_map.setdefault(row['school__district__county_id'], set()).add(sid)
+
+		scope_student_ids = set()
+		for ids in school_students_map.values():
+			scope_student_ids.update(ids)
+		for ids in district_students_map.values():
+			scope_student_ids.update(ids)
+		for ids in county_students_map.values():
+			scope_student_ids.update(ids)
+
+		perf_scores_by_student = {}
+		if scope_student_ids:
+			lessons_by_student = {
+				row['student']: row['lessons']
+				for row in (
+					TakeLesson.objects
+					.filter(student_id__in=scope_student_ids)
+					.values('student')
+					.annotate(lessons=DjangoCount('id', distinct=True))
+				)
+			}
+			active_student_ids = list(lessons_by_student.keys())
+			if active_student_ids:
+				lesson_scores_by_student = {
+					row['student']: row['avg']
+					for row in (
+						LessonAssessmentGrade.objects
+						.filter(student_id__in=active_student_ids)
+						.values('student')
+						.annotate(avg=Avg('score'))
+					)
+				}
+				general_scores_by_student = {
+					row['student']: row['avg']
+					for row in (
+						GeneralAssessmentGrade.objects
+						.filter(student_id__in=active_student_ids)
+						.values('student')
+						.annotate(avg=Avg('score'))
+					)
+				}
+				for sid in active_student_ids:
+					lessons = lessons_by_student.get(sid, 0) or 0
+					ls = lesson_scores_by_student.get(sid)
+					gs = general_scores_by_student.get(sid)
+					if ls is not None and gs is not None:
+						avg = float(ls + gs) / 2.0
+					elif ls is not None:
+						avg = float(ls)
+					elif gs is not None:
+						avg = float(gs)
+					else:
+						avg = 0.0
+					perf_scores_by_student[sid] = lessons + (avg * 2.0)
+
+		def _compute_rank_for_student_ids(candidate_ids):
+			perf_scores = [
+				(sid, score)
+				for sid, score in perf_scores_by_student.items()
+				if sid in candidate_ids
+			]
+			if not perf_scores:
 				return None, 0
-
-			student_ids = [row[student_field] for row in agg]
-			lessons_by_student = {row[student_field]: row['lessons'] for row in agg}
-
-			# Average scores per student
-			lesson_scores_by_student = {
-				row['student']: row['avg']
-				for row in (
-					LessonAssessmentGrade.objects
-					.filter(student_id__in=student_ids)
-					.values('student')
-					.annotate(avg=Avg('score'))
-				)
-			}
-			general_scores_by_student = {
-				row['student']: row['avg']
-				for row in (
-					GeneralAssessmentGrade.objects
-					.filter(student_id__in=student_ids)
-					.values('student')
-					.annotate(avg=Avg('score'))
-				)
-			}
-
-			perf_scores = []
-			for sid in student_ids:
-				lessons = lessons_by_student.get(sid, 0) or 0
-				ls = lesson_scores_by_student.get(sid)
-				gs = general_scores_by_student.get(sid)
-				if ls is not None and gs is not None:
-					avg = float(ls + gs) / 2.0
-				elif ls is not None:
-					avg = float(ls)
-				elif gs is not None:
-					avg = float(gs)
-				else:
-					avg = 0.0
-				perf = lessons + (avg * 2.0)
-				perf_scores.append((sid, perf))
-
-			# Sort by performance descending; compute 1-based rank
 			perf_scores.sort(key=lambda x: x[1], reverse=True)
 			rank = None
-			for idx, (sid, score) in enumerate(perf_scores, start=1):
+			for idx, (sid, _) in enumerate(perf_scores, start=1):
 				if sid == student.id:
 					rank = idx
 					break
@@ -4610,9 +4713,8 @@ class KidsViewSet(viewsets.ViewSet):
 		# School rank (if school attached)
 		school_rank = None
 		if getattr(student, 'school_id', None):
-			# Filter TakeLesson by students in same school
-			base = {'student__school_id': student.school_id}
-			school_rank_val, school_total = _compute_rank(base)
+			school_ids = school_students_map.get(student.school_id, set())
+			school_rank_val, school_total = _compute_rank_for_student_ids(school_ids)
 			if school_rank_val is not None:
 				school_rank = {
 					'rank': school_rank_val,
@@ -4621,10 +4723,9 @@ class KidsViewSet(viewsets.ViewSet):
 
 		# District rank (if district attached)
 		district_rank = None
-		student_district_id = getattr(getattr(student.school, 'district', None), 'id', None) if getattr(student, 'school', None) else None
 		if student_district_id:
-			base = {'student__school__district_id': student_district_id}
-			dist_rank_val, dist_total = _compute_rank(base)
+			district_ids = district_students_map.get(student_district_id, set())
+			dist_rank_val, dist_total = _compute_rank_for_student_ids(district_ids)
 			if dist_rank_val is not None:
 				district_rank = {
 					'rank': dist_rank_val,
@@ -4633,12 +4734,9 @@ class KidsViewSet(viewsets.ViewSet):
 
 		# County rank (if county attached)
 		county_rank = None
-		student_county_id = None
-		if getattr(student, 'school', None) and getattr(student.school, 'district', None) and getattr(student.school.district, 'county', None):
-			student_county_id = student.school.district.county_id
 		if student_county_id:
-			base = {'student__school__district__county_id': student_county_id}
-			county_rank_val, county_total = _compute_rank(base)
+			county_ids = county_students_map.get(student_county_id, set())
+			county_rank_val, county_total = _compute_rank_for_student_ids(county_ids)
 			if county_rank_val is not None:
 				county_rank = {
 					'rank': county_rank_val,
@@ -4809,6 +4907,11 @@ class KidsViewSet(viewsets.ViewSet):
 				"status": "taken" if state['is_taken'] else "new",
 				"progression_status": state['progression_status'],
 				"is_locked": state['is_locked'],
+				"is_temporarily_unlocked": state['is_temporarily_unlocked'],
+				"temporary_unlock_expires_at": (
+					state['temporary_unlock_expires_at'].isoformat()
+					if state['temporary_unlock_expires_at'] else None
+				),
 				"is_completed": state['is_completed'],
 				"assessments_total": state['assessments_total'],
 				"assessments_completed": state['assessments_completed'],
@@ -4881,7 +4984,6 @@ class KidsViewSet(viewsets.ViewSet):
 			.filter(
 				lesson__subject__grade=student.grade,
 			).filter(models.Q(is_targeted=False) | models.Q(target_student=student))
-			.select_related('lesson')
 			.order_by('due_at', 'title')
 		)
 
@@ -4889,19 +4991,22 @@ class KidsViewSet(viewsets.ViewSet):
 		in_5 = now + timedelta(days=5)
 
 		# Prefetch existing solutions/grades to avoid per-row queries
+		general_ids = list(general_qs.values_list('id', flat=True))
+		lesson_ids = list(lesson_qs.values_list('id', flat=True))
+
 		general_solutions = list(
 			AssessmentSolution.objects
-			.filter(assessment__in=general_qs, student=student)
+			.filter(assessment_id__in=general_ids, student=student)
 		)
 		general_solution_map = {sol.assessment_id: sol for sol in general_solutions}
 		lesson_solutions = list(
 			LessonAssessmentSolution.objects
-			.filter(lesson_assessment__in=lesson_qs, student=student)
+			.filter(lesson_assessment_id__in=lesson_ids, student=student)
 		)
 		lesson_solution_map = {sol.lesson_assessment_id: sol for sol in lesson_solutions}
 		lesson_grade_ids = set(
 			LessonAssessmentGrade.objects.filter(
-				lesson_assessment__in=lesson_qs,
+				lesson_assessment_id__in=lesson_ids,
 				student=student,
 			).values_list('lesson_assessment_id', flat=True)
 		)
@@ -4913,7 +5018,7 @@ class KidsViewSet(viewsets.ViewSet):
 		overdue = 0
 		submitted = 0
 
-		for ga in general_qs:
+		for ga in general_qs.only('id', 'title', 'instructions', 'due_at'):
 			solution_obj = general_solution_map.get(ga.id)
 			status = "submitted" if solution_obj is not None else "pending"
 			total += 1
@@ -4937,7 +5042,7 @@ class KidsViewSet(viewsets.ViewSet):
 				"solution": AssessmentSolutionSerializer(solution_obj).data if solution_obj else None,
 			})
 
-		for la in lesson_qs:
+		for la in lesson_qs.only('id', 'title', 'instructions', 'due_at'):
 			lesson_solution_obj = lesson_solution_map.get(la.id)
 			status = "submitted" if (la.id in lesson_grade_ids or lesson_solution_obj is not None) else "pending"
 			total += 1
@@ -5008,6 +5113,7 @@ class KidsViewSet(viewsets.ViewSet):
 				(models.Q(grade__isnull=True) | models.Q(grade=student.grade))
 				& (models.Q(is_targeted=False) | models.Q(target_student=student))
 			)
+			.values('id', 'title', 'due_at')
 			.order_by('due_at', 'title')
 		)
 
@@ -5017,25 +5123,25 @@ class KidsViewSet(viewsets.ViewSet):
 			.filter(
 				lesson__subject__grade=student.grade,
 			).filter(models.Q(is_targeted=False) | models.Q(target_student=student))
-			.select_related('lesson')
+			.values('id', 'title', 'lesson_id', 'due_at')
 			.order_by('due_at', 'title')
 		)
 
 		payload = []
 		for ga in general_qs:
 			payload.append({
-				"id": ga.id,
-				"title": ga.title,
+				"id": ga['id'],
+				"title": ga['title'],
 				"type": "general",
-				"due_at": ga.due_at.isoformat() if ga.due_at else None,
+				"due_at": ga['due_at'].isoformat() if ga['due_at'] else None,
 			})
 		for la in lesson_qs:
 			payload.append({
-				"id": la.id,
-				"title": la.title,
+				"id": la['id'],
+				"title": la['title'],
 				"type": "lesson",
-				"lesson_id": la.lesson_id,
-				"due_at": la.due_at.isoformat() if la.due_at else None,
+				"lesson_id": la['lesson_id'],
+				"due_at": la['due_at'].isoformat() if la['due_at'] else None,
 			})
 
 		response_payload = _paginate_payload(request, payload, 'quizzes')
@@ -5234,6 +5340,7 @@ class KidsViewSet(viewsets.ViewSet):
 				(models.Q(grade__isnull=True) | models.Q(grade=student.grade))
 				& (models.Q(is_targeted=False) | models.Q(target_student=student))
 			)
+			.values('id', 'title', 'marks')
 			.order_by('title')
 		)
 		lesson_qs = (
@@ -5241,25 +5348,25 @@ class KidsViewSet(viewsets.ViewSet):
 			.filter(
 				lesson__subject__grade=student.grade,
 			).filter(models.Q(is_targeted=False) | models.Q(target_student=student))
-			.select_related('lesson')
+			.values('id', 'title', 'lesson_id', 'marks')
 			.order_by('title')
 		)
 
 		items = []
 		for ga in general_qs:
 			items.append({
-				"id": ga.id,
-				"title": ga.title,
+				"id": ga['id'],
+				"title": ga['title'],
 				"type": "general",
-				"marks": ga.marks,
+				"marks": ga['marks'],
 			})
 		for la in lesson_qs:
 			items.append({
-				"id": la.id,
-				"title": la.title,
+				"id": la['id'],
+				"title": la['title'],
 				"type": "lesson",
-				"lesson_id": la.lesson_id,
-				"marks": la.marks,
+				"lesson_id": la['lesson_id'],
+				"marks": la['marks'],
 			})
 
 		payload = _paginate_payload(request, items, 'assessments')
@@ -5663,6 +5770,216 @@ class TeacherViewSet(viewsets.ViewSet):
 			'school_name': getattr(school, 'name', None),
 			'grades': self._teacher_leaderboard_grades(teacher),
 		}
+
+	def _validate_unlock_scope(self, teacher: Teacher, student: Student, lesson: LessonResource) -> str | None:
+		if not getattr(teacher, 'school_id', None) or student.school_id != teacher.school_id:
+			return "Student not found in your school."
+		if student.grade != getattr(getattr(lesson, 'subject', None), 'grade', None):
+			return "Lesson grade does not match the student's grade."
+		teaches_subject = Subject.objects.filter(id=lesson.subject_id, teachers=teacher).exists()
+		if not teaches_subject:
+			return "You can only unlock lessons for subjects you teach."
+		return None
+
+	def _serialize_unlock(self, unlock: LessonTemporaryUnlock) -> dict:
+		return {
+			"id": unlock.id,
+			"student_id": unlock.student_id,
+			"lesson_id": unlock.lesson_id,
+			"unlocked_by_id": unlock.unlocked_by_id,
+			"reason": unlock.reason,
+			"expires_at": unlock.expires_at,
+			"revoked_at": unlock.revoked_at,
+		}
+
+	@extend_schema(
+		description=(
+			"List active temporary lesson unlocks in your school for subjects you teach. "
+			"Optionally filter by student_id."
+		),
+		parameters=[
+			OpenApiParameter(
+				name="student_id",
+				required=False,
+				location=OpenApiParameter.QUERY,
+				description="Optional student id filter.",
+				type=int,
+			),
+		],
+		responses={200: TeacherActiveLessonUnlockSerializer(many=True)},
+	)
+	@action(detail=False, methods=['get'], url_path='lesson-unlocks')
+	def list_active_lesson_unlocks(self, request):
+		deny = self._require_teacher(request)
+		if deny:
+			return deny
+		teacher = request.user.teacher
+		now = timezone.now()
+
+		qs = (
+			LessonTemporaryUnlock.objects
+			.select_related('student__profile', 'lesson__subject')
+			.filter(
+				revoked_at__isnull=True,
+				expires_at__gt=now,
+				student__school_id=getattr(teacher, 'school_id', None),
+				lesson__subject__teachers=teacher,
+			)
+			.order_by('expires_at', 'student__profile__name')
+		)
+
+		student_id = request.query_params.get('student_id')
+		if student_id:
+			try:
+				qs = qs.filter(student_id=int(student_id))
+			except (TypeError, ValueError):
+				return Response({"detail": "student_id must be an integer."}, status=400)
+
+		payload = [
+			{
+				"id": unlock.id,
+				"student_id": unlock.student_id,
+				"student_name": getattr(getattr(unlock.student, 'profile', None), 'name', None),
+				"lesson_id": unlock.lesson_id,
+				"lesson_title": getattr(unlock.lesson, 'title', ''),
+				"subject_id": unlock.lesson.subject_id,
+				"subject_name": getattr(getattr(unlock.lesson, 'subject', None), 'name', None),
+				"reason": unlock.reason,
+				"expires_at": unlock.expires_at,
+				"unlocked_by_id": unlock.unlocked_by_id,
+			}
+			for unlock in qs
+		]
+		return Response(payload)
+
+	@extend_schema(
+		description=(
+			"Temporarily unlock a lesson for a student in your school. "
+			"Unlock duration must be between 1 and 72 hours and only applies to subjects you teach."
+		),
+		request=TeacherLessonUnlockRequestSerializer,
+		responses={200: TeacherLessonUnlockResponseSerializer},
+	)
+	@action(detail=False, methods=['post'], url_path='unlock-lesson')
+	def unlock_lesson(self, request):
+		deny = self._require_teacher(request)
+		if deny:
+			return deny
+		teacher = request.user.teacher
+		ser = TeacherLessonUnlockRequestSerializer(data=request.data)
+		ser.is_valid(raise_exception=True)
+		data = ser.validated_data
+
+		student = Student.objects.filter(id=data['student_id']).select_related('school').first()
+		if not student:
+			return Response({"detail": "Student not found."}, status=404)
+
+		lesson = LessonResource.objects.filter(id=data['lesson_id']).select_related('subject').first()
+		if not lesson:
+			return Response({"detail": "Lesson not found."}, status=404)
+
+		scope_error = self._validate_unlock_scope(teacher, student, lesson)
+		if scope_error:
+			return Response({"detail": scope_error}, status=403)
+
+		now = timezone.now()
+		duration_hours = int(data['duration_hours'])
+		expires_at = now + timedelta(hours=duration_hours)
+
+		unlock = (
+			LessonTemporaryUnlock.objects
+			.filter(
+				student=student,
+				lesson=lesson,
+				revoked_at__isnull=True,
+				expires_at__gt=now,
+			)
+			.order_by('-expires_at')
+			.first()
+		)
+		reason = data.get('reason') or TEACHER_UNLOCK_REASON
+		if unlock is None:
+			unlock = LessonTemporaryUnlock.objects.create(
+				student=student,
+				lesson=lesson,
+				unlocked_by=request.user,
+				reason=reason,
+				expires_at=expires_at,
+			)
+		else:
+			unlock.unlocked_by = request.user
+			unlock.reason = reason
+			unlock.expires_at = expires_at
+			unlock.revoked_at = None
+			unlock.save(update_fields=['unlocked_by', 'reason', 'expires_at', 'revoked_at', 'updated_at'])
+
+		_invalidate_student_lesson_cache(student)
+		Activity.objects.create(
+			user=request.user,
+			type="teacher_unlock_lesson",
+			description=f"Temporarily unlocked lesson '{lesson.title}' for {getattr(student.profile, 'name', 'student')}",
+			metadata={
+				"lesson_id": lesson.id,
+				"student_id": student.id,
+				"duration_hours": duration_hours,
+			},
+		)
+
+		return Response(self._serialize_unlock(unlock))
+
+	@extend_schema(
+		description="Revoke an active temporary lesson unlock for a student.",
+		request=TeacherLessonUnlockRevokeSerializer,
+		responses={200: TeacherLessonUnlockResponseSerializer},
+	)
+	@action(detail=False, methods=['post'], url_path='revoke-lesson-unlock')
+	def revoke_lesson_unlock(self, request):
+		deny = self._require_teacher(request)
+		if deny:
+			return deny
+		teacher = request.user.teacher
+		ser = TeacherLessonUnlockRevokeSerializer(data=request.data)
+		ser.is_valid(raise_exception=True)
+		data = ser.validated_data
+
+		student = Student.objects.filter(id=data['student_id']).select_related('school').first()
+		if not student:
+			return Response({"detail": "Student not found."}, status=404)
+
+		lesson = LessonResource.objects.filter(id=data['lesson_id']).select_related('subject').first()
+		if not lesson:
+			return Response({"detail": "Lesson not found."}, status=404)
+
+		scope_error = self._validate_unlock_scope(teacher, student, lesson)
+		if scope_error:
+			return Response({"detail": scope_error}, status=403)
+
+		now = timezone.now()
+		unlock = (
+			LessonTemporaryUnlock.objects
+			.filter(
+				student=student,
+				lesson=lesson,
+				revoked_at__isnull=True,
+				expires_at__gt=now,
+			)
+			.order_by('-expires_at')
+			.first()
+		)
+		if unlock is None:
+			return Response({"detail": "No active unlock found for this student and lesson."}, status=404)
+
+		unlock.revoked_at = now
+		unlock.save(update_fields=['revoked_at', 'updated_at'])
+		_invalidate_student_lesson_cache(student)
+		Activity.objects.create(
+			user=request.user,
+			type="teacher_revoke_lesson_unlock",
+			description=f"Revoked temporary unlock for lesson '{lesson.title}'",
+			metadata={"lesson_id": lesson.id, "student_id": student.id},
+		)
+
+		return Response(self._serialize_unlock(unlock))
 
 	@extend_schema(
 		description="Leaderboard for the teacher's class, derived from grades of subjects assigned to the teacher.",

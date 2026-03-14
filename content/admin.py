@@ -4,7 +4,7 @@ from .models import (
 	Subject, Topic, Period, LessonResource, TakeLesson,
 	GeneralAssessment, GeneralAssessmentGrade, AssessmentSolution,
 	LessonAssessment, LessonAssessmentGrade,
-	Question, Option, GameModel,
+	Question, Option, GameModel, LessonTemporaryUnlock,
 )
 
 
@@ -88,3 +88,10 @@ class GameModelAdmin(admin.ModelAdmin):
 	list_display = ("id", "name", "type", 'grade', "status", "created_by", "created_at")
 	list_filter = ("type", "grade", "status")
 	search_fields = ("name", "description", "instructions")
+
+
+@admin.register(LessonTemporaryUnlock)
+class LessonTemporaryUnlockAdmin(admin.ModelAdmin):
+	list_display = ("id", "lesson", "student", "unlocked_by", "expires_at", "revoked_at", "created_at")
+	list_filter = ("expires_at", "revoked_at")
+	search_fields = ("lesson__title", "student__profile__name", "reason")

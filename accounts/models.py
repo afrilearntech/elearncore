@@ -136,6 +136,12 @@ class Student(TimestampedModel):
     def __str__(self) -> str:
         return f"Student: {self.profile.name}"
 
+    class Meta:
+        indexes = [
+            models.Index(fields=["grade", "status"]),
+            models.Index(fields=["school", "grade"]),
+        ]
+
 
 class Teacher(TimestampedModel):
     teacher_id = models.CharField(max_length=20, unique=True, null=True, blank=True)
