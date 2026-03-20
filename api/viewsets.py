@@ -1117,15 +1117,36 @@ class LeaderboardEntrySerializer(serializers.Serializer):
 	county_name = serializers.CharField(allow_null=True)
 
 
+class LeaderboardScopeSerializer(serializers.Serializer):
+	kind = serializers.CharField()
+	timeframe = serializers.CharField()
+	school_id = serializers.IntegerField(required=False, allow_null=True)
+	school_name = serializers.CharField(required=False, allow_null=True)
+	grades = serializers.ListField(
+		child=serializers.CharField(),
+		required=False,
+	)
+	grade = serializers.CharField(required=False, allow_null=True)
+	county_id = serializers.IntegerField(required=False, allow_null=True)
+	district_id = serializers.IntegerField(required=False, allow_null=True)
+
+
 class LeaderboardResponseSerializer(serializers.Serializer):
-	scope = serializers.DictField()
+	scope = LeaderboardScopeSerializer()
 	total_students = serializers.IntegerField()
 	leaderboard = LeaderboardEntrySerializer(many=True)
 
 
+class ParentLeaderboardChildSerializer(serializers.Serializer):
+	student_db_id = serializers.IntegerField()
+	student_id = serializers.CharField(allow_null=True)
+	student_name = serializers.CharField(allow_null=True)
+	grade = serializers.CharField(allow_null=True)
+
+
 class ParentChildLeaderboardContextSerializer(serializers.Serializer):
-	child = serializers.DictField()
-	scope = serializers.DictField()
+	child = ParentLeaderboardChildSerializer()
+	scope = LeaderboardScopeSerializer()
 	rank = serializers.IntegerField(allow_null=True)
 	total_students = serializers.IntegerField()
 	points = serializers.IntegerField()
@@ -3590,8 +3611,10 @@ class OnboardingViewSet(viewsets.ViewSet):
 	def userrole(self, request):
 		role = (request.data.get('role') or '').strip().upper()
 		allowed = {UserRole.STUDENT.value, UserRole.TEACHER.value, UserRole.HEADTEACHER.value, UserRole.PARENT.value}
+		
 		if role not in allowed:
 			return Response({"detail": f"Invalid role. Allowed: {', '.join(sorted(allowed))}"}, status=400)
+		
 		user: User = request.user
 		user.role = role
 		user.save(update_fields=['role', 'updated_at'])
