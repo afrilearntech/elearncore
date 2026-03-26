@@ -3545,11 +3545,11 @@ class OnboardingViewSet(viewsets.ViewSet):
 	- aboutyou: set personal details and optional institution/grade
 	- linkchild: link a student to a parent profile
 	"""
-	class DummySerializer(serializers.Serializer):
+	class OnboardingDummySerializer(serializers.Serializer):
 		"""Placeholder for schema generation only."""
 		id = serializers.IntegerField(read_only=True)
 
-	serializer_class = DummySerializer
+	serializer_class = OnboardingDummySerializer
 
 	@extend_schema(request=ProfileSetupSerializer, responses={201: OpenApiResponse(description="Token and user payload")})
 	@action(detail=False, methods=['post'], permission_classes=[permissions.AllowAny])
@@ -3730,11 +3730,11 @@ class OnboardingViewSet(viewsets.ViewSet):
 class LoginViewSet(viewsets.ViewSet):
 	permission_classes = [permissions.AllowAny]
 
-	class DummySerializer(serializers.Serializer):
+	class LoginDummySerializer(serializers.Serializer):
 		"""Placeholder for schema generation only."""
 		id = serializers.IntegerField(read_only=True)
 
-	serializer_class = DummySerializer
+	serializer_class = LoginDummySerializer
 
 	def _school_snapshot(self, school) -> dict | None:
 		if school is None:
@@ -4008,11 +4008,11 @@ class LoginViewSet(viewsets.ViewSet):
 class DashboardViewSet(viewsets.ViewSet):
 	permission_classes = [permissions.IsAuthenticated]
 
-	class DummySerializer(serializers.Serializer):
+	class DashboardDummySerializer(serializers.Serializer):
 		"""Placeholder for schema generation only."""
 		id = serializers.IntegerField(read_only=True)
 
-	serializer_class = DummySerializer
+	serializer_class = DashboardDummySerializer
 
 	def list(self, request):
 		user: User = request.user
@@ -5717,6 +5717,10 @@ class TeacherViewSet(viewsets.ViewSet):
 	"""
 	permission_classes = [permissions.IsAuthenticated]
 
+	class GenerateAIAssessmentsResponseSerializer(serializers.Serializer):
+		general_assessments = GeneralAssessmentSerializer(many=True)
+		lesson_assessments = LessonAssessmentSerializer(many=True)
+
 	def _require_teacher(self, request):
 		user: User = request.user
 		if not user or getattr(user, 'role', None) not in {UserRole.TEACHER.value, UserRole.HEADTEACHER.value, UserRole.ADMIN.value}:
@@ -6385,11 +6389,20 @@ class TeacherViewSet(viewsets.ViewSet):
 			"Use AI to generate targeted quizzes/assignments for a specific student "
 			"based on their recent activity. Returns the created assessments."
 		),
+		parameters=[
+			OpenApiParameter(
+				name='pk',
+				required=True,
+				location=OpenApiParameter.PATH,
+				type=int,
+				description="Student primary key.",
+			),
+		],
 		request=None,
 		responses={
 			200: OpenApiResponse(
 				description="AI-generated targeted assessments for the student.",
-				response=serializers.DictField(),
+				response=GenerateAIAssessmentsResponseSerializer,
 			),
 		},
 	)
@@ -8581,6 +8594,48 @@ class AdminTeacherViewSet(viewsets.ReadOnlyModelViewSet):
 			"Your Liberia eLearn teacher account status",
 		)
 		return Response(TeacherSerializer(teacher).data)
+
+	class _MakeHeadmasterSerializer(serializers.Serializer):
+		teacher_id = serializers.IntegerField(required=True)
+
+	@extend_schema(
+		operation_id="makeheadmaster",
+		description=(
+			"Promote a teacher to headteacher (HEADTEACHER role). "
+			"Restricted to admins and content validators."
+		),
+		request=_MakeHeadmasterSerializer,
+		responses={200: TeacherSerializer},
+	)
+	@action(
+		detail=False,
+		methods=['post'],
+		url_path='makeheadmaster',
+		permission_classes=[permissions.IsAuthenticated, CanModerateContent],
+	)
+	def makeheadmaster(self, request):
+		"""Assign a teacher as a headteacher using the teacher's numeric id."""
+		serializer = self._MakeHeadmasterSerializer(data=request.data)
+		serializer.is_valid(raise_exception=True)
+		teacher_id = serializer.validated_data['teacher_id']
+
+		# Lock row for safe concurrent updates.
+		try:
+			teacher = (
+				Teacher.objects.select_related('profile', 'school')
+				.select_for_update()
+				.get(pk=teacher_id)
+			)
+		except Teacher.DoesNotExist:
+			raise serializers.ValidationError({"teacher_id": "Teacher not found."})
+
+		# Promote linked user role. Keep Teacher record as-is.
+		profile = teacher.profile
+		if getattr(profile, 'role', None) != UserRole.HEADTEACHER.value:
+			profile.role = UserRole.HEADTEACHER.value
+			profile.save(update_fields=['role', 'updated_at'])
+
+		return Response(TeacherSerializer(teacher).data, status=status.HTTP_200_OK)
 
 
 class AdminParentViewSet(viewsets.ReadOnlyModelViewSet):

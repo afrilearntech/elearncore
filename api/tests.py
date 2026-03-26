@@ -891,6 +891,93 @@ class AuthProfileSchoolInfoTests(TestCase):
 		self.assertEqual(head_profile.json()['teacher']['school']['id'], self.school.id)
 
 
+class MakeHeadmasterEndpointTests(TestCase):
+	def setUp(self):
+		self.client = APIClient()
+		self.county = County.objects.create(name='MakeHead County')
+		self.district = District.objects.create(county=self.county, name='MakeHead District')
+		self.school = School.objects.create(district=self.district, name='MakeHead School')
+
+		self.teacher_user = User.objects.create_user(
+			phone='231770009001',
+			name='Promoted Teacher',
+			email='promoted.teacher@example.com',
+			password='pass',
+			role=UserRole.TEACHER.value,
+		)
+		self.teacher = Teacher.objects.create(
+			profile=self.teacher_user,
+			school=self.school,
+			status=StatusEnum.APPROVED.value,
+		)
+
+		self.admin_user = User.objects.create_user(
+			phone='231770009002',
+			name='Admin User',
+			email='admin.user@example.com',
+			password='pass',
+			role=UserRole.ADMIN.value,
+			is_staff=True,
+			is_superuser=True,
+		)
+
+		self.validator_user = User.objects.create_user(
+			phone='231770009003',
+			name='Validator User',
+			email='validator.user@example.com',
+			password='pass',
+			role=UserRole.CONTENTVALIDATOR.value,
+			is_staff=True,
+			is_superuser=False,
+		)
+
+		self.regular_teacher_user = User.objects.create_user(
+			phone='231770009004',
+			name='Regular Teacher User',
+			email='regular.teacher@example.com',
+			password='pass',
+			role=UserRole.TEACHER.value,
+		)
+		Teacher.objects.create(
+			profile=self.regular_teacher_user,
+			school=self.school,
+			status=StatusEnum.APPROVED.value,
+		)
+
+	def test_admin_can_promote_teacher_to_headteacher(self):
+		self.client.force_authenticate(user=self.admin_user)
+		resp = self.client.post(
+			'/api-v1/admin/teachers/makeheadmaster/',
+			{'teacher_id': self.teacher.id},
+			format='json',
+		)
+		self.assertEqual(resp.status_code, 200)
+		self.teacher_user.refresh_from_db()
+		self.assertEqual(self.teacher_user.role, UserRole.HEADTEACHER.value)
+
+	def test_validator_can_promote_teacher_to_headteacher(self):
+		self.client.force_authenticate(user=self.validator_user)
+		resp = self.client.post(
+			'/api-v1/admin/teachers/makeheadmaster/',
+			{'teacher_id': self.teacher.id},
+			format='json',
+		)
+		self.assertEqual(resp.status_code, 200)
+		self.teacher_user.refresh_from_db()
+		self.assertEqual(self.teacher_user.role, UserRole.HEADTEACHER.value)
+
+	def test_regular_teacher_cannot_promote_teacher(self):
+		self.client.force_authenticate(user=self.regular_teacher_user)
+		resp = self.client.post(
+			'/api-v1/admin/teachers/makeheadmaster/',
+			{'teacher_id': self.teacher.id},
+			format='json',
+		)
+		self.assertIn(resp.status_code, (401, 403))
+		self.teacher_user.refresh_from_db()
+		self.assertEqual(self.teacher_user.role, UserRole.TEACHER.value)
+
+
 class HeadTeacherViewSetIsolationTests(TestCase):
 	def setUp(self):
 		self.client = APIClient()
