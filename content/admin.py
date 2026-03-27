@@ -5,6 +5,7 @@ from .models import (
 	GeneralAssessment, GeneralAssessmentGrade, AssessmentSolution,
 	LessonAssessment, LessonAssessmentGrade,
 	Question, Option, GameModel, LessonTemporaryUnlock,
+	Story, GamePlay, Activity,
 )
 
 
@@ -90,8 +91,29 @@ class GameModelAdmin(admin.ModelAdmin):
 	search_fields = ("name", "description", "instructions")
 
 
+@admin.register(GamePlay)
+class GamePlayAdmin(admin.ModelAdmin):
+	list_display = ("id", "student", "game", "last_played_at", "created_at")
+	list_filter = ("game",)
+	search_fields = ("student__profile__name", "game__name")
+
+
 @admin.register(LessonTemporaryUnlock)
 class LessonTemporaryUnlockAdmin(admin.ModelAdmin):
 	list_display = ("id", "lesson", "student", "unlocked_by", "expires_at", "revoked_at", "created_at")
 	list_filter = ("expires_at", "revoked_at")
 	search_fields = ("lesson__title", "student__profile__name", "reason")
+
+
+@admin.register(Story)
+class StoryAdmin(admin.ModelAdmin):
+	list_display = ("id", "title", "grade", "tag", "is_published", "school", "created_by", "created_at")
+	list_filter = ("grade", "tag", "is_published", "school")
+	search_fields = ("title", "body", "moral")
+
+
+@admin.register(Activity)
+class ActivityAdmin(admin.ModelAdmin):
+	list_display = ("id", "user", "type", "created_at")
+	list_filter = ("type",)
+	search_fields = ("user__email", "user__username", "description")

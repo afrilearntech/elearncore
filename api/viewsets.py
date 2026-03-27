@@ -2245,6 +2245,50 @@ class ContentViewSet(viewsets.ViewSet):
 		if not _user_role_in(request.user, {UserRole.ADMIN.value}):
 			return Response({"detail": "Admin role required."}, status=403)
 		return Response(ai_runtime_diagnostics(), status=200)
+
+	@extend_schema(
+		operation_id="content_celery_pending_tasks",
+		description=(
+			"Admin-only Celery broker inspection. Returns active/reserved/scheduled tasks as reported "
+			"by running workers. This does not require storing tasks in the DB."
+		),
+		responses={200: OpenApiResponse(description="Celery inspect state.")},
+	)
+	@action(detail=False, methods=['get'], url_path='celery/pending')
+	def celery_pending(self, request):
+		if not _user_role_in(request.user, {UserRole.ADMIN.value}):
+			return Response({"detail": "Admin role required."}, status=403)
+
+		try:
+			from celery import current_app  # type: ignore
+		except Exception as e:
+			return Response({"detail": "Celery not available.", "error": str(e)}, status=503)
+
+		try:
+			insp = current_app.control.inspect(timeout=1)
+			active = insp.active() or {}
+			reserved = insp.reserved() or {}
+			scheduled = insp.scheduled() or {}
+		except Exception as e:
+			return Response({"detail": "Failed to inspect Celery workers.", "error": str(e)}, status=502)
+
+		# Normalize into counts + payload for quick visibility
+		def _count(d):
+			return sum(len(v or []) for v in (d or {}).values())
+
+		return Response(
+			{
+				"counts": {
+					"active": _count(active),
+					"reserved": _count(reserved),
+					"scheduled": _count(scheduled),
+				},
+				"active": active,
+				"reserved": reserved,
+				"scheduled": scheduled,
+			},
+			status=200,
+		)
 	@action(detail=False, methods=['get', 'post'], url_path='subjects')
 	def subjects(self, request):
 		"""List or create subjects.
