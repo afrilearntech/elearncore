@@ -60,6 +60,7 @@ from content.serializers import (
 	StoryPublishRequestSerializer,
 )
 from agentic.models import AIRecommendation, AIAbuseReport
+from agentic.services import ai_runtime_diagnostics
 from agentic.serializers import AIRecommendationSerializer, AIAbuseReportSerializer
 from agentic.services import generate_targeted_assessments_for_student
 from knox.models import AuthToken
@@ -200,15 +201,34 @@ def _published_stories_for_school(school_id: int | None):
 
 def _enqueue_story_generation(*, requested_by_id: int, grade: str, tag: str, count: int, school_id: int | None):
 	# Local import keeps app startup resilient if Celery isn't installed yet.
-	from agentic.tasks import generate_stories_task
+	# If Celery isn't available (common in local/dev), run synchronously so the API still works.
+	from agentic import tasks as agentic_tasks
+	import uuid
 
-	return generate_stories_task.delay(
-		requested_by_id=requested_by_id,
-		grade=grade,
-		tag=tag,
-		count=count,
-		school_id=school_id,
-	)
+	try:
+		generate_stories_task = agentic_tasks.generate_stories_task
+		return generate_stories_task.delay(
+			requested_by_id=requested_by_id,
+			grade=grade,
+			tag=tag,
+			count=count,
+			school_id=school_id,
+		)
+	except Exception:
+		result = agentic_tasks.generate_stories_task_sync(
+			requested_by_id=requested_by_id,
+			grade=grade,
+			tag=tag,
+			count=count,
+			school_id=school_id,
+		)
+
+		class _ImmediateResult:
+			def __init__(self, payload):
+				self.id = uuid.uuid4()
+				self.payload = payload
+
+		return _ImmediateResult(result)
 
 
 def _award_student_points(student: Student | None, points: int) -> int | None:
@@ -2211,6 +2231,20 @@ class ContentViewSet(viewsets.ViewSet):
 		responses={200: SubjectSerializer(many=True)},
 		description="List or create subjects for content management.",
 	)
+        
+	@extend_schema(
+		operation_id="content_ai_diagnostics",
+		description=(
+			"Admin diagnostic for AI runtime configuration (OpenAI/Celery). "
+			"Does not return secrets; use to confirm why OpenAI usage is not occurring."
+		),
+		responses={200: OpenApiResponse(description="AI runtime diagnostics.")},
+	)
+	@action(detail=False, methods=['get'], url_path='ai/diagnostics')
+	def ai_diagnostics(self, request):
+		if not _user_role_in(request.user, {UserRole.ADMIN.value}):
+			return Response({"detail": "Admin role required."}, status=403)
+		return Response(ai_runtime_diagnostics(), status=200)
 	@action(detail=False, methods=['get', 'post'], url_path='subjects')
 	def subjects(self, request):
 		"""List or create subjects.

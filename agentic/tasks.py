@@ -1,4 +1,7 @@
-from celery import shared_task
+try:
+    from celery import shared_task  # type: ignore
+except Exception:  # pragma: no cover
+    shared_task = None
 from django.contrib.auth import get_user_model
 
 from accounts.models import School
@@ -7,9 +10,8 @@ from content.models import Story
 from .services import generate_story_payload
 
 
-@shared_task(bind=True)
-def generate_stories_task(self, *, requested_by_id: int, grade: str, tag: str, count: int, school_id: int | None = None) -> dict:
-    """Generate one or more stories asynchronously and persist them."""
+def generate_stories_task_sync(*, requested_by_id: int, grade: str, tag: str, count: int, school_id: int | None = None) -> dict:
+    """Synchronous story generation (used when Celery isn't available)."""
     User = get_user_model()
     requested_by = User.objects.filter(id=requested_by_id).first()
     school = School.objects.filter(id=school_id).first() if school_id else None
@@ -42,3 +44,16 @@ def generate_stories_task(self, *, requested_by_id: int, grade: str, tag: str, c
         "grade": grade,
         "tag": tag,
     }
+
+
+if shared_task is not None:
+    @shared_task(bind=True)
+    def generate_stories_task(self, *, requested_by_id: int, grade: str, tag: str, count: int, school_id: int | None = None) -> dict:
+        """Generate one or more stories asynchronously and persist them."""
+        return generate_stories_task_sync(
+            requested_by_id=requested_by_id,
+            grade=grade,
+            tag=tag,
+            count=count,
+            school_id=school_id,
+        )

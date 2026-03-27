@@ -25,8 +25,67 @@ def _get_openai_client():
         return None
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
+        print("OPENAI_API_KEY not set, OpenAI client will not be available.")
         return None
-    return OpenAI(api_key=api_key)
+    try:
+        return OpenAI(api_key=api_key)
+    except Exception as e:
+        # If the OpenAI SDK can't initialize (e.g., dependency mismatch), fall back cleanly.
+        print("OpenAI client init failed, OpenAI client will not be available.")
+        print(e)
+        return None
+
+
+def ai_runtime_diagnostics() -> Dict:
+    """Return non-sensitive diagnostics for AI/Celery runtime health.
+
+    This intentionally does not return secrets (API keys, tokens).
+    """
+    api_key_present = bool(os.getenv("OPENAI_API_KEY"))
+
+    openai_importable = False
+    openai_client_ok = False
+    openai_client_error: str | None = None
+    try:
+        from openai import OpenAI  # type: ignore
+
+        openai_importable = True
+        if api_key_present:
+            try:
+                _ = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+                openai_client_ok = True
+            except Exception as e:  # pragma: no cover
+                openai_client_error = str(e)
+    except Exception as e:  # pragma: no cover
+        openai_client_error = str(e)
+
+    celery_importable = False
+    celery_error: str | None = None
+    try:
+        import celery  # type: ignore
+
+        celery_importable = True
+    except Exception as e:  # pragma: no cover
+        celery_error = str(e)
+
+    return {
+        "openai": {
+            "api_key_present": api_key_present,
+            "sdk_importable": openai_importable,
+            "client_init_ok": openai_client_ok,
+            "client_init_error": openai_client_error,
+            "model_env": {
+                "OPENAI_RECOMMENDER_MODEL": os.getenv("OPENAI_RECOMMENDER_MODEL"),
+                "OPENAI_MODERATION_MODEL": os.getenv("OPENAI_MODERATION_MODEL"),
+            },
+        },
+        "celery": {
+            "sdk_importable": celery_importable,
+            "import_error": celery_error,
+            "broker_url": os.getenv("CELERY_BROKER_URL") or os.getenv("REDIS_URL") or "redis://localhost:6379/0",
+            "result_backend": os.getenv("CELERY_RESULT_BACKEND") or os.getenv("CELERY_BROKER_URL") or os.getenv("REDIS_URL") or "redis://localhost:6379/0",
+        },
+    }
 
 
 def build_student_activity(student: Student) -> Dict:
@@ -525,6 +584,7 @@ def generate_story_payload(tag: str, grade: str) -> Dict:
     """Generate a single story payload using the LLM, with a safe fallback."""
     client = _get_openai_client()
     if client is None:
+        print("OpenAI client not available, using fallback story payload.")
         return _fallback_story_payload(tag=tag, grade=grade)
 
     schema = {
@@ -598,6 +658,8 @@ def generate_story_payload(tag: str, grade: str) -> Dict:
         if not payload:
             return _fallback_story_payload(tag=tag, grade=grade)
         return payload
-    except Exception:
+    except Exception as e:
+        print("Error generating story from OpenAI, using fallback. Error details:")
+        print(e)
         return _fallback_story_payload(tag=tag, grade=grade)
 
