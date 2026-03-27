@@ -318,6 +318,232 @@ class KidsStoriesEndpointTests(TestCase):
 		self.assertEqual(detail_resp.status_code, 403)
 
 
+class StoryWorkflowVisibilityTests(TestCase):
+	def setUp(self):
+		cache.clear()
+		self.client = APIClient()
+
+		county = County.objects.create(name='Montserrado', status=StatusEnum.APPROVED.value)
+		district = District.objects.create(county=county, name='Careysburg', status=StatusEnum.APPROVED.value)
+		self.school_one = School.objects.create(district=district, name='School One', status=StatusEnum.APPROVED.value)
+		self.school_two = School.objects.create(district=district, name='School Two', status=StatusEnum.APPROVED.value)
+
+		self.student_user = User.objects.create_user(
+			phone='231770710001',
+			name='Story Student Scoped',
+			email='student.scoped@example.com',
+			password='pass',
+			role=UserRole.STUDENT.value,
+		)
+		self.student = Student.objects.create(
+			profile=self.student_user,
+			school=self.school_one,
+			grade=StudentLevel.GRADE2.value,
+			status=StatusEnum.APPROVED.value,
+		)
+
+		self.teacher_user = User.objects.create_user(
+			phone='231770710002',
+			name='Story Teacher Scoped',
+			email='teacher.scoped@example.com',
+			password='pass',
+			role=UserRole.TEACHER.value,
+		)
+		self.teacher = Teacher.objects.create(
+			profile=self.teacher_user,
+			school=self.school_one,
+			status=StatusEnum.APPROVED.value,
+		)
+
+		self.headteacher_user = User.objects.create_user(
+			phone='231770710003',
+			name='Story Headteacher Scoped',
+			email='head.scoped@example.com',
+			password='pass',
+			role=UserRole.HEADTEACHER.value,
+		)
+		self.headteacher = Teacher.objects.create(
+			profile=self.headteacher_user,
+			school=self.school_one,
+			status=StatusEnum.APPROVED.value,
+		)
+
+		self.validator_user = User.objects.create_user(
+			phone='231770710004',
+			name='Story Validator Scoped',
+			email='validator.scoped@example.com',
+			password='pass',
+			role=UserRole.CONTENTVALIDATOR.value,
+		)
+
+		self.creator_user = User.objects.create_user(
+			phone='231770710005',
+			name='Story Creator Scoped',
+			email='creator.scoped@example.com',
+			password='pass',
+			role=UserRole.CONTENTCREATOR.value,
+		)
+
+		subject = Subject.objects.create(
+			name='Mathematics Scoped Stories',
+			grade=StudentLevel.GRADE2.value,
+			status=StatusEnum.APPROVED.value,
+		)
+		subject.teachers.add(self.teacher)
+
+		self.global_story = Story.objects.create(
+			title='Global Published Story',
+			grade=StudentLevel.GRADE2.value,
+			tag='Friendship',
+			estimated_minutes=4,
+			body='Global body',
+			characters=[],
+			vocabulary=[],
+			moral='Global moral',
+			cover_image={},
+			is_published=True,
+			school=None,
+		)
+		self.school_one_published = Story.objects.create(
+			title='School One Published Story',
+			grade=StudentLevel.GRADE2.value,
+			tag='Honesty',
+			estimated_minutes=4,
+			body='School one body',
+			characters=[],
+			vocabulary=[],
+			moral='School one moral',
+			cover_image={},
+			is_published=True,
+			school=self.school_one,
+		)
+		self.school_one_unpublished = Story.objects.create(
+			title='School One Draft Story',
+			grade=StudentLevel.GRADE2.value,
+			tag='Kindness',
+			estimated_minutes=4,
+			body='School one draft body',
+			characters=[],
+			vocabulary=[],
+			moral='Draft moral',
+			cover_image={},
+			is_published=False,
+			school=self.school_one,
+		)
+		Story.objects.create(
+			title='School Two Published Story',
+			grade=StudentLevel.GRADE2.value,
+			tag='Respect',
+			estimated_minutes=4,
+			body='School two body',
+			characters=[],
+			vocabulary=[],
+			moral='School two moral',
+			cover_image={},
+			is_published=True,
+			school=self.school_two,
+		)
+		Story.objects.create(
+			title='Global Published Grade 5 Story',
+			grade=StudentLevel.GRADE5.value,
+			tag='Friendship',
+			estimated_minutes=4,
+			body='Global grade 5 body',
+			characters=[],
+			vocabulary=[],
+			moral='Grade 5 moral',
+			cover_image={},
+			is_published=True,
+			school=None,
+		)
+
+	def test_kids_only_see_published_global_plus_own_school(self):
+		self.client.force_authenticate(user=self.student_user)
+		resp = self.client.get('/api-v1/kids/stories/')
+		self.assertEqual(resp.status_code, 200)
+		titles = {item['title'] for item in resp.json()}
+		self.assertIn('Global Published Story', titles)
+		self.assertIn('School One Published Story', titles)
+		self.assertNotIn('School One Draft Story', titles)
+		self.assertNotIn('School Two Published Story', titles)
+
+	def test_teacher_sees_published_scope_for_taught_grades(self):
+		self.client.force_authenticate(user=self.teacher_user)
+		resp = self.client.get('/api-v1/teacher/stories/')
+		self.assertEqual(resp.status_code, 200)
+		titles = {item['title'] for item in resp.json()}
+		self.assertIn('Global Published Story', titles)
+		self.assertIn('School One Published Story', titles)
+		self.assertNotIn('School One Draft Story', titles)
+		self.assertNotIn('School Two Published Story', titles)
+		self.assertNotIn('Global Published Grade 5 Story', titles)
+
+	def test_headteacher_sees_all_school_stories_including_unpublished(self):
+		self.client.force_authenticate(user=self.headteacher_user)
+		resp = self.client.get('/api-v1/headteacher/stories/')
+		self.assertEqual(resp.status_code, 200)
+		titles = {item['title'] for item in resp.json()}
+		self.assertIn('School One Published Story', titles)
+		self.assertIn('School One Draft Story', titles)
+		self.assertNotIn('Global Published Story', titles)
+
+	def test_headteacher_publishes_unpublished_story_in_school(self):
+		self.client.force_authenticate(user=self.headteacher_user)
+		resp = self.client.post(
+			'/api-v1/headteacher/stories/publish/',
+			{'story_ids': [self.school_one_unpublished.id]},
+			format='json',
+		)
+		self.assertEqual(resp.status_code, 200)
+		self.school_one_unpublished.refresh_from_db()
+		self.assertTrue(self.school_one_unpublished.is_published)
+
+	def test_validator_can_publish_story(self):
+		self.client.force_authenticate(user=self.validator_user)
+		resp = self.client.post(
+			'/api-v1/content/stories/publish/',
+			{'story_ids': [self.school_one_unpublished.id]},
+			format='json',
+		)
+		self.assertEqual(resp.status_code, 200)
+		self.school_one_unpublished.refresh_from_db()
+		self.assertTrue(self.school_one_unpublished.is_published)
+
+	@patch('api.viewsets._enqueue_story_generation')
+	def test_generation_endpoints_validate_count_and_queue(self, mocked_enqueue):
+		mocked_enqueue.return_value = type('TaskResult', (), {'id': 'task-123'})()
+
+		self.client.force_authenticate(user=self.creator_user)
+		bad_resp = self.client.post(
+			'/api-v1/content/stories/generate/',
+			{'grade': StudentLevel.GRADE2.value, 'tag': 'Friendship', 'count': 11},
+			format='json',
+		)
+		self.assertEqual(bad_resp.status_code, 400)
+
+		ok_resp = self.client.post(
+			'/api-v1/content/stories/generate/',
+			{'grade': StudentLevel.GRADE2.value, 'tag': 'Friendship', 'count': 2},
+			format='json',
+		)
+		self.assertEqual(ok_resp.status_code, 202)
+
+		self.client.force_authenticate(user=self.teacher_user)
+		teacher_ok = self.client.post(
+			'/api-v1/teacher/stories/generate/',
+			{'grade': StudentLevel.GRADE2.value, 'tag': 'Friendship', 'count': 1},
+			format='json',
+		)
+		self.assertEqual(teacher_ok.status_code, 202)
+
+		teacher_forbidden = self.client.post(
+			'/api-v1/teacher/stories/generate/',
+			{'grade': StudentLevel.GRADE5.value, 'tag': 'Friendship', 'count': 1},
+			format='json',
+		)
+		self.assertEqual(teacher_forbidden.status_code, 403)
+
+
 class KidsProgressGardenRankingTests(TestCase):
 	def setUp(self):
 		cache.clear()

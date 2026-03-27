@@ -1,6 +1,6 @@
 from rest_framework import serializers
 
-from elearncore.sysutils.constants import QType as QTypeEnum
+from elearncore.sysutils.constants import QType as QTypeEnum, StudentLevel
 
 from .models import (
 	Subject, Topic, Period, LessonResource, TakeLesson,
@@ -8,7 +8,7 @@ from .models import (
 	LessonAssessment, LessonAssessmentGrade,
 	Question, Option, GameModel, AssessmentSolution,
 	LessonAssessmentSolution,
-	Story,
+	Story, STORY_TAG_CHOICES,
 )
 
 
@@ -34,7 +34,10 @@ class StoryListSerializer(serializers.ModelSerializer):
 
 	class Meta:
 		model = Story
-		fields = ['id', 'title', 'grade', 'tag', 'estimated_minutes', 'moral', 'cover_image', 'created_at']
+		fields = [
+			'id', 'title', 'grade', 'tag', 'estimated_minutes', 'moral', 'cover_image',
+			'is_published', 'school', 'created_by', 'created_at',
+		]
 		read_only_fields = fields
 
 
@@ -48,9 +51,23 @@ class StoryDetailSerializer(serializers.ModelSerializer):
 		fields = [
 			'id', 'title', 'grade', 'tag', 'estimated_minutes',
 			'cover_image', 'characters', 'vocabulary', 'moral', 'body',
+			'is_published', 'school', 'created_by',
 			'created_at', 'updated_at',
 		]
 		read_only_fields = fields
+
+
+class StoryGenerateRequestSerializer(serializers.Serializer):
+	grade = serializers.ChoiceField(choices=[(lvl.value, lvl.value) for lvl in StudentLevel])
+	tag = serializers.ChoiceField(choices=STORY_TAG_CHOICES)
+	count = serializers.IntegerField(min_value=1, max_value=10)
+
+
+class StoryPublishRequestSerializer(serializers.Serializer):
+	story_ids = serializers.ListField(
+		child=serializers.IntegerField(min_value=1),
+		allow_empty=False,
+	)
 
 
 class SubjectSerializer(serializers.ModelSerializer):

@@ -13,6 +13,24 @@ from elearncore.sysutils.constants import (
 )
 
 
+STORY_TAG_CHOICES = [
+	("Friendship", "Friendship"),
+	("Honesty", "Honesty"),
+	("Kindness", "Kindness"),
+	("Respect", "Respect"),
+	("Responsibility", "Responsibility"),
+	("Courage", "Courage"),
+	("Perseverance", "Perseverance"),
+	("Teamwork", "Teamwork"),
+	("Empathy", "Empathy"),
+	("Patience", "Patience"),
+	("Gratitude", "Gratitude"),
+	("Creativity", "Creativity"),
+	("Curiosity", "Curiosity"),
+	("Problem Solving", "Problem Solving"),
+]
+
+
 class TimestampedModel(models.Model):
 	created_at = models.DateTimeField(auto_now_add=True)
 	updated_at = models.DateTimeField(auto_now=True)
@@ -269,8 +287,22 @@ class Story(TimestampedModel):
 	"""AI-generated stories for lower-grade students."""
 	title = models.CharField(max_length=200)
 	grade = models.CharField(max_length=20, choices=[(lvl.value, lvl.value) for lvl in StudentLevel])
-	tag = models.CharField(max_length=80, db_index=True)
+	tag = models.CharField(max_length=80, choices=STORY_TAG_CHOICES, db_index=True)
 	estimated_minutes = models.PositiveSmallIntegerField(default=5)
+	created_by = models.ForeignKey(
+		settings.AUTH_USER_MODEL,
+		on_delete=models.SET_NULL,
+		null=True,
+		blank=True,
+		related_name='generated_stories',
+	)
+	school = models.ForeignKey(
+		'accounts.School',
+		on_delete=models.SET_NULL,
+		null=True,
+		blank=True,
+		related_name='stories',
+	)
 
 	# Story content
 	body = models.TextField()
@@ -282,11 +314,11 @@ class Story(TimestampedModel):
 	cover_image = models.JSONField(default=dict, blank=True)  # {prompt, image_url, alt_text}
 
 	# Optional publication control
-	is_published = models.BooleanField(default=True)
+	is_published = models.BooleanField(default=False)
 
 	class Meta:
 		indexes = [
-			models.Index(fields=["grade", "tag", "is_published", "created_at"]),
+			models.Index(fields=["is_published", "school", "grade", "tag", "created_at"]),
 		]
 
 	def __str__(self) -> str:

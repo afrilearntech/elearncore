@@ -236,6 +236,14 @@ REST_KNOX = {
     'AUTO_REFRESH': True,
 }
 
+# Celery settings (defaults use local Redis)
+CELERY_BROKER_URL = os.getenv('CELERY_BROKER_URL', os.getenv('REDIS_URL', 'redis://localhost:6379/0'))
+CELERY_RESULT_BACKEND = os.getenv('CELERY_RESULT_BACKEND', CELERY_BROKER_URL)
+CELERY_ACCEPT_CONTENT = ['json']
+CELERY_TASK_SERIALIZER = 'json'
+CELERY_RESULT_SERIALIZER = 'json'
+CELERY_TIMEZONE = TIME_ZONE
+
 # DRF Spectacular Configuration
 SPECTACULAR_SETTINGS = {
     'TITLE': 'Liberia eLearn API',

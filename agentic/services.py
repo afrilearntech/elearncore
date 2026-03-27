@@ -484,3 +484,120 @@ def _create_question_from_ai(data: Dict, *, lesson_assessment: Optional[LessonAs
 
     return question
 
+
+def _parse_story_json(text: str) -> Dict:
+    import json
+    try:
+        payload = json.loads(text)
+        if isinstance(payload, dict):
+            return payload
+    except Exception:
+        pass
+    return {}
+
+
+def _fallback_story_payload(tag: str, grade: str) -> Dict:
+    return {
+        "title": f"A {tag} Story for {grade}",
+        "estimated_minutes": 5,
+        "body": (
+            f"In {grade}, a group of friends discovered how {tag.lower()} helps everyone learn and grow together. "
+            "They worked through a challenge, listened to one another, and found a kind solution."
+        ),
+        "moral": f"{tag} helps us make better choices.",
+        "characters": [
+            {"name": "Ayo", "description": "A thoughtful learner", "role": "main"},
+            {"name": "Teta", "description": "A supportive friend", "role": "friend"},
+        ],
+        "vocabulary": [
+            {"word": "choice", "definition": "a decision you make"},
+            {"word": "respect", "definition": "treating others kindly"},
+        ],
+        "cover_image": {
+            "prompt": f"Children in a classroom showing {tag.lower()}, colorful and child friendly",
+            "image_url": "",
+            "alt_text": f"Children learning about {tag.lower()}",
+        },
+    }
+
+
+def generate_story_payload(tag: str, grade: str) -> Dict:
+    """Generate a single story payload using the LLM, with a safe fallback."""
+    client = _get_openai_client()
+    if client is None:
+        return _fallback_story_payload(tag=tag, grade=grade)
+
+    schema = {
+        "name": "story_schema",
+        "schema": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string"},
+                "estimated_minutes": {"type": "integer"},
+                "body": {"type": "string"},
+                "moral": {"type": "string"},
+                "characters": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string"},
+                            "description": {"type": "string"},
+                            "role": {"type": "string"},
+                        },
+                        "required": ["name", "description"],
+                        "additionalProperties": False,
+                    },
+                },
+                "vocabulary": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "word": {"type": "string"},
+                            "definition": {"type": "string"},
+                        },
+                        "required": ["word", "definition"],
+                        "additionalProperties": False,
+                    },
+                },
+                "cover_image": {
+                    "type": "object",
+                    "properties": {
+                        "prompt": {"type": "string"},
+                        "image_url": {"type": "string"},
+                        "alt_text": {"type": "string"},
+                    },
+                    "required": ["prompt"],
+                    "additionalProperties": False,
+                },
+            },
+            "required": ["title", "estimated_minutes", "body", "moral", "characters", "vocabulary", "cover_image"],
+            "additionalProperties": False,
+        },
+        "strict": True,
+    }
+
+    prompt = (
+        "Generate one original child-safe story for Liberia eLearn. "
+        f"Target grade: {grade}. Tag/category: {tag}. "
+        "Keep the language simple, practical, and age-appropriate. "
+        "Return strictly valid JSON that matches the required schema."
+    )
+
+    try:
+        resp = client.responses.create(
+            model=os.getenv('OPENAI_RECOMMENDER_MODEL', 'gpt-4o-mini'),
+            input=[
+                {"role": "system", "content": "You create educational stories for children."},
+                {"role": "user", "content": prompt},
+            ],
+            response_format={"type": "json_schema", "json_schema": schema},
+        )
+        payload = _parse_story_json(resp.output_text)
+        if not payload:
+            return _fallback_story_payload(tag=tag, grade=grade)
+        return payload
+    except Exception:
+        return _fallback_story_payload(tag=tag, grade=grade)
+

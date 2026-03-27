@@ -23,6 +23,7 @@ from content.models import (
 	LessonAssessmentGrade,
 	LessonResource,
 	Question,
+	Story,
 	Subject,
 	Topic,
 )
@@ -32,6 +33,9 @@ from content.serializers import (
 	LessonResourceSerializer,
 	QuestionCreateSerializer,
 	QuestionSerializer,
+	StoryDetailSerializer,
+	StoryListSerializer,
+	StoryPublishRequestSerializer,
 	SubjectSerializer,
 	TopicSerializer,
 )
@@ -93,6 +97,90 @@ class HeadTeacherViewSet(TeacherViewSet):
 			'school_id': getattr(school, 'id', None),
 			'school_name': getattr(school, 'name', None),
 		}
+
+	@extend_schema(
+		description="List all stories in the head teacher's school, including unpublished stories.",
+		parameters=[
+			OpenApiParameter(name='grade', required=False, location=OpenApiParameter.QUERY, type=str),
+			OpenApiParameter(name='tag', required=False, location=OpenApiParameter.QUERY, type=str),
+			OpenApiParameter(name='is_published', required=False, location=OpenApiParameter.QUERY, type=bool),
+		],
+		responses={200: StoryListSerializer(many=True)},
+	)
+	@action(detail=False, methods=['get'], url_path='stories')
+	def stories(self, request):
+		deny = self._require_teacher(request)
+		if deny:
+			return deny
+
+		school_id = request.user.teacher.school_id
+		qs = Story.objects.filter(school_id=school_id).select_related('school', 'created_by').order_by('-created_at')
+
+		grade = (request.query_params.get('grade') or '').strip()
+		if grade:
+			qs = qs.filter(grade=grade)
+
+		tag = (request.query_params.get('tag') or '').strip()
+		if tag:
+			qs = qs.filter(tag__iexact=tag)
+
+		is_published = request.query_params.get('is_published')
+		if is_published in {'1', 'true', 'True'}:
+			qs = qs.filter(is_published=True)
+		elif is_published in {'0', 'false', 'False'}:
+			qs = qs.filter(is_published=False)
+
+		return Response(StoryListSerializer(qs, many=True).data)
+
+	@extend_schema(
+		description="Read a single story in the head teacher's school scope.",
+		parameters=[OpenApiParameter(name='pk', required=True, location=OpenApiParameter.PATH, type=int)],
+		responses={200: StoryDetailSerializer},
+	)
+	@action(detail=False, methods=['get'], url_path='stories/(?P<pk>[^/.]+)')
+	def story_detail(self, request, pk=None):
+		deny = self._require_teacher(request)
+		if deny:
+			return deny
+
+		try:
+			story = Story.objects.select_related('school', 'created_by').get(pk=pk, school_id=request.user.teacher.school_id)
+		except Story.DoesNotExist:
+			return Response({"detail": "Story not found."}, status=404)
+		return Response(StoryDetailSerializer(story).data)
+
+	@extend_schema(
+		description="Publish school stories. Headteacher publish is the final approval step.",
+		request=StoryPublishRequestSerializer,
+		responses={200: OpenApiResponse(description="Stories published.")},
+	)
+	@action(detail=False, methods=['post'], url_path='stories/publish')
+	def publish_stories(self, request):
+		deny = self._require_teacher(request)
+		if deny:
+			return deny
+
+		ser = StoryPublishRequestSerializer(data=request.data)
+		ser.is_valid(raise_exception=True)
+		story_ids = ser.validated_data['story_ids']
+		school_id = request.user.teacher.school_id
+
+		stories = list(Story.objects.filter(id__in=story_ids, school_id=school_id))
+		if len(stories) != len(set(story_ids)):
+			return Response({"detail": "One or more stories are outside your school scope."}, status=403)
+
+		updated = 0
+		for story in stories:
+			if not story.is_published:
+				story.is_published = True
+				story.save(update_fields=['is_published', 'updated_at'])
+				updated += 1
+
+		return Response({
+			"detail": "Stories published.",
+			"published_count": updated,
+			"story_ids": story_ids,
+		})
 
 	@extend_schema(
 		description="List all teachers in the head teacher's school.",

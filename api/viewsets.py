@@ -55,6 +55,8 @@ from content.serializers import (
 	GameSerializer,
 	StoryListSerializer,
 	StoryDetailSerializer,
+	StoryGenerateRequestSerializer,
+	StoryPublishRequestSerializer,
 )
 from agentic.models import AIRecommendation, AIAbuseReport
 from agentic.serializers import AIRecommendationSerializer, AIAbuseReportSerializer
@@ -186,6 +188,26 @@ LESSON_LOCK_REASON = "Complete the previous lesson and submit all of its assessm
 TEACHER_UNLOCK_MAX_HOURS = 72
 TEACHER_UNLOCK_REASON = "Temporarily unlocked by teacher."
 STUDENT_LESSON_CACHE_TTL = 120
+
+
+def _published_stories_for_school(school_id: int | None):
+	qs = Story.objects.filter(is_published=True)
+	if school_id:
+		return qs.filter(Q(school__isnull=True) | Q(school_id=school_id))
+	return qs.filter(school__isnull=True)
+
+
+def _enqueue_story_generation(*, requested_by_id: int, grade: str, tag: str, count: int, school_id: int | None):
+	# Local import keeps app startup resilient if Celery isn't installed yet.
+	from agentic.tasks import generate_stories_task
+
+	return generate_stories_task.delay(
+		requested_by_id=requested_by_id,
+		grade=grade,
+		tag=tag,
+		count=count,
+		school_id=school_id,
+	)
 
 
 def _award_student_points(student: Student | None, points: int) -> int | None:
@@ -2066,6 +2088,120 @@ class ContentViewSet(viewsets.ViewSet):
 		if not IsContentValidator().has_permission(request, self):
 			return Response({"detail": "Content validator role required."}, status=status.HTTP_403_FORBIDDEN)
 		return None
+
+	@extend_schema(
+		operation_id="content_stories",
+		responses={200: StoryListSerializer(many=True)},
+		description="List stories for content operations. Supports grade, tag, school_id, and is_published filters.",
+		parameters=[
+			OpenApiParameter(name='grade', required=False, location=OpenApiParameter.QUERY, type=str),
+			OpenApiParameter(name='tag', required=False, location=OpenApiParameter.QUERY, type=str),
+			OpenApiParameter(name='school_id', required=False, location=OpenApiParameter.QUERY, type=int),
+			OpenApiParameter(name='is_published', required=False, location=OpenApiParameter.QUERY, type=bool),
+		],
+	)
+	@action(detail=False, methods=['get'], url_path='stories')
+	def stories(self, request):
+		deny = self._require_creator(request)
+		if deny and not IsContentValidator().has_permission(request, self):
+			return deny
+
+		qs = Story.objects.select_related('school', 'created_by').all().order_by('-created_at')
+		user = request.user
+		is_creator_only = (
+			user and user.is_authenticated
+			and getattr(user, 'role', None) == UserRole.CONTENTCREATOR.value
+		)
+		if is_creator_only:
+			qs = qs.filter(created_by=user)
+
+		grade = (request.query_params.get('grade') or '').strip()
+		if grade:
+			qs = qs.filter(grade=grade)
+
+		tag = (request.query_params.get('tag') or '').strip()
+		if tag:
+			qs = qs.filter(tag__iexact=tag)
+
+		school_id = request.query_params.get('school_id')
+		if school_id:
+			try:
+				qs = qs.filter(school_id=int(school_id))
+			except (TypeError, ValueError):
+				return Response({"detail": "school_id must be an integer."}, status=400)
+
+		is_published = request.query_params.get('is_published')
+		if is_published in {'1', 'true', 'True'}:
+			qs = qs.filter(is_published=True)
+		elif is_published in {'0', 'false', 'False'}:
+			qs = qs.filter(is_published=False)
+
+		return Response(StoryListSerializer(qs, many=True).data)
+
+	@extend_schema(
+		operation_id="content_generate_stories",
+		description="Queue AI story generation for admins and content creators (global stories).",
+		request=StoryGenerateRequestSerializer,
+		responses={202: OpenApiResponse(description="Story generation task queued.")},
+	)
+	@action(detail=False, methods=['post'], url_path='stories/generate')
+	def generate_stories(self, request):
+		if not _user_role_in(request.user, {UserRole.ADMIN.value, UserRole.CONTENTCREATOR.value}):
+			return Response({"detail": "Admin or content creator role required."}, status=403)
+
+		ser = StoryGenerateRequestSerializer(data=request.data)
+		ser.is_valid(raise_exception=True)
+		data = ser.validated_data
+
+		task = _enqueue_story_generation(
+			requested_by_id=request.user.id,
+			grade=data['grade'],
+			tag=data['tag'],
+			count=data['count'],
+			school_id=None,
+		)
+		return Response(
+			{
+				"detail": "Story generation queued.",
+				"task_id": str(task.id),
+				"requested": data,
+				"scope": "global",
+			},
+			status=202,
+		)
+
+	@extend_schema(
+		operation_id="content_publish_stories",
+		description="Publish one or more stories. Restricted to content validators and admins.",
+		request=StoryPublishRequestSerializer,
+		responses={200: OpenApiResponse(description="Stories published.")},
+	)
+	@action(detail=False, methods=['post'], url_path='stories/publish')
+	def publish_stories(self, request):
+		deny = self._require_validator(request)
+		if deny:
+			return deny
+
+		ser = StoryPublishRequestSerializer(data=request.data)
+		ser.is_valid(raise_exception=True)
+		story_ids = ser.validated_data['story_ids']
+
+		stories = list(Story.objects.filter(id__in=story_ids))
+		if len(stories) != len(set(story_ids)):
+			return Response({"detail": "One or more stories were not found."}, status=404)
+
+		updated = 0
+		for story in stories:
+			if not story.is_published:
+				story.is_published = True
+				story.save(update_fields=['is_published', 'updated_at'])
+				updated += 1
+
+		return Response({
+			"detail": "Stories published.",
+			"published_count": updated,
+			"story_ids": story_ids,
+		})
 
 	
 	@extend_schema(
@@ -4430,7 +4566,7 @@ class KidsViewSet(viewsets.ViewSet):
 		if not student:
 			return Response({"detail": "Student profile required."}, status=403)
 
-		qs = Story.objects.filter(is_published=True).order_by('-created_at')
+		qs = _published_stories_for_school(getattr(student, 'school_id', None)).order_by('-created_at')
 
 		grade = request.query_params.get('grade')
 		if grade:
@@ -4460,7 +4596,7 @@ class KidsViewSet(viewsets.ViewSet):
 			return Response({"detail": "Student profile required."}, status=403)
 
 		try:
-			story = Story.objects.get(pk=pk, is_published=True)
+			story = _published_stories_for_school(getattr(student, 'school_id', None)).get(pk=pk)
 		except Story.DoesNotExist:
 			return Response({"detail": "Story not found."}, status=404)
 
@@ -5871,6 +6007,116 @@ class TeacherViewSet(viewsets.ViewSet):
 			"expires_at": unlock.expires_at,
 			"revoked_at": unlock.revoked_at,
 		}
+
+	@extend_schema(
+		description=(
+			"List published stories for a teacher's grade scope. Returns global published stories "
+			"plus published stories tied to the teacher's school."
+		),
+		parameters=[
+			OpenApiParameter(name='grade', required=False, location=OpenApiParameter.QUERY, type=str),
+			OpenApiParameter(name='tag', required=False, location=OpenApiParameter.QUERY, type=str),
+		],
+		responses={200: StoryListSerializer(many=True)},
+	)
+	@action(detail=False, methods=['get'], url_path='stories')
+	def stories(self, request):
+		deny = self._require_teacher(request)
+		if deny:
+			return deny
+
+		teacher = request.user.teacher
+		teacher_grades = self._teacher_leaderboard_grades(teacher)
+		if not teacher_grades:
+			return Response([])
+
+		qs = _published_stories_for_school(getattr(teacher, 'school_id', None)).filter(grade__in=teacher_grades)
+
+		grade = (request.query_params.get('grade') or '').strip()
+		if grade:
+			if grade not in teacher_grades:
+				return Response({"detail": "You can only access stories for grades you teach."}, status=403)
+			qs = qs.filter(grade=grade)
+
+		tag = (request.query_params.get('tag') or '').strip()
+		if tag:
+			qs = qs.filter(tag__iexact=tag)
+
+		return Response(StoryListSerializer(qs.order_by('-created_at'), many=True).data)
+
+	@extend_schema(
+		description="Read story detail for a teacher within the teacher's published visibility scope.",
+		parameters=[
+			OpenApiParameter(name='pk', required=True, location=OpenApiParameter.PATH, type=int),
+		],
+		responses={200: StoryDetailSerializer},
+	)
+	@action(detail=False, methods=['get'], url_path='stories/(?P<pk>[^/.]+)')
+	def story_detail(self, request, pk=None):
+		deny = self._require_teacher(request)
+		if deny:
+			return deny
+
+		teacher = request.user.teacher
+		teacher_grades = self._teacher_leaderboard_grades(teacher)
+		if not teacher_grades:
+			return Response({"detail": "Story not found."}, status=404)
+
+		try:
+			story = (
+				_published_stories_for_school(getattr(teacher, 'school_id', None))
+				.filter(grade__in=teacher_grades)
+				.get(pk=pk)
+			)
+		except Story.DoesNotExist:
+			return Response({"detail": "Story not found."}, status=404)
+
+		return Response(StoryDetailSerializer(story).data)
+
+	@extend_schema(
+		description=(
+			"Queue AI story generation for teacher/headteacher users. Generated stories are tied "
+			"to the teacher's school and start unpublished."
+		),
+		request=StoryGenerateRequestSerializer,
+		responses={202: OpenApiResponse(description="Story generation task queued.")},
+	)
+	@action(detail=False, methods=['post'], url_path='stories/generate')
+	def generate_stories(self, request):
+		deny = self._require_teacher(request)
+		if deny:
+			return deny
+
+		teacher = request.user.teacher
+		if not getattr(teacher, 'school_id', None):
+			return Response({"detail": "Teacher must be assigned to a school."}, status=403)
+
+		ser = StoryGenerateRequestSerializer(data=request.data)
+		ser.is_valid(raise_exception=True)
+		data = ser.validated_data
+
+		is_headteacher = getattr(request.user, 'role', None) == UserRole.HEADTEACHER.value
+		if not is_headteacher:
+			teacher_grades = self._teacher_leaderboard_grades(teacher)
+			if data['grade'] not in teacher_grades:
+				return Response({"detail": "You can only generate stories for grades you teach."}, status=403)
+
+		task = _enqueue_story_generation(
+			requested_by_id=request.user.id,
+			grade=data['grade'],
+			tag=data['tag'],
+			count=data['count'],
+			school_id=teacher.school_id,
+		)
+		return Response(
+			{
+				"detail": "Story generation queued.",
+				"task_id": str(task.id),
+				"requested": data,
+				"school_id": teacher.school_id,
+			},
+			status=202,
+		)
 
 	@extend_schema(
 		description=(
