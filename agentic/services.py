@@ -556,18 +556,59 @@ def _parse_story_json(text: str) -> Dict:
 
 
 def _fallback_story_payload(tag: str, grade: str) -> Dict:
+
+    def _grade_target_words(g: str) -> int:
+        # Conservative targets; keeps stories short enough for early grades but not one paragraph.
+        g_norm = (g or "").strip().upper()
+        if "K" in g_norm or "KINDER" in g_norm:
+            return 180
+        if "GRADE 1" in g_norm:
+            return 260
+        if "GRADE 2" in g_norm:
+            return 260
+        if "GRADE 3" in g_norm:
+            return 320
+        return 350
+
+    def _approx_words(text: str) -> int:
+        return len((text or "").split())
+
+    target_words = _grade_target_words(grade)
+
+    # Always weave character names into the story body.
+    characters = [
+        {"name": "Ayo", "description": "A thoughtful learner", "role": "main"},
+        {"name": "Teta", "description": "A supportive friend", "role": "friend"},
+    ]
+
+    base_body = (
+        f"Ayo and Teta were in {grade} when they noticed a new classmate sitting alone. "
+        f"Ayo wanted to say hello, but felt shy. Teta smiled and said, 'Let's be brave together.' "
+        f"They walked over, introduced themselves, and invited the classmate to join their game. "
+        f"Soon, a small problem came up: two students wanted the same pencil. Ayo remembered the word 'choice' "
+        f"and suggested they take turns. Teta added, 'Respect means we listen and share.' "
+        f"Everyone agreed, and the game continued happily. At the end of the day, Ayo and Teta learned that "
+        f"{tag.lower()} grows when we include others, share, and solve problems kindly."
+    )
+
+    # If still too short for the target, extend with a second scene.
+    if _approx_words(base_body) < target_words:
+        base_body += (
+            " The next day, Ayo and Teta made a simple plan: greet one new person, offer help, and use kind words. "
+            "When the teacher asked for helpers, Ayo carried books while Teta helped tidy the classroom corner. "
+            "Their new classmate felt welcome and smiled more. Together they practiced making good choices and showing respect."
+        )
+
     return {
         "title": f"A {tag} Story for {grade}",
         "estimated_minutes": 5,
-        "body": (
-            f"In {grade}, a group of friends discovered how {tag.lower()} helps everyone learn and grow together. "
-            "They worked through a challenge, listened to one another, and found a kind solution."
-        ),
+        "body": base_body,
         "moral": f"{tag} helps us make better choices.",
-        "characters": [
-            {"name": "Ayo", "description": "A thoughtful learner", "role": "main"},
-            {"name": "Teta", "description": "A supportive friend", "role": "friend"},
-        ],
+        "characters": characters,
+        "character_usage": {
+            "Ayo": "Says hello, suggests sharing, makes a kind choice.",
+            "Teta": "Encourages bravery, explains respect, helps include others.",
+        },
         "vocabulary": [
             {"word": "choice", "definition": "a decision you make"},
             {"word": "respect", "definition": "treating others kindly"},
@@ -609,6 +650,11 @@ def generate_story_payload(tag: str, grade: str) -> Dict:
                         "additionalProperties": False,
                     },
                 },
+                "character_usage": {
+                    "type": "object",
+                    "description": "Mapping of character names to a short phrase describing what they did in the story.",
+                    "additionalProperties": {"type": "string"},
+                },
                 "vocabulary": {
                     "type": "array",
                     "items": {
@@ -632,31 +678,112 @@ def generate_story_payload(tag: str, grade: str) -> Dict:
                     "additionalProperties": False,
                 },
             },
-            "required": ["title", "estimated_minutes", "body", "moral", "characters", "vocabulary", "cover_image"],
+            "required": ["title", "estimated_minutes", "body", "moral", "characters", "character_usage", "vocabulary", "cover_image"],
             "additionalProperties": False,
         },
         "strict": True,
     }
 
+    def _approx_words(text: str) -> int:
+        return len((text or "").split())
+
+    def _min_words_for_grade(g: str) -> int:
+        g_norm = (g or "").strip().upper()
+        if "K" in g_norm or "KINDER" in g_norm:
+            return 150
+        if "GRADE 1" in g_norm:
+            return 180
+        if "GRADE 2" in g_norm:
+            return 220
+        if "GRADE 3" in g_norm:
+            return 260
+        return 280
+
+    def _story_uses_characters(payload: Dict) -> bool:
+        body = (payload.get("body") or "")
+        chars = payload.get("characters") or []
+        if not isinstance(chars, list) or not body:
+            return False
+        names = [c.get("name") for c in chars if isinstance(c, dict) and c.get("name")]
+        if not names:
+            return False
+        # Require at least 2 character names to appear in the story body.
+        present = sum(1 for n in names if str(n) in body)
+        return present >= min(2, len(names))
+
+    min_words = _min_words_for_grade(grade)
     prompt = (
-        "Generate one original child-safe story for Liberia eLearn. "
-        f"Target grade: {grade}. Tag/category: {tag}. "
-        "Keep the language simple, practical, and age-appropriate. "
-        "Return strictly valid JSON that matches the required schema."
+        "Generate one original child-safe story for Liberia eLearn (K-12 Liberia). "
+        f"Target grade: {grade}. Theme/tag: {tag}. "
+        "Requirements: "
+        f"(1) Story body must be at least {min_words} words. "
+        "(2) Include dialogue and a clear beginning-middle-end. "
+        "(3) Provide 2-4 named characters, and the story body MUST explicitly mention each character name. "
+        "(4) The characters must actively do things that relate to the theme. "
+        "(5) Use simple vocabulary suitable for the grade. "
+        "Return strictly valid JSON that matches the required schema only."
     )
 
     try:
-        resp = client.responses.create(
-            model=os.getenv('OPENAI_RECOMMENDER_MODEL', 'gpt-4o-mini'),
-            input=[
-                {"role": "system", "content": "You create educational stories for children."},
-                {"role": "user", "content": prompt},
-            ],
-            response_format={"type": "json_schema", "json_schema": schema},
-        )
-        payload = _parse_story_json(resp.output_text)
+        model = os.getenv('OPENAI_STORY_MODEL', os.getenv('OPENAI_RECOMMENDER_MODEL', 'gpt-4o-mini'))
+
+        # Prefer Responses API when available; fall back to Chat Completions for older SDKs.
+        if hasattr(client, 'responses'):
+            resp = client.responses.create(
+                model=model,
+                input=[
+                    {"role": "system", "content": "You create educational stories for children."},
+                    {"role": "user", "content": prompt},
+                ],
+                response_format={"type": "json_schema", "json_schema": schema},
+            )
+            text = resp.output_text
+        else:
+            resp = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": "You create educational stories for children."},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.7,
+            )
+            text = (resp.choices[0].message.content or '')
+
+        payload = _parse_story_json(text)
         if not payload:
             return _fallback_story_payload(tag=tag, grade=grade)
+
+        # Lightweight quality gate: retry once if too short or doesn't use characters.
+        if _approx_words(payload.get("body") or "") < min_words or not _story_uses_characters(payload):
+            retry_prompt = (
+                prompt
+                + "\n\nFix issues: ensure the body meets the minimum length and explicitly mentions each character name from 'characters' within the story body."
+            )
+            if hasattr(client, 'responses'):
+                resp2 = client.responses.create(
+                    model=model,
+                    input=[
+                        {"role": "system", "content": "You create educational stories for children."},
+                        {"role": "user", "content": retry_prompt},
+                    ],
+                    response_format={"type": "json_schema", "json_schema": schema},
+                )
+                text2 = resp2.output_text
+            else:
+                resp2 = client.chat.completions.create(
+                    model=model,
+                    messages=[
+                        {"role": "system", "content": "You create educational stories for children."},
+                        {"role": "user", "content": retry_prompt},
+                    ],
+                    temperature=0.7,
+                )
+                text2 = (resp2.choices[0].message.content or '')
+
+            payload2 = _parse_story_json(text2)
+            if payload2 and _approx_words(payload2.get("body") or "") >= min_words and _story_uses_characters(payload2):
+                return payload2
+
         return payload
     except Exception as e:
         print("Error generating story from OpenAI, using fallback. Error details:")
