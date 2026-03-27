@@ -9,7 +9,7 @@ from unittest.mock import patch
 from rest_framework.test import APIClient
 
 from accounts.models import User, Student, Teacher, Parent, County, District, School
-from content.models import Subject, Period, LessonResource, LessonAssessment, LessonAssessmentGrade, TakeLesson, LessonAssessmentSolution, GeneralAssessment, AssessmentSolution, GameModel, Activity, LessonTemporaryUnlock
+from content.models import Subject, Period, LessonResource, LessonAssessment, LessonAssessmentGrade, TakeLesson, LessonAssessmentSolution, GeneralAssessment, AssessmentSolution, GameModel, Activity, LessonTemporaryUnlock, Story
 from elearncore.sysutils.constants import UserRole, StudentLevel, ContentType, AssessmentType, Status as StatusEnum
 
 
@@ -203,6 +203,119 @@ class KidsSubjectsAndLessonsProgressionTests(TestCase):
 		self.assertFalse(second_lessons[1]['is_locked'])
 		self.assertTrue(second_lessons[1]['is_completed'])
 		self.assertFalse(second_lessons[2]['is_locked'])
+
+
+class KidsStoriesEndpointTests(TestCase):
+	def setUp(self):
+		cache.clear()
+		self.client = APIClient()
+		self.student_user = User.objects.create_user(
+			phone='231770010111',
+			name='Story Student',
+			email='storystudent@example.com',
+			password='pass',
+			role=UserRole.STUDENT.value,
+		)
+		self.student = Student.objects.create(
+			profile=self.student_user,
+			grade=StudentLevel.GRADE2.value,
+			status=StatusEnum.APPROVED.value,
+		)
+
+		self.teacher_user = User.objects.create_user(
+			phone='231770010112',
+			name='Story Teacher',
+			email='storyteacher@example.com',
+			password='pass',
+			role=UserRole.TEACHER.value,
+		)
+
+		self.story_grade2_friendship = Story.objects.create(
+			title='Kona and the Lost Lunch Box',
+			grade=StudentLevel.GRADE2.value,
+			tag='Friendship',
+			estimated_minutes=4,
+			body='Once upon a time...',
+			characters=[{'name': 'Kona', 'description': 'A kind student.'}],
+			vocabulary=[{'word': 'honesty', 'definition': 'telling the truth'}],
+			moral='Tell the truth and help others.',
+			cover_image={'image_url': 'https://example.com/cover1.png', 'alt_text': 'Kids at school'},
+			is_published=True,
+		)
+
+		self.story_grade2_honesty = Story.objects.create(
+			title='The Broken Pencil',
+			grade=StudentLevel.GRADE2.value,
+			tag='Honesty',
+			estimated_minutes=3,
+			body='A short story body.',
+			characters=[{'name': 'Momo', 'description': 'A curious learner.'}],
+			vocabulary=[{'word': 'careful', 'definition': 'doing things slowly and safely'}],
+			moral='Be honest when mistakes happen.',
+			cover_image={'image_url': 'https://example.com/cover2.png', 'alt_text': 'A child with a pencil'},
+			is_published=True,
+		)
+
+		Story.objects.create(
+			title='Not Published Story',
+			grade=StudentLevel.GRADE2.value,
+			tag='Friendship',
+			estimated_minutes=3,
+			body='Hidden story.',
+			characters=[],
+			vocabulary=[],
+			moral='',
+			cover_image={},
+			is_published=False,
+		)
+
+		Story.objects.create(
+			title='Older Grade Story',
+			grade=StudentLevel.GRADE5.value,
+			tag='Friendship',
+			estimated_minutes=6,
+			body='Older grade story.',
+			characters=[],
+			vocabulary=[],
+			moral='',
+			cover_image={},
+			is_published=True,
+		)
+
+	def test_student_can_list_stories_defaulting_to_own_grade(self):
+		self.client.force_authenticate(user=self.student_user)
+		resp = self.client.get('/api-v1/kids/stories/')
+		self.assertEqual(resp.status_code, 200)
+		titles = {item['title'] for item in resp.json()}
+		self.assertIn('Kona and the Lost Lunch Box', titles)
+		self.assertIn('The Broken Pencil', titles)
+		self.assertNotIn('Older Grade Story', titles)
+		self.assertNotIn('Not Published Story', titles)
+
+	def test_student_can_filter_stories_by_grade_and_tag(self):
+		self.client.force_authenticate(user=self.student_user)
+		resp = self.client.get('/api-v1/kids/stories/?grade=GRADE%202&tag=Honesty')
+		self.assertEqual(resp.status_code, 200)
+		self.assertEqual(len(resp.json()), 1)
+		self.assertEqual(resp.json()[0]['title'], 'The Broken Pencil')
+
+	def test_student_can_retrieve_story_detail(self):
+		self.client.force_authenticate(user=self.student_user)
+		resp = self.client.get(f'/api-v1/kids/stories/{self.story_grade2_friendship.id}/')
+		self.assertEqual(resp.status_code, 200)
+		data = resp.json()
+		self.assertEqual(data['title'], 'Kona and the Lost Lunch Box')
+		self.assertIn('characters', data)
+		self.assertIn('vocabulary', data)
+		self.assertIn('moral', data)
+		self.assertIn('cover_image', data)
+
+	def test_non_student_cannot_access_stories_endpoints(self):
+		self.client.force_authenticate(user=self.teacher_user)
+		list_resp = self.client.get('/api-v1/kids/stories/')
+		detail_resp = self.client.get(f'/api-v1/kids/stories/{self.story_grade2_friendship.id}/')
+		self.assertEqual(list_resp.status_code, 403)
+		self.assertEqual(detail_resp.status_code, 403)
 
 
 class KidsProgressGardenRankingTests(TestCase):

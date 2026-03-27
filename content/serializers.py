@@ -8,7 +8,49 @@ from .models import (
 	LessonAssessment, LessonAssessmentGrade,
 	Question, Option, GameModel, AssessmentSolution,
 	LessonAssessmentSolution,
+	Story,
 )
+
+
+class StoryCharacterSerializer(serializers.Serializer):
+	name = serializers.CharField()
+	description = serializers.CharField()
+	role = serializers.CharField(required=False, allow_blank=True)
+
+
+class StoryVocabularySerializer(serializers.Serializer):
+	word = serializers.CharField()
+	definition = serializers.CharField()
+
+
+class StoryCoverImageSerializer(serializers.Serializer):
+	prompt = serializers.CharField(required=False, allow_blank=True)
+	image_url = serializers.CharField(required=False, allow_blank=True)
+	alt_text = serializers.CharField(required=False, allow_blank=True)
+
+
+class StoryListSerializer(serializers.ModelSerializer):
+	cover_image = StoryCoverImageSerializer(required=False)
+
+	class Meta:
+		model = Story
+		fields = ['id', 'title', 'grade', 'tag', 'estimated_minutes', 'moral', 'cover_image', 'created_at']
+		read_only_fields = fields
+
+
+class StoryDetailSerializer(serializers.ModelSerializer):
+	characters = StoryCharacterSerializer(many=True, required=False)
+	vocabulary = StoryVocabularySerializer(many=True, required=False)
+	cover_image = StoryCoverImageSerializer(required=False)
+
+	class Meta:
+		model = Story
+		fields = [
+			'id', 'title', 'grade', 'tag', 'estimated_minutes',
+			'cover_image', 'characters', 'vocabulary', 'moral', 'body',
+			'created_at', 'updated_at',
+		]
+		read_only_fields = fields
 
 
 class SubjectSerializer(serializers.ModelSerializer):

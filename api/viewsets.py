@@ -34,7 +34,7 @@ from content.models import (
 	GeneralAssessment, GeneralAssessmentGrade, LessonAssessmentGrade,
 	Question,
 	GameModel, Activity, AssessmentSolution, GamePlay,
-	LessonAssessmentSolution, LessonTemporaryUnlock,
+	LessonAssessmentSolution, LessonTemporaryUnlock, Story,
 )
 from forum.models import Chat
 from django.core.cache import cache
@@ -53,6 +53,8 @@ from content.serializers import (
 	OptionSerializer,
 	QuestionCreateSerializer,
 	GameSerializer,
+	StoryListSerializer,
+	StoryDetailSerializer,
 )
 from agentic.models import AIRecommendation, AIAbuseReport
 from agentic.serializers import AIRecommendationSerializer, AIAbuseReportSerializer
@@ -4412,6 +4414,57 @@ class KidsAssessmentQuestionsResponseSerializer(serializers.Serializer):
 class KidsViewSet(viewsets.ViewSet):
 	"""Endpoints tailored for younger students (grades 1–3)."""
 	permission_classes = [permissions.IsAuthenticated]
+
+	@extend_schema(
+		description="Read-only list of published stories for kids. Supports filtering by grade and tag.",
+		parameters=[
+			OpenApiParameter(name='grade', required=False, location=OpenApiParameter.QUERY, type=str),
+			OpenApiParameter(name='tag', required=False, location=OpenApiParameter.QUERY, type=str),
+		],
+		responses={200: StoryListSerializer(many=True)},
+	)
+	@action(detail=False, methods=['get'], url_path='stories')
+	def stories(self, request):
+		user: User = request.user
+		student = getattr(user, 'student', None)
+		if not student:
+			return Response({"detail": "Student profile required."}, status=403)
+
+		qs = Story.objects.filter(is_published=True).order_by('-created_at')
+
+		grade = request.query_params.get('grade')
+		if grade:
+			qs = qs.filter(grade=grade)
+		else:
+			# By default, return stories for the student's grade.
+			qs = qs.filter(grade=student.grade)
+
+		tag = request.query_params.get('tag')
+		if tag:
+			qs = qs.filter(tag__iexact=tag.strip())
+
+		return Response(StoryListSerializer(qs, many=True).data)
+
+	@extend_schema(
+		description="Read-only detail for a single published story.",
+		parameters=[
+			OpenApiParameter(name='pk', required=True, location=OpenApiParameter.PATH, type=int),
+		],
+		responses={200: StoryDetailSerializer},
+	)
+	@action(detail=False, methods=['get'], url_path='stories/(?P<pk>[^/.]+)')
+	def story_detail(self, request, pk=None):
+		user: User = request.user
+		student = getattr(user, 'student', None)
+		if not student:
+			return Response({"detail": "Student profile required."}, status=403)
+
+		try:
+			story = Story.objects.get(pk=pk, is_published=True)
+		except Story.DoesNotExist:
+			return Response({"detail": "Story not found."}, status=404)
+
+		return Response(StoryDetailSerializer(story).data)
 
 	@extend_schema(
 		description="Endpoints tailored for younger students (grades 1–3).",
