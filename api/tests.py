@@ -704,6 +704,147 @@ class KidsAssessmentListingEndpointsTests(TestCase):
 		self.assertEqual(payload['stats']['submitted'], 1)
 
 
+class KidsPeerSolutionsEndpointTests(TestCase):
+	def setUp(self):
+		cache.clear()
+		self.client = APIClient()
+
+		self.user = User.objects.create_user(
+			phone='231770004311',
+			name='Peer View Student',
+			email='peer.view.student@example.com',
+			password='pass',
+			role=UserRole.STUDENT.value,
+		)
+		self.student = Student.objects.create(
+			profile=self.user,
+			grade=StudentLevel.GRADE3.value,
+			status=StatusEnum.APPROVED.value,
+		)
+		self.client.force_authenticate(user=self.user)
+
+		subject = Subject.objects.create(
+			name='Science Peer Visibility',
+			grade=StudentLevel.GRADE3.value,
+			status=StatusEnum.APPROVED.value,
+		)
+		period = Period.objects.create(name='July', start_month=7, end_month=7)
+		lesson = LessonResource.objects.create(
+			subject=subject,
+			period=period,
+			title='Peer Lesson',
+			type=ContentType.VIDEO.value,
+			status=StatusEnum.APPROVED.value,
+			resource=SimpleUploadedFile('peer-lesson.mp4', b'video', content_type='video/mp4'),
+		)
+
+		self.general_assessment = GeneralAssessment.objects.create(
+			title='Peer General Assessment',
+			type=AssessmentType.QUIZ.value,
+			status=StatusEnum.APPROVED.value,
+			grade=StudentLevel.GRADE3.value,
+		)
+		self.lesson_assessment = LessonAssessment.objects.create(
+			lesson=lesson,
+			title='Peer Lesson Assessment',
+			type=AssessmentType.QUIZ.value,
+			status=StatusEnum.APPROVED.value,
+		)
+
+	def _create_peer_general_solutions(self, count=12):
+		for i in range(count):
+			peer_user = User.objects.create_user(
+				phone=f'23188000{i:04d}',
+				name=f'Peer User {i}',
+				email=f'peer.general.{i}@example.com',
+				password='pass',
+				role=UserRole.STUDENT.value,
+			)
+			peer_student = Student.objects.create(
+				profile=peer_user,
+				grade=StudentLevel.GRADE3.value,
+				status=StatusEnum.APPROVED.value,
+			)
+			AssessmentSolution.objects.create(
+				assessment=self.general_assessment,
+				student=peer_student,
+				solution=f'Peer general solution {i}',
+				attachment=SimpleUploadedFile(f'peer-general-{i}.txt', b'peer', content_type='text/plain'),
+			)
+
+	def test_requires_own_solution_before_viewing_general_peer_solutions(self):
+		resp = self.client.get(f'/api-v1/kids/peer-solutions/?general_id={self.general_assessment.id}')
+		self.assertEqual(resp.status_code, 403)
+		self.assertIn('Submit your own solution first', resp.json()['detail'])
+
+	def test_returns_random_max_10_anonymized_general_peer_solutions(self):
+		AssessmentSolution.objects.create(
+			assessment=self.general_assessment,
+			student=self.student,
+			solution='My own general solution',
+			attachment=SimpleUploadedFile('my-general-solution.txt', b'mine', content_type='text/plain'),
+		)
+		self._create_peer_general_solutions(count=12)
+
+		resp = self.client.get(f'/api-v1/kids/peer-solutions/?general_id={self.general_assessment.id}')
+		self.assertEqual(resp.status_code, 200)
+		payload = resp.json()
+		solutions = payload['solutions']
+		self.assertLessEqual(len(solutions), 10)
+		self.assertGreater(len(solutions), 0)
+		for item in solutions:
+			self.assertIn('peer_label', item)
+			self.assertRegex(item['peer_label'], r'^Peer Student [A-F0-9]{8}$')
+			self.assertNotIn('Peer User', item['peer_label'])
+
+	def test_rejects_when_student_not_qualified_for_general_assessment(self):
+		other_grade_assessment = GeneralAssessment.objects.create(
+			title='Grade 5 Assessment',
+			type=AssessmentType.QUIZ.value,
+			status=StatusEnum.APPROVED.value,
+			grade=StudentLevel.GRADE5.value,
+		)
+		resp = self.client.get(f'/api-v1/kids/peer-solutions/?general_id={other_grade_assessment.id}')
+		self.assertEqual(resp.status_code, 403)
+
+	def test_works_for_lesson_assessment_with_own_submission_gate(self):
+		resp_no_own = self.client.get(f'/api-v1/kids/peer-solutions/?lesson_id={self.lesson_assessment.id}')
+		self.assertEqual(resp_no_own.status_code, 403)
+
+		LessonAssessmentSolution.objects.create(
+			lesson_assessment=self.lesson_assessment,
+			student=self.student,
+			solution='My lesson solution',
+			attachment=SimpleUploadedFile('my-lesson-solution.txt', b'mine', content_type='text/plain'),
+		)
+
+		for i in range(3):
+			peer_user = User.objects.create_user(
+				phone=f'23199000{i:04d}',
+				name=f'Lesson Peer {i}',
+				email=f'peer.lesson.{i}@example.com',
+				password='pass',
+				role=UserRole.STUDENT.value,
+			)
+			peer_student = Student.objects.create(
+				profile=peer_user,
+				grade=StudentLevel.GRADE3.value,
+				status=StatusEnum.APPROVED.value,
+			)
+			LessonAssessmentSolution.objects.create(
+				lesson_assessment=self.lesson_assessment,
+				student=peer_student,
+				solution=f'Lesson peer solution {i}',
+				attachment=SimpleUploadedFile(f'peer-lesson-{i}.txt', b'peer', content_type='text/plain'),
+			)
+
+		resp = self.client.get(f'/api-v1/kids/peer-solutions/?lesson_id={self.lesson_assessment.id}')
+		self.assertEqual(resp.status_code, 200)
+		self.assertEqual(resp.json()['assessment']['type'], 'lesson')
+		for item in resp.json()['solutions']:
+			self.assertRegex(item['peer_label'], r'^Peer Student [A-F0-9]{8}$')
+
+
 class TeacherTemporaryLessonUnlockTests(TestCase):
 	def setUp(self):
 		cache.clear()

@@ -1,5 +1,6 @@
 import csv
 import io
+import hashlib
 from urllib.parse import quote
 from typing import Iterable, Dict, List, Set
 
@@ -4547,6 +4548,18 @@ class KidsAssessmentQuestionsResponseSerializer(serializers.Serializer):
 	questions = KidsAssessmentQuestionSerializer(many=True)
 
 
+class KidsPeerSolutionItemSerializer(serializers.Serializer):
+	peer_label = serializers.CharField()
+	solution = serializers.CharField(allow_blank=True)
+	attachment = serializers.CharField(allow_null=True)
+	submitted_at = serializers.DateTimeField(allow_null=True)
+
+
+class KidsPeerSolutionsResponseSerializer(serializers.Serializer):
+	assessment = KidsAssessmentInfoSerializer()
+	solutions = KidsPeerSolutionItemSerializer(many=True)
+
+
 class KidsViewSet(viewsets.ViewSet):
 	"""Endpoints tailored for younger students (grades 1–3)."""
 	permission_classes = [permissions.IsAuthenticated]
@@ -5688,6 +5701,130 @@ class KidsViewSet(viewsets.ViewSet):
 		return Response({
 			"assessment": assessment_info,
 			"questions": questions_payload,
+		})
+
+	@extend_schema(
+		description=(
+			"Return up to 10 random peer solutions for an assessment. "
+			"Student must be qualified for the assessment and must have submitted their own solution first. "
+			"Peer identities are anonymized."
+		),
+		parameters=[
+			OpenApiParameter(
+				name="general_id",
+				location=OpenApiParameter.QUERY,
+				type=int,
+				required=False,
+				description="GeneralAssessment ID. Provide exactly one of general_id or lesson_id.",
+			),
+			OpenApiParameter(
+				name="lesson_id",
+				location=OpenApiParameter.QUERY,
+				type=int,
+				required=False,
+				description="LessonAssessment ID. Provide exactly one of general_id or lesson_id.",
+			),
+		],
+		responses={200: KidsPeerSolutionsResponseSerializer},
+	)
+	@action(detail=False, methods=['get'], url_path='peer-solutions')
+	def peer_solutions(self, request):
+		user: User = request.user
+		student = getattr(user, 'student', None)
+		if not student:
+			return Response({"detail": "Student profile required."}, status=403)
+
+		def _anon_peer_label(*, scope: str, assessment_id: int, peer_student_id: int) -> str:
+			raw = f"{scope}:{assessment_id}:{peer_student_id}"
+			token = hashlib.sha256(raw.encode('utf-8')).hexdigest()[:8].upper()
+			return f"Peer Student {token}"
+
+		general_id = request.query_params.get('general_id')
+		lesson_id = request.query_params.get('lesson_id')
+		if bool(general_id) == bool(lesson_id):
+			return Response({"detail": "Provide exactly one of general_id or lesson_id."}, status=400)
+
+		assessment_info = None
+		solutions_payload = []
+
+		if general_id:
+			assessment = (
+				GeneralAssessment.objects
+				.filter(id=general_id)
+				.filter(
+					(models.Q(grade__isnull=True) | models.Q(grade=student.grade))
+					& (models.Q(is_targeted=False) | models.Q(target_student=student))
+				)
+				.first()
+			)
+			if not assessment:
+				return Response({"detail": "Assessment not found or not available for you."}, status=403)
+
+			has_own_solution = AssessmentSolution.objects.filter(assessment=assessment, student=student).exists()
+			if not has_own_solution:
+				return Response({"detail": "Submit your own solution first to view peer solutions."}, status=403)
+
+			peer_qs = (
+				AssessmentSolution.objects
+				.filter(assessment=assessment)
+				.exclude(student=student)
+				.order_by('?')[:10]
+			)
+
+			assessment_info = {"id": assessment.id, "title": assessment.title, "type": "general"}
+			for peer_sol in peer_qs:
+				attachment_url = None
+				if getattr(peer_sol, 'attachment', None):
+					try:
+						attachment_url = request.build_absolute_uri(peer_sol.attachment.url)
+					except Exception:
+						attachment_url = None
+				solutions_payload.append({
+					"peer_label": _anon_peer_label(scope='general', assessment_id=assessment.id, peer_student_id=peer_sol.student_id),
+					"solution": peer_sol.solution or "",
+					"attachment": attachment_url,
+					"submitted_at": getattr(peer_sol, 'submitted_at', None),
+				})
+		else:
+			assessment = (
+				LessonAssessment.objects
+				.filter(id=lesson_id)
+				.filter(lesson__subject__grade=student.grade)
+				.filter(models.Q(is_targeted=False) | models.Q(target_student=student))
+				.first()
+			)
+			if not assessment:
+				return Response({"detail": "Assessment not found or not available for you."}, status=403)
+
+			has_own_solution = LessonAssessmentSolution.objects.filter(lesson_assessment=assessment, student=student).exists()
+			if not has_own_solution:
+				return Response({"detail": "Submit your own solution first to view peer solutions."}, status=403)
+
+			peer_qs = (
+				LessonAssessmentSolution.objects
+				.filter(lesson_assessment=assessment)
+				.exclude(student=student)
+				.order_by('?')[:10]
+			)
+
+			assessment_info = {"id": assessment.id, "title": assessment.title, "type": "lesson"}
+			for peer_sol in peer_qs:
+				attachment_url = None
+				if getattr(peer_sol, 'attachment', None):
+					try:
+						attachment_url = request.build_absolute_uri(peer_sol.attachment.url)
+					except Exception:
+						attachment_url = None
+				solutions_payload.append({
+					"peer_label": _anon_peer_label(scope='lesson', assessment_id=assessment.id, peer_student_id=peer_sol.student_id),
+					"solution": peer_sol.solution or "",
+					"attachment": attachment_url,
+					"submitted_at": getattr(peer_sol, 'submitted_at', None),
+				})
+
+		return Response({
+			"assessment": assessment_info,
+			"solutions": solutions_payload,
 		})
 
 	@extend_schema(

@@ -7,6 +7,9 @@ class Command(BaseCommand):
     def handle(self, *args, **options):
         self.stdout.write(self.style.NOTICE("[DEPLOY] Pulling latest code from origin..."))
         subprocess.run(["git", "pull", "origin", "main"], check=True)
+        
+        self.stdout.write(self.style.NOTICE("[INSTALL] Installing dependencies..."))
+        subprocess.run(["pip", "install", "-r", "requirements.txt"], check=True)
 
         self.stdout.write(self.style.NOTICE("[DEPLOY] Making migrations..."))
         subprocess.run(["python", "manage.py", "makemigrations"], check=True)
