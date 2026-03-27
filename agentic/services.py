@@ -84,6 +84,7 @@ def ai_runtime_diagnostics() -> Dict:
             "import_error": celery_error,
             "broker_url": os.getenv("CELERY_BROKER_URL") or os.getenv("REDIS_URL") or "redis://localhost:6379/0",
             "result_backend": os.getenv("CELERY_RESULT_BACKEND") or os.getenv("CELERY_BROKER_URL") or os.getenv("REDIS_URL") or "redis://localhost:6379/0",
+            "using_implicit_localhost": not bool(os.getenv("CELERY_BROKER_URL") or os.getenv("REDIS_URL")),
         },
     }
 
