@@ -867,6 +867,20 @@ class TeacherTemporaryLessonUnlockTests(TestCase):
 			status=StatusEnum.APPROVED.value,
 		)
 
+		self.student_user_2 = User.objects.create_user(
+			phone='231770006113',
+			name='Unlocked Student Two',
+			email='unlock.student2@example.com',
+			password='pass',
+			role=UserRole.STUDENT.value,
+		)
+		self.student_2 = Student.objects.create(
+			profile=self.student_user_2,
+			school=school,
+			grade=StudentLevel.GRADE3.value,
+			status=StatusEnum.APPROVED.value,
+		)
+
 		self.teacher_user = User.objects.create_user(
 			phone='231770006112',
 			name='Class Teacher',
@@ -930,6 +944,8 @@ class TeacherTemporaryLessonUnlockTests(TestCase):
 
 		self.student_client = APIClient()
 		self.student_client.force_authenticate(user=self.student_user)
+		self.student_2_client = APIClient()
+		self.student_2_client.force_authenticate(user=self.student_user_2)
 		self.teacher_client = APIClient()
 		self.teacher_client.force_authenticate(user=self.teacher_user)
 
@@ -980,6 +996,122 @@ class TeacherTemporaryLessonUnlockTests(TestCase):
 		self.assertEqual(resp.status_code, 400)
 		self.assertIn('duration_hours', resp.json())
 
+	def test_teacher_can_unlock_whole_class(self):
+		before_1 = self.student_client.get(f'/api-v1/lessons/{self.lesson_2.id}/')
+		before_2 = self.student_2_client.get(f'/api-v1/lessons/{self.lesson_2.id}/')
+		self.assertEqual(before_1.status_code, 403)
+		self.assertEqual(before_2.status_code, 403)
+
+		unlock_resp = self.teacher_client.post(
+			'/api-v1/teacher/unlock-lesson/',
+			{
+				'unlock_whole_class': True,
+				'lesson_id': self.lesson_2.id,
+				'duration_hours': 2,
+				'reason': 'Whole class intervention',
+			},
+			format='json',
+		)
+		self.assertEqual(unlock_resp.status_code, 200)
+		self.assertEqual(
+			LessonTemporaryUnlock.objects.filter(
+				lesson=self.lesson_2,
+				revoked_at__isnull=True,
+			).count(),
+			2,
+		)
+
+		after_1 = self.student_client.get(f'/api-v1/lessons/{self.lesson_2.id}/')
+		after_2 = self.student_2_client.get(f'/api-v1/lessons/{self.lesson_2.id}/')
+		self.assertEqual(after_1.status_code, 200)
+		self.assertEqual(after_2.status_code, 200)
+
+	def test_teacher_can_revoke_whole_class_unlock(self):
+		unlock_resp = self.teacher_client.post(
+			'/api-v1/teacher/unlock-lesson/',
+			{
+				'unlock_whole_class': True,
+				'lesson_id': self.lesson_2.id,
+				'duration_hours': 2,
+			},
+			format='json',
+		)
+		self.assertEqual(unlock_resp.status_code, 200)
+		self.assertEqual(
+			LessonTemporaryUnlock.objects.filter(
+				lesson=self.lesson_2,
+				revoked_at__isnull=True,
+			).count(),
+			2,
+		)
+
+		after_unlock_1 = self.student_client.get(f'/api-v1/lessons/{self.lesson_2.id}/')
+		after_unlock_2 = self.student_2_client.get(f'/api-v1/lessons/{self.lesson_2.id}/')
+		self.assertEqual(after_unlock_1.status_code, 200)
+		self.assertEqual(after_unlock_2.status_code, 200)
+
+		revoke_resp = self.teacher_client.post(
+			'/api-v1/teacher/revoke-lesson-unlock/',
+			{
+				'unlock_whole_class': True,
+				'lesson_id': self.lesson_2.id,
+			},
+			format='json',
+		)
+		self.assertEqual(revoke_resp.status_code, 200)
+		self.assertEqual(revoke_resp.json()['revoked_count'], 2)
+		self.assertEqual(
+			LessonTemporaryUnlock.objects.filter(
+				lesson=self.lesson_2,
+				revoked_at__isnull=True,
+			).count(),
+			0,
+		)
+
+		after_revoke_1 = self.student_client.get(f'/api-v1/lessons/{self.lesson_2.id}/')
+		after_revoke_2 = self.student_2_client.get(f'/api-v1/lessons/{self.lesson_2.id}/')
+		self.assertEqual(after_revoke_1.status_code, 403)
+		self.assertEqual(after_revoke_2.status_code, 403)
+
+	def test_teacher_unlock_whole_class_enforces_xor_student_id(self):
+		missing_both = self.teacher_client.post(
+			'/api-v1/teacher/unlock-lesson/',
+			{'lesson_id': self.lesson_2.id, 'duration_hours': 2},
+			format='json',
+		)
+		self.assertEqual(missing_both.status_code, 400)
+
+		both_set = self.teacher_client.post(
+			'/api-v1/teacher/unlock-lesson/',
+			{
+				'student_id': self.student.id,
+				'unlock_whole_class': True,
+				'lesson_id': self.lesson_2.id,
+				'duration_hours': 2,
+			},
+			format='json',
+		)
+		self.assertEqual(both_set.status_code, 400)
+
+	def test_teacher_revoke_whole_class_enforces_xor_student_id(self):
+		missing_both = self.teacher_client.post(
+			'/api-v1/teacher/revoke-lesson-unlock/',
+			{'lesson_id': self.lesson_2.id},
+			format='json',
+		)
+		self.assertEqual(missing_both.status_code, 400)
+
+		both_set = self.teacher_client.post(
+			'/api-v1/teacher/revoke-lesson-unlock/',
+			{
+				'student_id': self.student.id,
+				'unlock_whole_class': True,
+				'lesson_id': self.lesson_2.id,
+			},
+			format='json',
+		)
+		self.assertEqual(both_set.status_code, 400)
+
 	def test_teacher_can_only_unlock_subjects_they_teach(self):
 		resp = self.teacher_client.post(
 			'/api-v1/teacher/unlock-lesson/',
@@ -988,6 +1120,14 @@ class TeacherTemporaryLessonUnlockTests(TestCase):
 		)
 		self.assertEqual(resp.status_code, 403)
 		self.assertIn('subjects you teach', resp.json()['detail'])
+
+		resp_class = self.teacher_client.post(
+			'/api-v1/teacher/unlock-lesson/',
+			{'unlock_whole_class': True, 'lesson_id': self.lesson_other.id, 'duration_hours': 2},
+			format='json',
+		)
+		self.assertEqual(resp_class.status_code, 403)
+		self.assertIn('subjects you teach', resp_class.json()['detail'])
 
 	def test_teacher_can_list_only_active_unlocks(self):
 		self.teacher_client.post(

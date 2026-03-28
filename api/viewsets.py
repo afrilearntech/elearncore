@@ -16,7 +16,7 @@ from django.utils.decorators import method_decorator
 from django.utils.dateparse import parse_date
 from django.utils import timezone
 from datetime import timedelta, datetime
-from django.db import models
+from django.db import models, transaction
 from django.db.models import Q, Count, Window, F
 from django.db.models.functions import TruncDate, DenseRank
 
@@ -1105,15 +1105,37 @@ class TeacherDashboardUpcomingDeadlineSerializer(serializers.Serializer):
 
 
 class TeacherLessonUnlockRequestSerializer(serializers.Serializer):
-	student_id = serializers.IntegerField()
+	student_id = serializers.IntegerField(required=False, allow_null=True)
+	unlock_whole_class = serializers.BooleanField(required=False, default=False)
 	lesson_id = serializers.IntegerField()
 	duration_hours = serializers.IntegerField(min_value=1, max_value=TEACHER_UNLOCK_MAX_HOURS)
 	reason = serializers.CharField(required=False, allow_blank=True, max_length=255)
 
+	def validate(self, attrs):
+		unlock_whole_class = bool(attrs.get('unlock_whole_class'))
+		has_student_id = attrs.get('student_id') is not None
+		# XOR: exactly one of (student_id) or (unlock_whole_class=True) must be provided.
+		if unlock_whole_class == has_student_id:
+			raise serializers.ValidationError(
+				"Provide exactly one of student_id or unlock_whole_class=true."
+			)
+		return attrs
+
 
 class TeacherLessonUnlockRevokeSerializer(serializers.Serializer):
-	student_id = serializers.IntegerField()
+	student_id = serializers.IntegerField(required=False, allow_null=True)
+	unlock_whole_class = serializers.BooleanField(required=False, default=False)
 	lesson_id = serializers.IntegerField()
+
+	def validate(self, attrs):
+		unlock_whole_class = bool(attrs.get('unlock_whole_class'))
+		has_student_id = attrs.get('student_id') is not None
+		# XOR: exactly one of (student_id) or (unlock_whole_class=True) must be provided.
+		if unlock_whole_class == has_student_id:
+			raise serializers.ValidationError(
+				"Provide exactly one of student_id or unlock_whole_class=true."
+			)
+		return attrs
 
 
 class TeacherLessonUnlockResponseSerializer(serializers.Serializer):
@@ -6395,8 +6417,9 @@ class TeacherViewSet(viewsets.ViewSet):
 
 	@extend_schema(
 		description=(
-			"Temporarily unlock a lesson for a student in your school. "
-			"Unlock duration must be between 1 and 72 hours and only applies to subjects you teach."
+			"Temporarily unlock a lesson for either a single student or a whole class (school + grade + subject). "
+			"Unlock duration must be between 1 and 72 hours and only applies to subjects you teach. "
+			"Provide exactly one of student_id or unlock_whole_class=true."
 		),
 		request=TeacherLessonUnlockRequestSerializer,
 		responses={200: TeacherLessonUnlockResponseSerializer},
@@ -6410,22 +6433,149 @@ class TeacherViewSet(viewsets.ViewSet):
 		ser = TeacherLessonUnlockRequestSerializer(data=request.data)
 		ser.is_valid(raise_exception=True)
 		data = ser.validated_data
+		lesson = LessonResource.objects.filter(id=data['lesson_id']).select_related('subject').first()
+		if not lesson:
+			return Response({"detail": "Lesson not found."}, status=404)
+
+		now = timezone.now()
+		duration_hours = int(data['duration_hours'])
+		expires_at = now + timedelta(hours=duration_hours)
+		reason = data.get('reason') or TEACHER_UNLOCK_REASON
+		unlock_whole_class = bool(data.get('unlock_whole_class'))
+
+		if unlock_whole_class:
+			if not getattr(teacher, 'school_id', None):
+				return Response({"detail": "Teacher must be assigned to a school."}, status=403)
+
+			teaches_subject = Subject.objects.filter(id=lesson.subject_id, teachers=teacher).exists()
+			if not teaches_subject:
+				return Response({"detail": "You can only unlock lessons for subjects you teach."}, status=403)
+
+			lesson_grade = getattr(getattr(lesson, 'subject', None), 'grade', None)
+			student_ids = list(
+				Student.objects
+				.filter(
+					school_id=teacher.school_id,
+					grade=lesson_grade,
+					status=StatusEnum.APPROVED.value,
+				)
+				.order_by()
+				.values_list('id', flat=True)
+			)
+
+			target_count = len(student_ids)
+			if target_count == 0:
+				Activity.objects.create(
+					user=request.user,
+					type="teacher_unlock_lesson_whole_class",
+					description=f"Attempted class unlock for lesson '{lesson.title}' but no students matched.",
+					metadata={
+						"lesson_id": lesson.id,
+						"subject_id": lesson.subject_id,
+						"grade": lesson_grade,
+						"duration_hours": duration_hours,
+						"unlock_whole_class": True,
+						"unlocked_count": 0,
+					},
+				)
+				return Response(
+					{
+						"detail": "No students found for this class.",
+						"lesson_id": lesson.id,
+						"subject_id": lesson.subject_id,
+						"grade": lesson_grade,
+						"expires_at": expires_at,
+						"unlocked_count": 0,
+					},
+				)
+
+			existing_active_student_ids = set(
+				LessonTemporaryUnlock.objects
+				.filter(
+					lesson=lesson,
+					student_id__in=student_ids,
+					revoked_at__isnull=True,
+					expires_at__gt=now,
+				)
+				.order_by()
+				.values_list('student_id', flat=True)
+				.distinct()
+			)
+			missing_student_ids = [sid for sid in student_ids if sid not in existing_active_student_ids]
+
+			with transaction.atomic():
+				# Extend/update any existing active unlocks for this lesson + class.
+				if existing_active_student_ids:
+					(
+						LessonTemporaryUnlock.objects
+						.filter(
+							lesson=lesson,
+							student_id__in=existing_active_student_ids,
+							revoked_at__isnull=True,
+							expires_at__gt=now,
+						)
+						.update(
+							unlocked_by=request.user,
+							reason=reason,
+							expires_at=expires_at,
+							revoked_at=None,
+						)
+					)
+
+				# Create missing unlocks.
+				if missing_student_ids:
+					LessonTemporaryUnlock.objects.bulk_create(
+						[
+							LessonTemporaryUnlock(
+								student_id=sid,
+								lesson=lesson,
+								unlocked_by=request.user,
+								reason=reason,
+								expires_at=expires_at,
+							)
+							for sid in missing_student_ids
+						],
+						batch_size=500,
+					)
+
+				Activity.objects.create(
+					user=request.user,
+					type="teacher_unlock_lesson_whole_class",
+					description=f"Temporarily unlocked lesson '{lesson.title}' for class.",
+					metadata={
+						"lesson_id": lesson.id,
+						"subject_id": lesson.subject_id,
+						"grade": lesson_grade,
+						"duration_hours": duration_hours,
+						"unlock_whole_class": True,
+						"unlocked_count": target_count,
+						"created_count": len(missing_student_ids),
+						"updated_count": len(existing_active_student_ids),
+					},
+				)
+
+			# Invalidate per-student progression caches.
+			for student_id in student_ids:
+				_bump_cache_version(_student_lesson_progress_version_key(student_id))
+
+			return Response(
+				{
+					"detail": "Lesson unlocked for class.",
+					"lesson_id": lesson.id,
+					"subject_id": lesson.subject_id,
+					"grade": lesson_grade,
+					"expires_at": expires_at,
+					"unlocked_count": target_count,
+				},
+			)
 
 		student = Student.objects.filter(id=data['student_id']).select_related('school').first()
 		if not student:
 			return Response({"detail": "Student not found."}, status=404)
 
-		lesson = LessonResource.objects.filter(id=data['lesson_id']).select_related('subject').first()
-		if not lesson:
-			return Response({"detail": "Lesson not found."}, status=404)
-
 		scope_error = self._validate_unlock_scope(teacher, student, lesson)
 		if scope_error:
 			return Response({"detail": scope_error}, status=403)
-
-		now = timezone.now()
-		duration_hours = int(data['duration_hours'])
-		expires_at = now + timedelta(hours=duration_hours)
 
 		unlock = (
 			LessonTemporaryUnlock.objects
@@ -6438,7 +6588,6 @@ class TeacherViewSet(viewsets.ViewSet):
 			.order_by('-expires_at')
 			.first()
 		)
-		reason = data.get('reason') or TEACHER_UNLOCK_REASON
 		if unlock is None:
 			unlock = LessonTemporaryUnlock.objects.create(
 				student=student,
@@ -6469,7 +6618,10 @@ class TeacherViewSet(viewsets.ViewSet):
 		return Response(self._serialize_unlock(unlock))
 
 	@extend_schema(
-		description="Revoke an active temporary lesson unlock for a student.",
+		description=(
+			"Revoke an active temporary lesson unlock for either a single student or a whole class (school + grade + subject). "
+			"Provide exactly one of student_id or unlock_whole_class=true."
+		),
 		request=TeacherLessonUnlockRevokeSerializer,
 		responses={200: TeacherLessonUnlockResponseSerializer},
 	)
@@ -6482,20 +6634,122 @@ class TeacherViewSet(viewsets.ViewSet):
 		ser = TeacherLessonUnlockRevokeSerializer(data=request.data)
 		ser.is_valid(raise_exception=True)
 		data = ser.validated_data
+		lesson = LessonResource.objects.filter(id=data['lesson_id']).select_related('subject').first()
+		if not lesson:
+			return Response({"detail": "Lesson not found."}, status=404)
+
+		now = timezone.now()
+		unlock_whole_class = bool(data.get('unlock_whole_class'))
+		if unlock_whole_class:
+			if not getattr(teacher, 'school_id', None):
+				return Response({"detail": "Teacher must be assigned to a school."}, status=403)
+
+			teaches_subject = Subject.objects.filter(id=lesson.subject_id, teachers=teacher).exists()
+			if not teaches_subject:
+				return Response({"detail": "You can only revoke unlocks for subjects you teach."}, status=403)
+
+			lesson_grade = getattr(getattr(lesson, 'subject', None), 'grade', None)
+			student_ids = list(
+				Student.objects
+				.filter(
+					school_id=teacher.school_id,
+					grade=lesson_grade,
+					status=StatusEnum.APPROVED.value,
+				)
+				.order_by()
+				.values_list('id', flat=True)
+			)
+
+			target_count = len(student_ids)
+			if target_count == 0:
+				Activity.objects.create(
+					user=request.user,
+					type="teacher_revoke_lesson_unlock_whole_class",
+					description=f"Attempted class revoke for lesson '{lesson.title}' but no students matched.",
+					metadata={
+						"lesson_id": lesson.id,
+						"subject_id": lesson.subject_id,
+						"grade": lesson_grade,
+						"unlock_whole_class": True,
+						"revoked_count": 0,
+					},
+				)
+				return Response(
+					{
+						"detail": "No students found for this class.",
+						"lesson_id": lesson.id,
+						"subject_id": lesson.subject_id,
+						"grade": lesson_grade,
+						"revoked_at": now,
+						"revoked_count": 0,
+					},
+				)
+
+			active_unlock_student_ids = list(
+				LessonTemporaryUnlock.objects
+				.filter(
+					lesson=lesson,
+					student_id__in=student_ids,
+					revoked_at__isnull=True,
+					expires_at__gt=now,
+				)
+				.order_by()
+				.values_list('student_id', flat=True)
+				.distinct()
+			)
+			if not active_unlock_student_ids:
+				return Response(
+					{"detail": "No active unlocks found for this class and lesson."},
+					status=404,
+				)
+
+			with transaction.atomic():
+				(
+					LessonTemporaryUnlock.objects
+					.filter(
+						lesson=lesson,
+						student_id__in=active_unlock_student_ids,
+						revoked_at__isnull=True,
+						expires_at__gt=now,
+					)
+					.update(revoked_at=now)
+				)
+
+				Activity.objects.create(
+					user=request.user,
+					type="teacher_revoke_lesson_unlock_whole_class",
+					description=f"Revoked temporary unlock for lesson '{lesson.title}' for class.",
+					metadata={
+						"lesson_id": lesson.id,
+						"subject_id": lesson.subject_id,
+						"grade": lesson_grade,
+						"unlock_whole_class": True,
+						"revoked_count": len(active_unlock_student_ids),
+					},
+				)
+
+			# Invalidate per-student progression caches.
+			for student_id in active_unlock_student_ids:
+				_bump_cache_version(_student_lesson_progress_version_key(student_id))
+
+			return Response(
+				{
+					"detail": "Lesson unlock revoked for class.",
+					"lesson_id": lesson.id,
+					"subject_id": lesson.subject_id,
+					"grade": lesson_grade,
+					"revoked_at": now,
+					"revoked_count": len(active_unlock_student_ids),
+				},
+			)
 
 		student = Student.objects.filter(id=data['student_id']).select_related('school').first()
 		if not student:
 			return Response({"detail": "Student not found."}, status=404)
 
-		lesson = LessonResource.objects.filter(id=data['lesson_id']).select_related('subject').first()
-		if not lesson:
-			return Response({"detail": "Lesson not found."}, status=404)
-
 		scope_error = self._validate_unlock_scope(teacher, student, lesson)
 		if scope_error:
 			return Response({"detail": scope_error}, status=403)
-
-		now = timezone.now()
 		unlock = (
 			LessonTemporaryUnlock.objects
 			.filter(
