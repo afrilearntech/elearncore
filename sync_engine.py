@@ -11,6 +11,9 @@ import requests
 
 from elearncore.sysutils.constants import Status as StatusEnum
 
+from dotenv import load_dotenv
+load_dotenv()
+
 
 # -----------------------------
 # CONFIG
