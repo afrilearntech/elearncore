@@ -440,6 +440,14 @@ def sync():
             dt = timezone.make_aware(dt, timezone=timezone.utc)
         return dt
 
+    def _to_int(value):
+        try:
+            if value in (None, ""):
+                return None
+            return int(value)
+        except Exception:
+            return None
+
     session = _build_session()
     _ensure_authenticated_session(session, state)
 
@@ -497,14 +505,30 @@ def sync():
                     )
 
             elif resource == "topics":
+                subject_ids = {_to_int(it.get("subject_id")) for it in items if isinstance(it, dict)}
+                subject_ids.discard(None)
+                existing_subjects = set(
+                    Subject.objects.filter(id__in=subject_ids).values_list("id", flat=True)
+                )
+
+                skipped = 0
                 for it in items:
+                    if not isinstance(it, dict):
+                        continue
+                    obj_id = _to_int(it.get("id"))
+                    subject_id = _to_int(it.get("subject_id"))
+                    if obj_id is None or subject_id is None or subject_id not in existing_subjects:
+                        skipped += 1
+                        continue
                     Topic.objects.update_or_create(
-                        id=it.get("id"),
+                        id=obj_id,
                         defaults={
-                            "subject_id": it.get("subject_id"),
+                            "subject_id": subject_id,
                             "name": it.get("name") or "",
                         },
                     )
+                if skipped:
+                    log(f"topics: skipped {skipped} items (missing/invalid subject)")
 
             elif resource == "periods":
                 for it in items:
@@ -518,15 +542,52 @@ def sync():
                     )
 
             elif resource == "lessons":
+                subject_ids = {_to_int(it.get("subject_id")) for it in items if isinstance(it, dict)}
+                subject_ids.discard(None)
+                existing_subjects = set(
+                    Subject.objects.filter(id__in=subject_ids).values_list("id", flat=True)
+                )
+
+                topic_ids = {_to_int(it.get("topic_id")) for it in items if isinstance(it, dict)}
+                topic_ids.discard(None)
+                existing_topics = set(
+                    Topic.objects.filter(id__in=topic_ids).values_list("id", flat=True)
+                )
+
+                period_ids = {_to_int(it.get("period_id")) for it in items if isinstance(it, dict)}
+                period_ids.discard(None)
+                existing_periods = set(
+                    Period.objects.filter(id__in=period_ids).values_list("id", flat=True)
+                )
+
+                skipped = 0
                 for it in items:
-                    res_file = (it.get("resource") or {}) if isinstance(it, dict) else {}
-                    thumb = (it.get("thumbnail") or {}) if isinstance(it, dict) else {}
+                    if not isinstance(it, dict):
+                        continue
+
+                    obj_id = _to_int(it.get("id"))
+                    subject_id = _to_int(it.get("subject_id"))
+                    if obj_id is None or subject_id is None or subject_id not in existing_subjects:
+                        skipped += 1
+                        continue
+
+                    topic_id = _to_int(it.get("topic_id"))
+                    if topic_id is not None and topic_id not in existing_topics:
+                        topic_id = None
+
+                    period_id = _to_int(it.get("period_id"))
+                    if period_id is not None and period_id not in existing_periods:
+                        period_id = None
+
+                    res_file = it.get("resource") or {}
+                    thumb = it.get("thumbnail") or {}
+
                     LessonResource.objects.update_or_create(
-                        id=it.get("id"),
+                        id=obj_id,
                         defaults={
-                            "subject_id": it.get("subject_id"),
-                            "topic_id": it.get("topic_id") or None,
-                            "period_id": it.get("period_id") or None,
+                            "subject_id": subject_id,
+                            "topic_id": topic_id,
+                            "period_id": period_id,
                             "instructor_name": it.get("instructor_name") or "",
                             "title": it.get("title") or "",
                             "description": it.get("description") or "",
@@ -534,11 +595,13 @@ def sync():
                             "status": it.get("status") or StatusEnum.APPROVED.value,
                             "duration_minutes": it.get("duration_minutes"),
                             "moderation_comment": it.get("moderation_comment") or "",
-                            "resource": res_file.get("path") or "",
-                            "thumbnail": thumb.get("path") or None,
+                            "resource": (res_file.get("path") if isinstance(res_file, dict) else None) or "",
+                            "thumbnail": (thumb.get("path") if isinstance(thumb, dict) else None) or None,
                             "created_by": None,
                         },
                     )
+                if skipped:
+                    log(f"lessons: skipped {skipped} items (missing/invalid subject)")
 
             elif resource == "games":
                 for it in items:
@@ -578,11 +641,26 @@ def sync():
                     )
 
             elif resource == "lesson_assessments":
+                lesson_ids = {_to_int(it.get("lesson_id")) for it in items if isinstance(it, dict)}
+                lesson_ids.discard(None)
+                existing_lessons = set(
+                    LessonResource.objects.filter(id__in=lesson_ids).values_list("id", flat=True)
+                )
+
+                skipped = 0
                 for it in items:
+                    if not isinstance(it, dict):
+                        continue
+                    obj_id = _to_int(it.get("id"))
+                    lesson_id = _to_int(it.get("lesson_id"))
+                    if obj_id is None or lesson_id is None or lesson_id not in existing_lessons:
+                        skipped += 1
+                        continue
+
                     LessonAssessment.objects.update_or_create(
-                        id=it.get("id"),
+                        id=obj_id,
                         defaults={
-                            "lesson_id": it.get("lesson_id"),
+                            "lesson_id": lesson_id,
                             "title": it.get("title") or "",
                             "instructions": it.get("instructions") or "",
                             "type": it.get("type") or "QUIZ",
@@ -595,15 +673,45 @@ def sync():
                         },
                     )
 
+                if skipped:
+                    log(f"lesson_assessments: skipped {skipped} items (missing/invalid lesson)")
+
             elif resource == "questions":
+                ga_ids = {_to_int(it.get("general_assessment_id")) for it in items if isinstance(it, dict)}
+                ga_ids.discard(None)
+                existing_ga = set(
+                    GeneralAssessment.objects.filter(id__in=ga_ids).values_list("id", flat=True)
+                )
+
+                la_ids = {_to_int(it.get("lesson_assessment_id")) for it in items if isinstance(it, dict)}
+                la_ids.discard(None)
+                existing_la = set(
+                    LessonAssessment.objects.filter(id__in=la_ids).values_list("id", flat=True)
+                )
+
+                skipped = 0
                 for it in items:
-                    ga_id = it.get("general_assessment_id") or None
-                    la_id = it.get("lesson_assessment_id") or None
-                    # Enforce XOR to satisfy the DB constraint.
-                    if bool(ga_id) == bool(la_id):
+                    if not isinstance(it, dict):
                         continue
+                    obj_id = _to_int(it.get("id"))
+                    ga_id = _to_int(it.get("general_assessment_id"))
+                    la_id = _to_int(it.get("lesson_assessment_id"))
+
+                    # Enforce XOR to satisfy the DB constraint.
+                    if obj_id is None or bool(ga_id) == bool(la_id):
+                        skipped += 1
+                        continue
+
+                    # Enforce parent existence to satisfy FK constraints.
+                    if ga_id is not None and ga_id not in existing_ga:
+                        skipped += 1
+                        continue
+                    if la_id is not None and la_id not in existing_la:
+                        skipped += 1
+                        continue
+
                     Question.objects.update_or_create(
-                        id=it.get("id"),
+                        id=obj_id,
                         defaults={
                             "general_assessment_id": ga_id,
                             "lesson_assessment_id": la_id,
@@ -613,15 +721,35 @@ def sync():
                         },
                     )
 
+                if skipped:
+                    log(f"questions: skipped {skipped} items (missing/invalid parent assessment)")
+
             elif resource == "options":
+                q_ids = {_to_int(it.get("question_id")) for it in items if isinstance(it, dict)}
+                q_ids.discard(None)
+                existing_questions = set(
+                    Question.objects.filter(id__in=q_ids).values_list("id", flat=True)
+                )
+
+                skipped = 0
                 for it in items:
+                    if not isinstance(it, dict):
+                        continue
+                    obj_id = _to_int(it.get("id"))
+                    question_id = _to_int(it.get("question_id"))
+                    if obj_id is None or question_id is None or question_id not in existing_questions:
+                        skipped += 1
+                        continue
                     Option.objects.update_or_create(
-                        id=it.get("id"),
+                        id=obj_id,
                         defaults={
-                            "question_id": it.get("question_id"),
+                            "question_id": question_id,
                             "value": it.get("value") or "",
                         },
                     )
+
+                if skipped:
+                    log(f"options: skipped {skipped} items (missing/invalid question)")
 
             total_items += len(items)
 

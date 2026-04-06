@@ -9,8 +9,8 @@ from unittest.mock import patch
 from rest_framework.test import APIClient
 
 from accounts.models import User, Student, Teacher, Parent, County, District, School
-from content.models import Subject, Topic, Period, LessonResource, LessonAssessment, LessonAssessmentGrade, TakeLesson, LessonAssessmentSolution, GeneralAssessment, AssessmentSolution, GameModel, Activity, LessonTemporaryUnlock, Story
-from elearncore.sysutils.constants import UserRole, StudentLevel, ContentType, AssessmentType, Status as StatusEnum
+from content.models import Subject, Topic, Period, LessonResource, LessonAssessment, LessonAssessmentGrade, TakeLesson, LessonAssessmentSolution, GeneralAssessment, AssessmentSolution, GameModel, Activity, LessonTemporaryUnlock, Story, Question
+from elearncore.sysutils.constants import UserRole, StudentLevel, ContentType, AssessmentType, QType, Status as StatusEnum
 
 
 class AdminGeographyBulkUploadTests(TestCase):
@@ -106,6 +106,20 @@ class SyncEndpointsTests(TestCase):
 			image=game_img,
 		)
 
+		self.lesson_assessment_pending = LessonAssessment.objects.create(
+			lesson=self.lesson,
+			title='Pending Quiz',
+			type=AssessmentType.QUIZ.value,
+			marks=10.0,
+			status=StatusEnum.PENDING.value,
+		)
+		self.question_pending = Question.objects.create(
+			lesson_assessment=self.lesson_assessment_pending,
+			type=QType.SHORT_ANSWER.value,
+			question='What is 1+1?',
+			answer='2',
+		)
+
 	def test_sync_subjects_payload_shape(self):
 		since = (timezone.now() - timedelta(days=1)).isoformat()
 		resp = self.client.get('/api-v1/sync/subjects/', {'since': since})
@@ -151,6 +165,35 @@ class SyncEndpointsTests(TestCase):
 		self.assertIsNotNone(lesson['resource'])
 		self.assertIn('path', lesson['resource'])
 		self.assertIn('url', lesson['resource'])
+
+	def test_sync_questions_excludes_pending_assessments(self):
+		since = (timezone.now() - timedelta(days=1)).isoformat()
+		resp = self.client.get('/api-v1/sync/questions/', {'since': since})
+		self.assertEqual(resp.status_code, 200)
+		payload = resp.json()
+		ids = {item['id'] for item in payload.get('items', [])}
+		self.assertNotIn(self.question_pending.id, ids)
+
+	def test_sync_questions_included_when_assessment_updated(self):
+		now = timezone.now()
+		old = now - timedelta(days=2)
+		approved_at = now - timedelta(days=1)
+		since = (now - timedelta(days=1, hours=12)).isoformat()  # between old and approved_at
+
+		# Make the question appear "old" so it would NOT be returned by updated_at alone.
+		Question.objects.filter(id=self.question_pending.id).update(updated_at=old)
+
+		# Approve the assessment at a newer timestamp.
+		LessonAssessment.objects.filter(id=self.lesson_assessment_pending.id).update(
+			status=StatusEnum.APPROVED.value,
+			updated_at=approved_at,
+		)
+
+		resp = self.client.get('/api-v1/sync/questions/', {'since': since})
+		self.assertEqual(resp.status_code, 200)
+		payload = resp.json()
+		ids = {item['id'] for item in payload.get('items', [])}
+		self.assertIn(self.question_pending.id, ids)
 
 
 class KidsSubjectsAndLessonsProgressionTests(TestCase):

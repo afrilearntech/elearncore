@@ -127,6 +127,7 @@ class SyncViewSet(viewsets.ViewSet):
         serializer_class,
         has_status: bool,
         base_queryset=None,
+        since_filter=None,
     ):
         since_raw = request.query_params.get("since") or request.query_params.get("last_sync")
         since_dt = _parse_since(since_raw)
@@ -150,7 +151,10 @@ class SyncViewSet(viewsets.ViewSet):
             # Inclusive cutoffs avoid edge cases where the client stores a
             # server-provided cutoff timestamp and an update happens at the
             # exact same timestamp.
-            qs = qs.filter(updated_at__gte=since_dt)
+            if since_filter is not None:
+                qs = qs.filter(since_filter(since_dt))
+            else:
+                qs = qs.filter(updated_at__gte=since_dt)
 
         qs = qs.order_by("updated_at", "id")
 
@@ -197,7 +201,9 @@ class SyncViewSet(viewsets.ViewSet):
             model=Topic,
             serializer_class=SyncTopicSerializer,
             has_status=False,
-            base_queryset=Topic.objects.select_related("subject"),
+            base_queryset=Topic.objects.select_related("subject").filter(
+                subject__status=StatusEnum.APPROVED.value
+            ),
         )
 
     @action(detail=False, methods=["get"], url_path="periods")
@@ -219,7 +225,9 @@ class SyncViewSet(viewsets.ViewSet):
             model=LessonResource,
             serializer_class=SyncLessonResourceSerializer,
             has_status=True,
-            base_queryset=LessonResource.objects.select_related("subject", "topic", "period"),
+            base_queryset=LessonResource.objects.select_related("subject", "topic", "period").filter(
+                subject__status=StatusEnum.APPROVED.value
+            ),
         )
 
     @action(detail=False, methods=["get"], url_path="games")
@@ -252,27 +260,51 @@ class SyncViewSet(viewsets.ViewSet):
             model=LessonAssessment,
             serializer_class=SyncLessonAssessmentSerializer,
             has_status=True,
-            base_queryset=LessonAssessment.objects.select_related("lesson"),
+            base_queryset=LessonAssessment.objects.select_related("lesson").filter(
+                lesson__status=StatusEnum.APPROVED.value
+            ),
         )
 
     @action(detail=False, methods=["get"], url_path="questions")
     def questions(self, request):
+        approved = StatusEnum.APPROVED.value
         return self._sync_list(
             request=request,
             resource="questions",
             model=Question,
             serializer_class=SyncQuestionSerializer,
             has_status=False,
-            base_queryset=Question.objects.select_related("general_assessment", "lesson_assessment"),
+            base_queryset=Question.objects.select_related("general_assessment", "lesson_assessment").filter(
+                Q(general_assessment__status=approved) | Q(lesson_assessment__status=approved)
+            ),
+            since_filter=lambda since_dt: (
+                Q(updated_at__gte=since_dt)
+                | Q(general_assessment__updated_at__gte=since_dt)
+                | Q(lesson_assessment__updated_at__gte=since_dt)
+            ),
         )
 
     @action(detail=False, methods=["get"], url_path="options")
     def options(self, request):
+        approved = StatusEnum.APPROVED.value
         return self._sync_list(
             request=request,
             resource="options",
             model=Option,
             serializer_class=SyncOptionSerializer,
             has_status=False,
-            base_queryset=Option.objects.select_related("question"),
+            base_queryset=Option.objects.select_related(
+                "question",
+                "question__general_assessment",
+                "question__lesson_assessment",
+            ).filter(
+                Q(question__general_assessment__status=approved)
+                | Q(question__lesson_assessment__status=approved)
+            ),
+            since_filter=lambda since_dt: (
+                Q(updated_at__gte=since_dt)
+                | Q(question__updated_at__gte=since_dt)
+                | Q(question__general_assessment__updated_at__gte=since_dt)
+                | Q(question__lesson_assessment__updated_at__gte=since_dt)
+            ),
         )
