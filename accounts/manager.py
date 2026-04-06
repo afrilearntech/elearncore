@@ -1,5 +1,7 @@
 from django.contrib.auth.models import BaseUserManager
 
+from elearncore.sysutils.constants import UserRole
+
 
 class AccountManager(BaseUserManager):
     '''Manages User account creation'''
@@ -42,6 +44,7 @@ class AccountManager(BaseUserManager):
             password=password,
             **kwargs
         )
+        user.role = UserRole.ADMIN.value
         user.is_staff = True
         user.is_superuser = True
         user.save(using=self._db)
