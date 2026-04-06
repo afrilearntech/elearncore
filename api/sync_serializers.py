@@ -32,7 +32,12 @@ def _file_info(*, request, field) -> dict[str, Any] | None:
     """Return a stable file descriptor for offline sync.
 
     We return both the storage path (`path`) and a downloadable URL (`url`).
-    `size` is best-effort (may trigger a storage metadata call on remote).
+    `size` is best-effort.
+
+    NOTE: On remote storage backends (e.g., S3/Spaces), reading `field.size`
+    may trigger a network metadata call per file and make list endpoints slow.
+    By default we only include `size` for local filesystem storage, unless the
+    client explicitly sets `?include_size=1`.
     """
 
     if not field:
@@ -48,10 +53,28 @@ def _file_info(*, request, field) -> dict[str, Any] | None:
     except Exception:
         url = None
 
+    include_size: bool | None = None
     try:
-        size = getattr(field, "size", None)
+        raw = request.query_params.get("include_size") if request is not None else None
+        if raw not in (None, ""):
+            include_size = str(raw).strip().lower() not in {"0", "false", "no"}
     except Exception:
-        size = None
+        include_size = None
+
+    if include_size is None:
+        try:
+            from django.core.files.storage import FileSystemStorage
+
+            include_size = isinstance(getattr(field, "storage", None), FileSystemStorage)
+        except Exception:
+            include_size = False
+
+    size = None
+    if include_size:
+        try:
+            size = getattr(field, "size", None)
+        except Exception:
+            size = None
 
     if url:
         url = _absolute_url(request, url)

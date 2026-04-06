@@ -44,7 +44,9 @@ SYNC_LOGIN_URL = (os.getenv("SYNC_LOGIN_URL") or "").strip()  # optional overrid
 STORE_TOKEN_IN_STATE = (os.getenv("SYNC_STORE_TOKEN", "true").strip().lower() not in {"0", "false", "no"})
 
 # Request tuning
-REQUEST_TIMEOUT = float(os.getenv("SYNC_TIMEOUT", "30"))
+# NOTE: Offline boxes may have slow/unstable links; a 30s read timeout is often
+# too aggressive for large sync pages.
+REQUEST_TIMEOUT = float(os.getenv("SYNC_TIMEOUT", "120"))
 VERIFY_SSL = (os.getenv("SYNC_VERIFY_SSL", "true").strip().lower() not in {"0", "false", "no"})
 PAGE_LIMIT = int(os.getenv("SYNC_PAGE_LIMIT", "500"))
 DOWNLOAD_THREADS = int(os.getenv("SYNC_DOWNLOAD_THREADS", "6"))
@@ -258,7 +260,22 @@ def download_file(url: str, path: Path, *, expected_size: int | None = None):
         if path.exists() and expected_size is not None and path.stat().st_size == int(expected_size):
             return
         if path.exists() and expected_size is None:
-            return
+            # Size wasn't provided by the API. Do a best-effort HEAD check to
+            # avoid re-downloading unchanged files (common with remote storage).
+            try:
+                head = requests.head(
+                    url,
+                    allow_redirects=True,
+                    timeout=REQUEST_TIMEOUT,
+                    verify=VERIFY_SSL,
+                )
+                if head.status_code == 200:
+                    cl = head.headers.get("Content-Length")
+                    if cl and path.stat().st_size == int(cl):
+                        return
+            except Exception:
+                # If HEAD fails (not supported, auth, etc), fall back to download.
+                pass
     except Exception:
         pass
 
@@ -322,13 +339,26 @@ def _fetch_page(
     cursor: str | None,
 ) -> dict[str, Any]:
     url = f"{API_BASE_URL}/sync/{resource}/"
-    params: dict[str, Any] = {"limit": PAGE_LIMIT}
-    if since:
-        params["since"] = since
-    if cursor:
-        params["cursor"] = cursor
+    limit = max(1, int(PAGE_LIMIT))
 
-    return _request_json(session, method="GET", url=url, params=params, state=state)
+    # Adaptive retry: if the server takes too long to respond for large pages,
+    # reduce the page size and retry a few times.
+    for attempt in range(1, 5):
+        params: dict[str, Any] = {"limit": limit}
+        if since:
+            params["since"] = since
+        if cursor:
+            params["cursor"] = cursor
+
+        try:
+            return _request_json(session, method="GET", url=url, params=params, state=state)
+        except requests.exceptions.ReadTimeout as e:
+            if attempt >= 4:
+                raise
+            if limit <= 50:
+                raise
+            limit = max(50, limit // 2)
+            log(f"Read timeout syncing {resource}; retrying with limit={limit} ({e})")
 
 
 def _collect_downloads(*, media_root: Path, items: list[dict[str, Any]]) -> list[DownloadTask]:
