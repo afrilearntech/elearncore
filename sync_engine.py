@@ -334,11 +334,11 @@ def _fetch_page(
     session: requests.Session,
     *,
     state: dict,
-    resource: str,
+    resource_endpoint: str,
     since: str | None,
     cursor: str | None,
 ) -> dict[str, Any]:
-    url = f"{API_BASE_URL}/sync/{resource}/"
+    url = f"{API_BASE_URL}/sync/{resource_endpoint}/"
     limit = max(1, int(PAGE_LIMIT))
 
     # Adaptive retry: if the server takes too long to respond for large pages,
@@ -358,7 +358,7 @@ def _fetch_page(
             if limit <= 50:
                 raise
             limit = max(50, limit // 2)
-            log(f"Read timeout syncing {resource}; retrying with limit={limit} ({e})")
+            log(f"Read timeout syncing {resource_endpoint}; retrying with limit={limit} ({e})")
 
 
 def _collect_downloads(*, media_root: Path, items: list[dict[str, Any]]) -> list[DownloadTask]:
@@ -450,25 +450,28 @@ def sync():
     download_tasks: list[DownloadTask] = []
 
     # Sync order matters because of FK dependencies.
+    # (endpoint_path, resource_key, model)
+    # Endpoint paths follow the server routes (hyphenated actions).
+    # Resource keys are stable internal names used for state + upserts.
     sync_plan = [
-        ("subjects", Subject),
-        ("topics", Topic),
-        ("periods", Period),
-        ("lessons", LessonResource),
-        ("games", GameModel),
-        ("general_assessments", GeneralAssessment),
-        ("lesson_assessments", LessonAssessment),
-        ("questions", Question),
-        ("options", Option),
+        ("subjects", "subjects", Subject),
+        ("topics", "topics", Topic),
+        ("periods", "periods", Period),
+        ("lessons", "lessons", LessonResource),
+        ("games", "games", GameModel),
+        ("general-assessments", "general_assessments", GeneralAssessment),
+        ("lesson-assessments", "lesson_assessments", LessonAssessment),
+        ("questions", "questions", Question),
+        ("options", "options", Option),
     ]
 
-    for resource, model in sync_plan:
+    for endpoint, resource, model in sync_plan:
         cursor = state["cursors"].get(resource)
         total_items = 0
         log(f"Syncing {resource}...")
 
         while True:
-            payload = _fetch_page(session, state=state, resource=resource, since=last_sync, cursor=cursor)
+            payload = _fetch_page(session, state=state, resource_endpoint=endpoint, since=last_sync, cursor=cursor)
             if sync_cutoff is None:
                 sync_cutoff = payload.get("server_time")
 
