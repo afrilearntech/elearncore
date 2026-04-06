@@ -11,8 +11,17 @@ import requests
 
 from elearncore.sysutils.constants import Status as StatusEnum
 
-from dotenv import load_dotenv
-load_dotenv()
+from dotenv import load_dotenv, find_dotenv
+
+# Load environment variables.
+#
+# In this repo, deployments often keep the env file at `elearncore/.env`.
+# `python-dotenv` only auto-discovers a file literally named `.env` in the
+# current/parent dirs, so we load both locations.
+load_dotenv(find_dotenv(), override=False)
+_alt_dotenv = Path(__file__).resolve().parent / "elearncore" / ".env"
+if _alt_dotenv.exists():
+    load_dotenv(_alt_dotenv, override=False)
 
 
 # -----------------------------
