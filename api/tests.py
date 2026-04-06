@@ -9,7 +9,7 @@ from unittest.mock import patch
 from rest_framework.test import APIClient
 
 from accounts.models import User, Student, Teacher, Parent, County, District, School
-from content.models import Subject, Period, LessonResource, LessonAssessment, LessonAssessmentGrade, TakeLesson, LessonAssessmentSolution, GeneralAssessment, AssessmentSolution, GameModel, Activity, LessonTemporaryUnlock, Story
+from content.models import Subject, Topic, Period, LessonResource, LessonAssessment, LessonAssessmentGrade, TakeLesson, LessonAssessmentSolution, GeneralAssessment, AssessmentSolution, GameModel, Activity, LessonTemporaryUnlock, Story
 from elearncore.sysutils.constants import UserRole, StudentLevel, ContentType, AssessmentType, Status as StatusEnum
 
 
@@ -57,6 +57,100 @@ class AdminGeographyBulkUploadTests(TestCase):
 		resp = self.client.post('/api-v1/admin/schools/bulk-create/', data={'file': upload}, format='multipart')
 		self.assertEqual(resp.status_code, 200)
 		self.assertEqual(School.objects.filter(name='Afrilearn Academy', district=district).count(), 1)
+
+
+class SyncEndpointsTests(TestCase):
+	def setUp(self):
+		cache.clear()
+		self.client = APIClient()
+		user = User.objects.create_user(
+			phone='231770123456',
+			name='Sync User',
+			email='sync@example.com',
+			password='pass',
+			role=UserRole.ADMIN.value,
+		)
+		self.client.force_authenticate(user=user)
+
+		subject_thumb = SimpleUploadedFile('subject.png', b'img', content_type='image/png')
+		lesson_file = SimpleUploadedFile('lesson.mp4', b'lesson-bytes', content_type='video/mp4')
+		game_img = SimpleUploadedFile('game.png', b'img', content_type='image/png')
+
+		self.subject = Subject.objects.create(
+			name='Mathematics',
+			grade=StudentLevel.GRADE3.value,
+			status=StatusEnum.APPROVED.value,
+			thumbnail=subject_thumb,
+		)
+		self.topic_1 = Topic.objects.create(subject=self.subject, name='Numbers')
+		self.topic_2 = Topic.objects.create(subject=self.subject, name='Addition')
+		self.period = Period.objects.create(name='January', start_month=1, end_month=1)
+		self.lesson = LessonResource.objects.create(
+			subject=self.subject,
+			topic=self.topic_1,
+			period=self.period,
+			title='Counting Numbers',
+			type=ContentType.VIDEO.value,
+			status=StatusEnum.APPROVED.value,
+			resource=lesson_file,
+		)
+		self.game = GameModel.objects.create(
+			name='Word Puzzle 1',
+			instructions='Do it',
+			description='desc',
+			grade=StudentLevel.GRADE3.value,
+			hint='hint',
+			correct_answer='A',
+			type='WORD_PUZZLE',
+			status=StatusEnum.APPROVED.value,
+			image=game_img,
+		)
+
+	def test_sync_subjects_payload_shape(self):
+		since = (timezone.now() - timedelta(days=1)).isoformat()
+		resp = self.client.get('/api-v1/sync/subjects/', {'since': since})
+		self.assertEqual(resp.status_code, 200)
+		payload = resp.json()
+		self.assertEqual(payload['resource'], 'subjects')
+		self.assertIn('server_time', payload)
+		self.assertIn('items', payload)
+		self.assertGreaterEqual(payload['count'], 1)
+		first = payload['items'][0]
+		self.assertIn('id', first)
+		self.assertIn('thumbnail', first)
+		if first['thumbnail']:
+			self.assertIn('path', first['thumbnail'])
+			self.assertIn('url', first['thumbnail'])
+
+	def test_sync_topics_cursor_pagination(self):
+		since = (timezone.now() - timedelta(days=1)).isoformat()
+		resp1 = self.client.get('/api-v1/sync/topics/', {'since': since, 'limit': 1})
+		self.assertEqual(resp1.status_code, 200)
+		payload1 = resp1.json()
+		self.assertEqual(payload1['resource'], 'topics')
+		self.assertEqual(payload1['count'], 1)
+		self.assertIsNotNone(payload1['next_cursor'])
+
+		resp2 = self.client.get('/api-v1/sync/topics/', {'since': since, 'limit': 10, 'cursor': payload1['next_cursor']})
+		self.assertEqual(resp2.status_code, 200)
+		payload2 = resp2.json()
+		self.assertGreaterEqual(payload2['count'], 1)
+
+		returned = {item['name'] for item in payload1['items'] + payload2['items']}
+		self.assertIn('Numbers', returned)
+		self.assertIn('Addition', returned)
+
+	def test_sync_lessons_includes_resource_descriptor(self):
+		since = (timezone.now() - timedelta(days=1)).isoformat()
+		resp = self.client.get('/api-v1/sync/lessons/', {'since': since})
+		self.assertEqual(resp.status_code, 200)
+		payload = resp.json()
+		self.assertEqual(payload['resource'], 'lessons')
+		lesson = payload['items'][0]
+		self.assertIn('resource', lesson)
+		self.assertIsNotNone(lesson['resource'])
+		self.assertIn('path', lesson['resource'])
+		self.assertIn('url', lesson['resource'])
 
 
 class KidsSubjectsAndLessonsProgressionTests(TestCase):

@@ -32,6 +32,7 @@ from .viewsets import (
 	TeacherViewSet,
 )
 from .headteacher_viewset import HeadTeacherViewSet
+from .sync_viewset import SyncViewSet
 
 router = DefaultRouter()
 router.register(r'subjects', SubjectViewSet, basename='subject')
@@ -63,6 +64,7 @@ router.register(r'content', ContentViewSet, basename='content')
 router.register(r'teacher', TeacherViewSet, basename='teacher')
 router.register(r'headteacher', HeadTeacherViewSet, basename='headteacher')
 router.register(r'parent', ParentViewSet, basename='parent')
+router.register(r'sync', SyncViewSet, basename='sync')
 
 urlpatterns = [
 	path('', include(router.urls)),
