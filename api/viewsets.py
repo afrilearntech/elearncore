@@ -1809,7 +1809,7 @@ class ParentViewSet(viewsets.ViewSet):
 				"submission_status": status_label,
 				"solution": {
 					"solution": sol.solution,
-					"attachment": sol.attachment.url if getattr(sol, 'attachment', None) else None,
+					"attachment": request.build_absolute_uri(sol.attachment.url) if sol.attachment else None,
 				},
 				"date_submitted": sol.submitted_at,
 			})
@@ -2655,7 +2655,7 @@ class ContentViewSet(viewsets.ViewSet):
 			user = request.user
 			if user and user.is_authenticated and IsContentCreator().has_permission(request, self) and not IsContentValidator().has_permission(request, self):
 				qs = qs.filter(created_by=user)
-			return Response(GameSerializer(qs, many=True).data)
+			return Response(GameSerializer(qs, many=True, context={"request": request}).data)
 
 		deny = self._require_creator(request)
 		if deny:
@@ -2663,7 +2663,7 @@ class ContentViewSet(viewsets.ViewSet):
 		ser = GameSerializer(data=request.data)
 		ser.is_valid(raise_exception=True)
 		obj = ser.save(created_by=request.user)
-		return Response(GameSerializer(obj).data, status=status.HTTP_201_CREATED)
+		return Response(GameSerializer(obj, context={"request": request}).data, status=status.HTTP_201_CREATED)
 
 	@extend_schema(
 		operation_id="content_schools",
@@ -3682,7 +3682,7 @@ class ContentViewSet(viewsets.ViewSet):
 		ser = GameSerializer(obj, data=request.data, partial=True)
 		ser.is_valid(raise_exception=True)
 		updated = ser.save()
-		return Response(GameSerializer(updated).data)
+		return Response(GameSerializer(updated, context={"request": request}).data)
 
 	@extend_schema(
 		operation_id="content_update_school",
@@ -5367,7 +5367,10 @@ class KidsViewSet(viewsets.ViewSet):
 				"type": "general",
 				"due_at": ga.due_at.isoformat() if ga.due_at else None,
 				"status": status,
-				"solution": AssessmentSolutionSerializer(solution_obj).data if solution_obj else None,
+				"solution": (
+					AssessmentSolutionSerializer(solution_obj, context={"request": request}).data
+					if solution_obj else None
+				),
 			})
 
 		for la in lesson_qs.only('id', 'title', 'instructions', 'due_at'):
@@ -5390,7 +5393,10 @@ class KidsViewSet(viewsets.ViewSet):
 				"instructions": la.instructions,
 				"type": "lesson",
 				"status": status,
-				"solution": LessonAssessmentSolutionSerializer(lesson_solution_obj).data if lesson_solution_obj else None,
+				"solution": (
+					LessonAssessmentSolutionSerializer(lesson_solution_obj, context={"request": request}).data
+					if lesson_solution_obj else None
+				),
 				"due_at": la.due_at.isoformat() if la.due_at else None,
 			})
 
@@ -8147,7 +8153,7 @@ class TeacherViewSet(viewsets.ViewSet):
 				"submission_status": status_label,
 				"solution": {
 					"solution": sol.solution,
-					"attachment": sol.attachment.url if getattr(sol, 'attachment', None) else None,
+					"attachment": request.build_absolute_uri(sol.attachment.url) if sol.attachment else None,
 				},
 				"date_submitted": sol.submitted_at,
 			})

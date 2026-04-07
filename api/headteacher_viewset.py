@@ -789,7 +789,7 @@ class HeadTeacherViewSet(TeacherViewSet):
 				'submission_status': 'Graded' if grade_obj else 'Pending Review',
 				'solution': {
 					'solution': sol.solution,
-					'attachment': sol.attachment.url if getattr(sol, 'attachment', None) else None,
+					'attachment': request.build_absolute_uri(sol.attachment.url) if sol.attachment else None,
 				},
 				'date_submitted': sol.submitted_at,
 			})
