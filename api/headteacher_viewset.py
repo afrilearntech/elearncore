@@ -384,7 +384,7 @@ class HeadTeacherViewSet(TeacherViewSet):
 			return deny
 		school_id = request.user.teacher.school_id
 		qs = Subject.objects.filter(teachers__school_id=school_id).distinct().order_by('name')
-		return Response(SubjectSerializer(qs, many=True).data)
+		return Response(SubjectSerializer(qs, many=True, context={"request": request}).data)
 
 	@extend_schema(description="List topics for subjects taught in the head teacher's school.", responses={200: TopicSerializer(many=True)})
 	@action(detail=False, methods=['get'], url_path='topics')
@@ -404,7 +404,7 @@ class HeadTeacherViewSet(TeacherViewSet):
 			return deny
 		school_id = request.user.teacher.school_id
 		qs = LessonResource.objects.filter(subject__teachers__school_id=school_id).select_related('subject').distinct().order_by('-created_at')
-		return Response(LessonResourceSerializer(qs, many=True).data)
+		return Response(LessonResourceSerializer(qs, many=True, context={"request": request}).data)
 
 	@extend_schema(
 		description="List general assessments created by teachers in the head teacher's school.",

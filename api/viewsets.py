@@ -392,9 +392,11 @@ def _student_lesson_cache_key(student: Student, request, suffix: str) -> str:
 	progress_version = _get_cache_version(_student_lesson_progress_version_key(student.id))
 	grade_version = _get_cache_version(_grade_lesson_content_version_key(student.grade))
 	query = quote(request.META.get('QUERY_STRING', ''), safe='') if request is not None else ''
+	scheme = quote(getattr(request, 'scheme', '') or '', safe='') if request is not None else ''
+	host = quote(getattr(request, 'get_host', lambda: '')() or '', safe='') if request is not None else ''
 	grade_token = quote(str(student.grade), safe='')
 	return (
-		f"student-lesson:{suffix}:student:{student.id}:grade:{grade_token}:"
+		f"student-lesson:{suffix}:student:{student.id}:grade:{grade_token}:scheme:{scheme}:host:{host}:"
 		f"progress:{progress_version}:content:{grade_version}:query:{query}"
 	)
 
@@ -2324,7 +2326,7 @@ class ContentViewSet(viewsets.ViewSet):
 			user = request.user
 			if user and user.is_authenticated and IsContentCreator().has_permission(request, self) and not IsContentValidator().has_permission(request, self):
 				qs = qs.filter(created_by=user)
-			return Response(SubjectSerializer(qs, many=True).data)
+			return Response(SubjectSerializer(qs, many=True, context={"request": request}).data)
 
 		# POST - creation requires creator capability
 		deny = self._require_creator(request)
@@ -2333,7 +2335,7 @@ class ContentViewSet(viewsets.ViewSet):
 		ser = SubjectWriteSerializer(data=request.data)
 		ser.is_valid(raise_exception=True)
 		obj = ser.save(created_by=request.user)
-		return Response(SubjectSerializer(obj).data, status=status.HTTP_201_CREATED)
+		return Response(SubjectSerializer(obj, context={"request": request}).data, status=status.HTTP_201_CREATED)
 
 	
 	@extend_schema(
@@ -2350,7 +2352,7 @@ class ContentViewSet(viewsets.ViewSet):
 			user = request.user
 			if user and user.is_authenticated and IsContentCreator().has_permission(request, self) and not IsContentValidator().has_permission(request, self):
 				qs = qs.filter(created_by=user)
-			return Response(LessonResourceSerializer(qs, many=True).data)
+			return Response(LessonResourceSerializer(qs, many=True, context={"request": request}).data)
 
 		deny = self._require_creator(request)
 		if deny:
@@ -2358,7 +2360,7 @@ class ContentViewSet(viewsets.ViewSet):
 		ser = LessonResourceSerializer(data=request.data)
 		ser.is_valid(raise_exception=True)
 		obj = ser.save(created_by=request.user)
-		return Response(LessonResourceSerializer(obj).data, status=status.HTTP_201_CREATED)
+		return Response(LessonResourceSerializer(obj, context={"request": request}).data, status=status.HTTP_201_CREATED)
 
 	@extend_schema(
 		operation_id="content_general_assessments",
@@ -3564,7 +3566,7 @@ class ContentViewSet(viewsets.ViewSet):
 		ser = SubjectWriteSerializer(obj, data=request.data, partial=True)
 		ser.is_valid(raise_exception=True)
 		updated = ser.save()
-		return Response(SubjectSerializer(updated).data)
+		return Response(SubjectSerializer(updated, context={"request": request}).data)
 
 	@extend_schema(
 		operation_id="content_update_lesson",
@@ -3590,7 +3592,7 @@ class ContentViewSet(viewsets.ViewSet):
 		ser = LessonResourceSerializer(obj, data=request.data, partial=True)
 		ser.is_valid(raise_exception=True)
 		updated = ser.save()
-		return Response(LessonResourceSerializer(updated).data)
+		return Response(LessonResourceSerializer(updated, context={"request": request}).data)
 
 	@extend_schema(
 		operation_id="content_update_general_assessment",
@@ -5090,10 +5092,11 @@ class KidsViewSet(viewsets.ViewSet):
 			total = int(lessons_per_subject.get(subj.id, 0))
 			taken = int(taken_per_subject.get(subj.id, 0))
 			percent = int(round((taken / total) * 100)) if total else 0
+			thumb = getattr(subj, 'thumbnail', None)
 			subjects_payload.append({
 				"id": subj.id,
 				"name": subj.name,
-				"thumbnail": subj.thumbnail.url if getattr(subj, 'thumbnail', None) else None,
+				"thumbnail": request.build_absolute_uri(thumb.url) if thumb else None,
 				"percent_complete": percent,
 			})
 
@@ -5192,7 +5195,7 @@ class KidsViewSet(viewsets.ViewSet):
 			status=StatusEnum.APPROVED.value,
 		).order_by('name')
 		subjects_payload = [
-			{"id": s.id, "name": s.name, "grade": s.grade, "thumbnail": s.thumbnail.url if s.thumbnail else None}
+			{"id": s.id, "name": s.name, "grade": s.grade, "thumbnail": request.build_absolute_uri(s.thumbnail.url) if s.thumbnail else None}
 			for s in subjects_qs
 		]
 
@@ -5227,8 +5230,8 @@ class KidsViewSet(viewsets.ViewSet):
 				"period_id": lesson.period_id,
 				"period_name": getattr(lesson.period, 'name', None),
 				"resource_type": lesson.type,
-				"thumbnail": lesson.thumbnail.url if lesson.thumbnail else None,
-				"resource": lesson.resource.url if lesson.resource else None,
+				"thumbnail": request.build_absolute_uri(lesson.thumbnail.url) if lesson.thumbnail else None,
+				"resource": request.build_absolute_uri(lesson.resource.url) if lesson.resource else None,
 				"status": "taken" if state['is_taken'] else "new",
 				"progression_status": state['progression_status'],
 				"is_locked": state['is_locked'],
@@ -6826,7 +6829,7 @@ class TeacherViewSet(viewsets.ViewSet):
 		teacher = request.user.teacher
 		# For now, return all subjects linked to this teacher profile.
 		qs = Subject.objects.filter(teachers=teacher).order_by('name')
-		return Response(SubjectSerializer(qs, many=True).data)
+		return Response(SubjectSerializer(qs, many=True, context={"request": request}).data)
 
 	@extend_schema(
 		description=(
@@ -6866,7 +6869,7 @@ class TeacherViewSet(viewsets.ViewSet):
 			.select_related('subject')
 			.order_by('-created_at')
 		)
-		return Response(LessonResourceSerializer(qs, many=True).data)
+		return Response(LessonResourceSerializer(qs, many=True, context={"request": request}).data)
 
 	@extend_schema(
 		description="Create a new lesson resource for one of the teacher's subjects.",
@@ -6881,7 +6884,7 @@ class TeacherViewSet(viewsets.ViewSet):
 		ser = LessonResourceSerializer(data=request.data)
 		ser.is_valid(raise_exception=True)
 		lesson = ser.save(created_by=request.user, status=StatusEnum.DRAFT.value)
-		return Response(LessonResourceSerializer(lesson).data, status=201)
+		return Response(LessonResourceSerializer(lesson, context={"request": request}).data, status=201)
 
 	@extend_schema(
 		description="List general assessments created by this teacher.",
