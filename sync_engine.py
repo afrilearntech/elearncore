@@ -416,6 +416,7 @@ def sync():
     media_root.mkdir(parents=True, exist_ok=True)
 
     # Import models only after Django is ready.
+    from accounts.models import County, District, School  # noqa: WPS433
     from content.models import (  # noqa: WPS433
         Subject,
         Topic,
@@ -462,6 +463,9 @@ def sync():
     # Endpoint paths follow the server routes (hyphenated actions).
     # Resource keys are stable internal names used for state + upserts.
     sync_plan = [
+        ("counties", "counties", County),
+        ("districts", "districts", District),
+        ("schools", "schools", School),
         ("subjects", "subjects", Subject),
         ("topics", "topics", Topic),
         ("periods", "periods", Period),
@@ -474,12 +478,23 @@ def sync():
     ]
 
     for endpoint, resource, model in sync_plan:
+        is_new_resource = resource not in state["cursors"]
         cursor = state["cursors"].get(resource)
+        since_for_resource = None if is_new_resource else last_sync
         total_items = 0
         log(f"Syncing {resource}...")
 
+        if is_new_resource and last_sync:
+            log(f"{resource}: first-time sync; ignoring last_sync cutoff to backfill existing data")
+
         while True:
-            payload = _fetch_page(session, state=state, resource_endpoint=endpoint, since=last_sync, cursor=cursor)
+            payload = _fetch_page(
+                session,
+                state=state,
+                resource_endpoint=endpoint,
+                since=since_for_resource,
+                cursor=cursor,
+            )
             if sync_cutoff is None:
                 sync_cutoff = payload.get("server_time")
 
@@ -487,7 +502,81 @@ def sync():
             next_cursor = payload.get("next_cursor")
 
             # Upsert into local DB
-            if resource == "subjects":
+            if resource == "counties":
+                for it in items:
+                    if not isinstance(it, dict):
+                        continue
+                    County.objects.update_or_create(
+                        id=it.get("id"),
+                        defaults={
+                            "name": it.get("name") or "",
+                            "status": it.get("status") or StatusEnum.APPROVED.value,
+                            "moderation_comment": it.get("moderation_comment") or "",
+                            "created_by": None,
+                        },
+                    )
+
+            elif resource == "districts":
+                county_ids = {_to_int(it.get("county_id")) for it in items if isinstance(it, dict)}
+                county_ids.discard(None)
+                existing_counties = set(
+                    County.objects.filter(id__in=county_ids).values_list("id", flat=True)
+                )
+
+                skipped = 0
+                for it in items:
+                    if not isinstance(it, dict):
+                        continue
+                    obj_id = _to_int(it.get("id"))
+                    county_id = _to_int(it.get("county_id"))
+                    if obj_id is None or county_id is None or county_id not in existing_counties:
+                        skipped += 1
+                        continue
+
+                    District.objects.update_or_create(
+                        id=obj_id,
+                        defaults={
+                            "county_id": county_id,
+                            "name": it.get("name") or "",
+                            "status": it.get("status") or StatusEnum.APPROVED.value,
+                            "moderation_comment": it.get("moderation_comment") or "",
+                        },
+                    )
+
+                if skipped:
+                    log(f"districts: skipped {skipped} items (missing/invalid county)")
+
+            elif resource == "schools":
+                district_ids = {_to_int(it.get("district_id")) for it in items if isinstance(it, dict)}
+                district_ids.discard(None)
+                existing_districts = set(
+                    District.objects.filter(id__in=district_ids).values_list("id", flat=True)
+                )
+
+                skipped = 0
+                for it in items:
+                    if not isinstance(it, dict):
+                        continue
+                    obj_id = _to_int(it.get("id"))
+                    district_id = _to_int(it.get("district_id"))
+                    if obj_id is None or district_id is None or district_id not in existing_districts:
+                        skipped += 1
+                        continue
+
+                    School.objects.update_or_create(
+                        id=obj_id,
+                        defaults={
+                            "district_id": district_id,
+                            "name": it.get("name") or "",
+                            "status": it.get("status") or StatusEnum.APPROVED.value,
+                            "moderation_comment": it.get("moderation_comment") or "",
+                        },
+                    )
+
+                if skipped:
+                    log(f"schools: skipped {skipped} items (missing/invalid district)")
+
+            elif resource == "subjects":
                 for it in items:
                     thumb = (it.get("thumbnail") or {}) if isinstance(it, dict) else {}
                     Subject.objects.update_or_create(

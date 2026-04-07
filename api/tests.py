@@ -72,6 +72,35 @@ class SyncEndpointsTests(TestCase):
 		)
 		self.client.force_authenticate(user=user)
 
+		self.county_approved = County.objects.create(
+			name='Montserrado',
+			status=StatusEnum.APPROVED.value,
+		)
+		self.county_pending = County.objects.create(
+			name='Bong',
+			status=StatusEnum.PENDING.value,
+		)
+		self.district_approved = District.objects.create(
+			county=self.county_approved,
+			name='Careysburg',
+			status=StatusEnum.APPROVED.value,
+		)
+		self.district_pending = District.objects.create(
+			county=self.county_approved,
+			name='Kakata',
+			status=StatusEnum.PENDING.value,
+		)
+		self.school_approved = School.objects.create(
+			district=self.district_approved,
+			name='Afrilearn Academy',
+			status=StatusEnum.APPROVED.value,
+		)
+		self.school_pending = School.objects.create(
+			district=self.district_approved,
+			name='Pending School',
+			status=StatusEnum.PENDING.value,
+		)
+
 		subject_thumb = SimpleUploadedFile('subject.png', b'img', content_type='image/png')
 		lesson_file = SimpleUploadedFile('lesson.mp4', b'lesson-bytes', content_type='video/mp4')
 		game_img = SimpleUploadedFile('game.png', b'img', content_type='image/png')
@@ -135,6 +164,47 @@ class SyncEndpointsTests(TestCase):
 		if first['thumbnail']:
 			self.assertIn('path', first['thumbnail'])
 			self.assertIn('url', first['thumbnail'])
+
+	def test_sync_counties_filters_approved_by_default(self):
+		since = (timezone.now() - timedelta(days=1)).isoformat()
+		resp = self.client.get('/api-v1/sync/counties/', {'since': since})
+		self.assertEqual(resp.status_code, 200)
+		payload = resp.json()
+		self.assertEqual(payload['resource'], 'counties')
+		ids = {item['id'] for item in payload.get('items', [])}
+		self.assertIn(self.county_approved.id, ids)
+		self.assertNotIn(self.county_pending.id, ids)
+		first = payload['items'][0]
+		self.assertIn('name', first)
+		self.assertIn('status', first)
+
+	def test_sync_districts_includes_county_id_and_filters_approved_by_default(self):
+		since = (timezone.now() - timedelta(days=1)).isoformat()
+		resp = self.client.get('/api-v1/sync/districts/', {'since': since})
+		self.assertEqual(resp.status_code, 200)
+		payload = resp.json()
+		self.assertEqual(payload['resource'], 'districts')
+		ids = {item['id'] for item in payload.get('items', [])}
+		self.assertIn(self.district_approved.id, ids)
+		self.assertNotIn(self.district_pending.id, ids)
+
+		match = [item for item in payload.get('items', []) if item.get('id') == self.district_approved.id]
+		self.assertEqual(len(match), 1)
+		self.assertEqual(match[0].get('county_id'), self.county_approved.id)
+
+	def test_sync_schools_includes_district_id_and_filters_approved_by_default(self):
+		since = (timezone.now() - timedelta(days=1)).isoformat()
+		resp = self.client.get('/api-v1/sync/schools/', {'since': since})
+		self.assertEqual(resp.status_code, 200)
+		payload = resp.json()
+		self.assertEqual(payload['resource'], 'schools')
+		ids = {item['id'] for item in payload.get('items', [])}
+		self.assertIn(self.school_approved.id, ids)
+		self.assertNotIn(self.school_pending.id, ids)
+
+		match = [item for item in payload.get('items', []) if item.get('id') == self.school_approved.id]
+		self.assertEqual(len(match), 1)
+		self.assertEqual(match[0].get('district_id'), self.district_approved.id)
 
 	def test_sync_topics_cursor_pagination(self):
 		since = (timezone.now() - timedelta(days=1)).isoformat()

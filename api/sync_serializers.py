@@ -4,6 +4,7 @@ from typing import Any
 
 from rest_framework import serializers
 
+from accounts.models import County, District, School
 from content.models import (
     Subject,
     Topic,
@@ -250,6 +251,51 @@ class SyncOptionSerializer(serializers.ModelSerializer):
             "id",
             "question_id",
             "value",
+            "created_at",
+            "updated_at",
+        ]
+
+
+class SyncCountySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = County
+        fields = [
+            "id",
+            "name",
+            "status",
+            "moderation_comment",
+            "created_at",
+            "updated_at",
+        ]
+
+
+class SyncDistrictSerializer(serializers.ModelSerializer):
+    county_id = serializers.IntegerField(source="county.id", read_only=True)
+
+    class Meta:
+        model = District
+        fields = [
+            "id",
+            "county_id",
+            "name",
+            "status",
+            "moderation_comment",
+            "created_at",
+            "updated_at",
+        ]
+
+
+class SyncSchoolSerializer(serializers.ModelSerializer):
+    district_id = serializers.IntegerField(source="district.id", read_only=True)
+
+    class Meta:
+        model = School
+        fields = [
+            "id",
+            "district_id",
+            "name",
+            "status",
+            "moderation_comment",
             "created_at",
             "updated_at",
         ]

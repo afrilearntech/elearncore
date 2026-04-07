@@ -13,6 +13,7 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 
 from elearncore.sysutils.constants import Status as StatusEnum
+from accounts.models import County, District, School
 from content.models import (
     Subject,
     Topic,
@@ -35,6 +36,9 @@ from .sync_serializers import (
     SyncLessonAssessmentSerializer,
     SyncQuestionSerializer,
     SyncOptionSerializer,
+    SyncCountySerializer,
+    SyncDistrictSerializer,
+    SyncSchoolSerializer,
 )
 
 
@@ -94,6 +98,9 @@ class SyncViewSet(viewsets.ViewSet):
 
     Endpoints are exposed as sub-actions:
     - GET /api-v1/sync/subjects/
+    - GET /api-v1/sync/counties/
+    - GET /api-v1/sync/districts/
+    - GET /api-v1/sync/schools/
     - GET /api-v1/sync/topics/
     - GET /api-v1/sync/periods/
     - GET /api-v1/sync/lessons/
@@ -191,6 +198,39 @@ class SyncViewSet(viewsets.ViewSet):
             serializer_class=SyncSubjectSerializer,
             has_status=True,
             base_queryset=Subject.objects.all(),
+        )
+
+    @action(detail=False, methods=["get"], url_path="counties")
+    def counties(self, request):
+        return self._sync_list(
+            request=request,
+            resource="counties",
+            model=County,
+            serializer_class=SyncCountySerializer,
+            has_status=True,
+            base_queryset=County.objects.all(),
+        )
+
+    @action(detail=False, methods=["get"], url_path="districts")
+    def districts(self, request):
+        return self._sync_list(
+            request=request,
+            resource="districts",
+            model=District,
+            serializer_class=SyncDistrictSerializer,
+            has_status=True,
+            base_queryset=District.objects.select_related("county").all(),
+        )
+
+    @action(detail=False, methods=["get"], url_path="schools")
+    def schools(self, request):
+        return self._sync_list(
+            request=request,
+            resource="schools",
+            model=School,
+            serializer_class=SyncSchoolSerializer,
+            has_status=True,
+            base_queryset=School.objects.select_related("district").all(),
         )
 
     @action(detail=False, methods=["get"], url_path="topics")
