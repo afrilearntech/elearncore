@@ -1336,12 +1336,23 @@ def sync():
                         student = Student.objects.filter(profile=user).first()
 
                         if student is None:
+                            incoming_student_id = (it.get("student_id") or "").strip() or None
+                            if incoming_student_id:
+                                # `student_id` is derived from the DB PK (e.g., STU0000022) and
+                                # can collide across different offline boxes. Keep it best-effort.
+                                if Student.objects.filter(student_id=incoming_student_id).exists():
+                                    log(
+                                        f"students: dropping remote student_id {incoming_student_id} "
+                                        "due to local collision"
+                                    )
+                                    incoming_student_id = None
+
                             school_id = _to_int(it.get("school_id"))
                             school_id = school_id if school_id in existing_schools else None
 
                             student = Student.objects.create(
                                 profile=user,
-                                student_id=(it.get("student_id") or "").strip() or None,
+                                student_id=incoming_student_id,
                                 school_id=school_id,
                                 grade=(it.get("grade") or "") or "",
                                 points=int(remote_points),
@@ -1355,8 +1366,14 @@ def sync():
 
                         # Canonical student profile fields.
                         incoming_student_id = (it.get("student_id") or "").strip() or None
-                        if incoming_student_id:
-                            student.student_id = incoming_student_id
+                        if incoming_student_id and incoming_student_id != (getattr(student, "student_id", None) or None):
+                            if Student.objects.filter(student_id=incoming_student_id).exclude(pk=student.pk).exists():
+                                log(
+                                    f"students: ignoring remote student_id {incoming_student_id} "
+                                    "due to local collision"
+                                )
+                            else:
+                                student.student_id = incoming_student_id
 
                         incoming_grade = it.get("grade")
                         if incoming_grade is not None:
