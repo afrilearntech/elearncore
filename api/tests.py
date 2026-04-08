@@ -5,12 +5,23 @@ from django.test import TestCase
 from django.utils import timezone
 from datetime import timedelta
 from io import StringIO
+import uuid
 from unittest.mock import patch
 from rest_framework.test import APIClient
 
 from accounts.models import User, Student, Teacher, Parent, County, District, School
-from content.models import Subject, Topic, Period, LessonResource, LessonAssessment, LessonAssessmentGrade, TakeLesson, LessonAssessmentSolution, GeneralAssessment, AssessmentSolution, GameModel, Activity, LessonTemporaryUnlock, Story, Question
-from elearncore.sysutils.constants import UserRole, StudentLevel, ContentType, AssessmentType, QType, Status as StatusEnum
+from content.models import Subject, Topic, Period, LessonResource, LessonAssessment, LessonAssessmentGrade, TakeLesson, LessonAssessmentSolution, GeneralAssessment, AssessmentSolution, GameModel, GamePlay, Activity, LessonTemporaryUnlock, Story, Question
+from elearncore.sysutils.constants import (
+	ASSESSMENT_SUBMISSION_POINTS,
+	GAME_PLAY_POINTS,
+	VIDEO_WATCH_POINTS,
+	UserRole,
+	StudentLevel,
+	ContentType,
+	AssessmentType,
+	QType,
+	Status as StatusEnum,
+)
 
 
 class AdminGeographyBulkUploadTests(TestCase):
@@ -264,6 +275,96 @@ class SyncEndpointsTests(TestCase):
 		payload = resp.json()
 		ids = {item['id'] for item in payload.get('items', [])}
 		self.assertIn(self.question_pending.id, ids)
+
+	def test_sync_student_users_includes_password_hash_and_filters_students(self):
+		student_user = User.objects.create_user(
+			phone='231770900001',
+			name='Roaming Student',
+			email='roaming@student.com',
+			password='studentpass',
+			role=UserRole.STUDENT.value,
+		)
+		Student.objects.create(
+			profile=student_user,
+			school=self.school_approved,
+			grade=StudentLevel.GRADE3.value,
+			status=StatusEnum.PENDING.value,
+		)
+
+		teacher_user = User.objects.create_user(
+			phone='231770900002',
+			name='Teacher',
+			email='teacher900002@example.com',
+			password='teacherpass',
+			role=UserRole.TEACHER.value,
+		)
+		Teacher.objects.create(profile=teacher_user, school=self.school_approved, status=StatusEnum.APPROVED.value)
+
+		since = (timezone.now() - timedelta(days=1)).isoformat()
+		resp = self.client.get('/api-v1/sync/student-users/', {'since': since, 'limit': 2000})
+		self.assertEqual(resp.status_code, 200)
+		payload = resp.json()
+		self.assertEqual(payload['resource'], 'student_users')
+
+		items = payload.get('items', [])
+		matched = [it for it in items if it.get('sync_uuid') == str(student_user.sync_uuid)]
+		self.assertEqual(len(matched), 1)
+		self.assertEqual(matched[0].get('phone'), student_user.phone)
+		self.assertEqual(matched[0].get('password_hash'), student_user.password)
+
+		# Ensure non-student users are not included.
+		teacher_match = [it for it in items if it.get('phone') == teacher_user.phone]
+		self.assertEqual(len(teacher_match), 0)
+
+	def test_sync_students_includes_pending_students_and_profile_sync_uuid(self):
+		student_user = User.objects.create_user(
+			phone='231770900003',
+			name='Pending Student',
+			email='pending@student.com',
+			password='studentpass',
+			role=UserRole.STUDENT.value,
+		)
+		Student.objects.create(
+			profile=student_user,
+			school=self.school_approved,
+			grade=StudentLevel.GRADE3.value,
+			status=StatusEnum.PENDING.value,
+			points=7,
+			current_login_streak=2,
+			max_login_streak=3,
+			last_login_activity_date=timezone.localdate(),
+		)
+
+		since = (timezone.now() - timedelta(days=1)).isoformat()
+		resp = self.client.get('/api-v1/sync/students/', {'since': since, 'limit': 2000})
+		self.assertEqual(resp.status_code, 200)
+		payload = resp.json()
+		self.assertEqual(payload['resource'], 'students')
+
+		items = payload.get('items', [])
+		matched = [it for it in items if it.get('profile_sync_uuid') == str(student_user.sync_uuid)]
+		self.assertEqual(len(matched), 1)
+		self.assertEqual(matched[0].get('status'), StatusEnum.PENDING.value)
+		self.assertEqual(matched[0].get('school_id'), self.school_approved.id)
+		self.assertEqual(matched[0].get('points'), 7)
+
+	def test_sync_student_account_endpoints_require_privileged_role(self):
+		student_user = User.objects.create_user(
+			phone='231770900004',
+			name='Normal Student',
+			email='normal@student.com',
+			password='studentpass',
+			role=UserRole.STUDENT.value,
+		)
+		Student.objects.create(profile=student_user, status=StatusEnum.APPROVED.value)
+
+		student_client = APIClient()
+		student_client.force_authenticate(user=student_user)
+		since = (timezone.now() - timedelta(days=1)).isoformat()
+		resp1 = student_client.get('/api-v1/sync/student-users/', {'since': since})
+		resp2 = student_client.get('/api-v1/sync/students/', {'since': since})
+		self.assertEqual(resp1.status_code, 403)
+		self.assertEqual(resp2.status_code, 403)
 
 
 class KidsSubjectsAndLessonsProgressionTests(TestCase):
@@ -2289,3 +2390,321 @@ class LeaderboardScopeTests(TestCase):
 		self.assertEqual(payload['timeframe'], 'this_month')
 		for child_ctx in payload['children']:
 			self.assertEqual(child_ctx['scope']['timeframe'], 'this_month')
+
+
+class UpSyncEndpointsTests(TestCase):
+	def setUp(self):
+		cache.clear()
+		self.client = APIClient()
+		admin = User.objects.create_user(
+			phone='231770555555',
+			name='Admin',
+			email='admin@example.com',
+			password='pass',
+			role=UserRole.ADMIN.value,
+		)
+		self.client.force_authenticate(user=admin)
+
+		county = County.objects.create(name='Montserrado', status=StatusEnum.APPROVED.value)
+		district = District.objects.create(county=county, name='Careysburg', status=StatusEnum.APPROVED.value)
+		self.school = School.objects.create(district=district, name='Afrilearn Academy', status=StatusEnum.APPROVED.value)
+
+		lesson_file = SimpleUploadedFile('lesson.mp4', b'lesson-bytes', content_type='video/mp4')
+		self.subject = Subject.objects.create(
+			name='Math',
+			grade=StudentLevel.GRADE3.value,
+			status=StatusEnum.APPROVED.value,
+		)
+		self.topic = Topic.objects.create(subject=self.subject, name='Numbers')
+		self.period = Period.objects.create(name='January', start_month=1, end_month=1)
+		self.lesson = LessonResource.objects.create(
+			subject=self.subject,
+			topic=self.topic,
+			period=self.period,
+			title='Counting Numbers',
+			type=ContentType.VIDEO.value,
+			status=StatusEnum.APPROVED.value,
+			resource=lesson_file,
+		)
+
+		self.game = GameModel.objects.create(
+			name='Letter Match',
+			type='WORD_PUZZLE',
+			correct_answer='A',
+			status=StatusEnum.APPROVED.value,
+		)
+
+		self.general_assessment = GeneralAssessment.objects.create(
+			title='General Assessment',
+			marks=10.0,
+			status=StatusEnum.APPROVED.value,
+		)
+
+	def test_upsync_students_creates_new_student(self):
+		client_uuid = uuid.uuid4()
+		resp = self.client.post(
+			'/api-v1/upsync/students/',
+			{
+				'items': [
+					{
+						'sync_uuid': str(client_uuid),
+						'phone': '231770111111',
+						'name': 'Offline Student',
+						'school_id': self.school.id,
+						'grade': StudentLevel.GRADE3.value,
+					}
+				]
+			},
+			format='json',
+		)
+		self.assertEqual(resp.status_code, 200)
+		payload = resp.json()
+		self.assertEqual(payload['created'], 1)
+		self.assertEqual(payload['errors'], 0)
+		self.assertEqual(payload['results'][0]['status'], 'ok')
+		self.assertEqual(payload['results'][0]['server_sync_uuid'], str(client_uuid))
+
+		user = User.objects.get(phone='231770111111')
+		self.assertEqual(str(user.sync_uuid), str(client_uuid))
+		self.assertTrue(Student.objects.filter(profile=user).exists())
+
+	def test_upsync_students_maps_by_phone_and_keeps_central_uuid(self):
+		existing_user = User.objects.create_user(
+			phone='231770222222',
+			name='Existing Student',
+			email='existing@example.com',
+			password='pass',
+			role=UserRole.STUDENT.value,
+		)
+		Student.objects.create(profile=existing_user, school=self.school, status=StatusEnum.APPROVED.value)
+		canonical_uuid = str(existing_user.sync_uuid)
+
+		client_uuid = uuid.uuid4()
+		resp = self.client.post(
+			'/api-v1/upsync/students/',
+			{
+				'items': [
+					{
+						'sync_uuid': str(client_uuid),
+						'phone': existing_user.phone,
+						'name': 'Existing Student Updated',
+						'school_id': self.school.id,
+					}
+				]
+			},
+			format='json',
+		)
+		self.assertEqual(resp.status_code, 200)
+		payload = resp.json()
+		self.assertEqual(payload['mapped'], 1)
+		self.assertEqual(payload['created'], 0)
+		self.assertEqual(payload['errors'], 0)
+		self.assertEqual(payload['results'][0]['server_sync_uuid'], canonical_uuid)
+		self.assertNotEqual(payload['results'][0]['client_sync_uuid'], canonical_uuid)
+
+		existing_user.refresh_from_db()
+		self.assertEqual(str(existing_user.sync_uuid), canonical_uuid)
+
+	def test_upsync_taken_lessons_is_idempotent_and_awards_video_points(self):
+		student_user = User.objects.create_user(
+			phone='231770333333',
+			name='Student',
+			email='student333@example.com',
+			password='pass',
+			role=UserRole.STUDENT.value,
+		)
+		student = Student.objects.create(
+			profile=student_user,
+			school=self.school,
+			grade=StudentLevel.GRADE3.value,
+			status=StatusEnum.APPROVED.value,
+		)
+
+		occurred_at = timezone.now().isoformat()
+		resp1 = self.client.post(
+			'/api-v1/upsync/taken-lessons/',
+			{'items': [{'student_sync_uuid': str(student_user.sync_uuid), 'lesson_id': self.lesson.id, 'occurred_at': occurred_at}]},
+			format='json',
+		)
+		self.assertEqual(resp1.status_code, 200)
+		self.assertEqual(resp1.json()['created'], 1)
+		self.assertEqual(TakeLesson.objects.filter(student=student, lesson=self.lesson).count(), 1)
+
+		student.refresh_from_db()
+		self.assertEqual(student.points, VIDEO_WATCH_POINTS)
+
+		resp2 = self.client.post(
+			'/api-v1/upsync/taken-lessons/',
+			{'items': [{'student_sync_uuid': str(student_user.sync_uuid), 'lesson_id': self.lesson.id, 'occurred_at': occurred_at}]},
+			format='json',
+		)
+		self.assertEqual(resp2.status_code, 200)
+		self.assertEqual(resp2.json()['created'], 0)
+		self.assertEqual(TakeLesson.objects.filter(student=student, lesson=self.lesson).count(), 1)
+		student.refresh_from_db()
+		self.assertEqual(student.points, VIDEO_WATCH_POINTS)
+
+	def test_upsync_general_assessment_solution_and_attachment(self):
+		student_user = User.objects.create_user(
+			phone='231770444444',
+			name='Student 444',
+			email='student444@example.com',
+			password='pass',
+			role=UserRole.STUDENT.value,
+		)
+		student = Student.objects.create(
+			profile=student_user,
+			school=self.school,
+			grade=StudentLevel.GRADE3.value,
+			status=StatusEnum.APPROVED.value,
+		)
+
+		resp = self.client.post(
+			'/api-v1/upsync/general-assessment-solutions/',
+			{
+				'items': [
+					{
+						'student_sync_uuid': str(student_user.sync_uuid),
+						'assessment_id': self.general_assessment.id,
+						'solution': 'My offline answer',
+						'submitted_at': timezone.now().isoformat(),
+					}
+				]
+			},
+			format='json',
+		)
+		self.assertEqual(resp.status_code, 200)
+		self.assertEqual(resp.json()['created'], 1)
+		self.assertEqual(AssessmentSolution.objects.filter(assessment=self.general_assessment, student=student).count(), 1)
+
+		student.refresh_from_db()
+		self.assertEqual(student.points, ASSESSMENT_SUBMISSION_POINTS)
+
+		upload = SimpleUploadedFile('answer.txt', b'hello', content_type='text/plain')
+		attach_resp = self.client.post(
+			'/api-v1/upsync/general-assessment-solutions/attachment/',
+			{
+				'student_sync_uuid': str(student_user.sync_uuid),
+				'assessment_id': self.general_assessment.id,
+				'attachment': upload,
+			},
+			format='multipart',
+		)
+		self.assertEqual(attach_resp.status_code, 200)
+		sol = AssessmentSolution.objects.filter(assessment=self.general_assessment, student=student).first()
+		self.assertIsNotNone(sol)
+		self.assertTrue(bool(getattr(sol, 'attachment', None)))
+		self.assertTrue(bool(getattr(sol.attachment, 'name', '') or ''))
+
+	def test_upsync_gameplays_is_idempotent_and_awards_points(self):
+		student_user = User.objects.create_user(
+			phone='231770555001',
+			name='Gamer Student',
+			email='gamer@example.com',
+			password='pass',
+			role=UserRole.STUDENT.value,
+		)
+		student = Student.objects.create(
+			profile=student_user,
+			school=self.school,
+			grade=StudentLevel.GRADE3.value,
+			status=StatusEnum.APPROVED.value,
+		)
+
+		played_at = timezone.now().isoformat()
+		resp1 = self.client.post(
+			'/api-v1/upsync/gameplays/',
+			{
+				'items': [
+					{
+						'student_sync_uuid': str(student_user.sync_uuid),
+						'game_id': self.game.id,
+						'last_played_at': played_at,
+					}
+				]
+			},
+			format='json',
+		)
+		self.assertEqual(resp1.status_code, 200)
+		self.assertEqual(resp1.json()['created'], 1)
+		self.assertEqual(GamePlay.objects.filter(student=student, game=self.game).count(), 1)
+		student.refresh_from_db()
+		self.assertEqual(student.points, GAME_PLAY_POINTS)
+
+		resp2 = self.client.post(
+			'/api-v1/upsync/gameplays/',
+			{
+				'items': [
+					{
+						'student_sync_uuid': str(student_user.sync_uuid),
+						'game_id': self.game.id,
+						'last_played_at': played_at,
+					}
+				]
+			},
+			format='json',
+		)
+		self.assertEqual(resp2.status_code, 200)
+		self.assertEqual(resp2.json()['created'], 0)
+		student.refresh_from_db()
+		self.assertEqual(student.points, GAME_PLAY_POINTS)
+
+	def test_upsync_login_streaks_merges_safely(self):
+		student_user = User.objects.create_user(
+			phone='231770555002',
+			name='Streak Student',
+			email='streak@example.com',
+			password='pass',
+			role=UserRole.STUDENT.value,
+		)
+		student = Student.objects.create(
+			profile=student_user,
+			school=self.school,
+			grade=StudentLevel.GRADE3.value,
+			status=StatusEnum.APPROVED.value,
+		)
+
+		day1 = timezone.localdate() - timedelta(days=1)
+		day2 = timezone.localdate()
+
+		resp1 = self.client.post(
+			'/api-v1/upsync/login-streaks/',
+			{
+				'items': [
+					{
+						'student_sync_uuid': str(student_user.sync_uuid),
+						'last_login_activity_date': day1.isoformat(),
+						'current_login_streak': 3,
+						'max_login_streak': 5,
+					}
+				]
+			},
+			format='json',
+		)
+		self.assertEqual(resp1.status_code, 200)
+		self.assertEqual(resp1.json()['updated'], 1)
+		student.refresh_from_db()
+		self.assertEqual(student.last_login_activity_date, day1)
+		self.assertEqual(student.current_login_streak, 3)
+		self.assertEqual(student.max_login_streak, 5)
+
+		# Next day should extend streak even if the box reports a smaller current streak.
+		resp2 = self.client.post(
+			'/api-v1/upsync/login-streaks/',
+			{
+				'items': [
+					{
+						'student_sync_uuid': str(student_user.sync_uuid),
+						'last_login_activity_date': day2.isoformat(),
+						'current_login_streak': 1,
+						'max_login_streak': 1,
+					}
+				]
+			},
+			format='json',
+		)
+		self.assertEqual(resp2.status_code, 200)
+		student.refresh_from_db()
+		self.assertEqual(student.last_login_activity_date, day2)
+		self.assertEqual(student.current_login_streak, 4)
+		self.assertEqual(student.max_login_streak, 5)

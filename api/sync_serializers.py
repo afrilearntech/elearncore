@@ -4,7 +4,7 @@ from typing import Any
 
 from rest_framework import serializers
 
-from accounts.models import County, District, School
+from accounts.models import County, District, School, Student, User
 from content.models import (
     Subject,
     Topic,
@@ -294,6 +294,54 @@ class SyncSchoolSerializer(serializers.ModelSerializer):
             "id",
             "district_id",
             "name",
+            "status",
+            "moderation_comment",
+            "created_at",
+            "updated_at",
+        ]
+
+
+class SyncStudentUserSerializer(serializers.ModelSerializer):
+    """Student user downsync payload.
+
+    WARNING: includes password hash for offline authentication.
+    Endpoint access must be restricted.
+    """
+
+    password_hash = serializers.CharField(source="password")
+
+    class Meta:
+        model = User
+        fields = [
+            "sync_uuid",
+            "phone",
+            "email",
+            "name",
+            "role",
+            "is_active",
+            "deleted",
+            "dob",
+            "gender",
+            "password_hash",
+            "created_at",
+            "updated_at",
+        ]
+
+
+class SyncStudentSerializer(serializers.ModelSerializer):
+    profile_sync_uuid = serializers.UUIDField(source="profile.sync_uuid", read_only=True)
+
+    class Meta:
+        model = Student
+        fields = [
+            "profile_sync_uuid",
+            "student_id",
+            "school_id",
+            "grade",
+            "points",
+            "current_login_streak",
+            "max_login_streak",
+            "last_login_activity_date",
             "status",
             "moderation_comment",
             "created_at",

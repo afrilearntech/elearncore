@@ -1,3 +1,5 @@
+import uuid
+
 from django.db import models
 from datetime import timedelta
 
@@ -22,6 +24,7 @@ class TimestampedModel(models.Model):
 
 class User(AbstractBaseUser, PermissionsMixin):
     '''Custom User model for the application'''
+    sync_uuid = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
     email = models.EmailField(max_length=50, unique=True, null=True, blank=True)
     phone = models.CharField(max_length=25, unique=True) #we sometimes pass the email as phone
     name = models.CharField(max_length=255)

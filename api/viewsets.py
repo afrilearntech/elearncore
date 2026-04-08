@@ -4010,6 +4010,7 @@ class LoginViewSet(viewsets.ViewSet):
 		payload = {
 			"user": {
 				"id": user.id,
+				"sync_uuid": str(getattr(user, "sync_uuid", None)) if getattr(user, "sync_uuid", None) else None,
 				"name": getattr(user, "name", None),
 				"phone": getattr(user, "phone", None),
 				"email": getattr(user, "email", None),

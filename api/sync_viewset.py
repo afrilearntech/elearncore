@@ -12,8 +12,8 @@ from rest_framework import permissions, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
 
-from elearncore.sysutils.constants import Status as StatusEnum
-from accounts.models import County, District, School
+from elearncore.sysutils.constants import Status as StatusEnum, UserRole
+from accounts.models import County, District, School, Student, User
 from content.models import (
     Subject,
     Topic,
@@ -27,6 +27,8 @@ from content.models import (
 )
 
 from .sync_serializers import (
+    SyncStudentSerializer,
+    SyncStudentUserSerializer,
     SyncSubjectSerializer,
     SyncTopicSerializer,
     SyncPeriodSerializer,
@@ -40,6 +42,15 @@ from .sync_serializers import (
     SyncDistrictSerializer,
     SyncSchoolSerializer,
 )
+
+
+_ALLOWED_ACCOUNT_SYNC_ROLES = {
+    UserRole.ADMIN.value,
+    UserRole.CONTENTCREATOR.value,
+    UserRole.CONTENTVALIDATOR.value,
+    UserRole.TEACHER.value,
+    UserRole.HEADTEACHER.value,
+}
 
 
 @dataclass(frozen=True)
@@ -101,6 +112,8 @@ class SyncViewSet(viewsets.ViewSet):
     - GET /api-v1/sync/counties/
     - GET /api-v1/sync/districts/
     - GET /api-v1/sync/schools/
+    - GET /api-v1/sync/student-users/  (student accounts; includes password hashes)
+    - GET /api-v1/sync/students/
     - GET /api-v1/sync/topics/
     - GET /api-v1/sync/periods/
     - GET /api-v1/sync/lessons/
@@ -124,6 +137,12 @@ class SyncViewSet(viewsets.ViewSet):
     """
 
     permission_classes = [permissions.IsAuthenticated]
+
+    def _require_account_sync_role(self, request):
+        user = getattr(request, "user", None)
+        if not user or getattr(user, "role", None) not in _ALLOWED_ACCOUNT_SYNC_ROLES:
+            return Response({"detail": "Not authorized for account sync."}, status=403)
+        return None
 
     def _sync_list(
         self,
@@ -231,6 +250,38 @@ class SyncViewSet(viewsets.ViewSet):
             serializer_class=SyncSchoolSerializer,
             has_status=True,
             base_queryset=School.objects.select_related("district").all(),
+        )
+
+    @action(detail=False, methods=["get"], url_path="student-users")
+    def student_users(self, request):
+        deny = self._require_account_sync_role(request)
+        if deny:
+            return deny
+
+        return self._sync_list(
+            request=request,
+            resource="student_users",
+            model=User,
+            serializer_class=SyncStudentUserSerializer,
+            has_status=False,
+            base_queryset=User.objects.filter(role=UserRole.STUDENT.value),
+        )
+
+    @action(detail=False, methods=["get"], url_path="students")
+    def students(self, request):
+        deny = self._require_account_sync_role(request)
+        if deny:
+            return deny
+
+        return self._sync_list(
+            request=request,
+            resource="students",
+            model=Student,
+            serializer_class=SyncStudentSerializer,
+            has_status=False,
+            base_queryset=Student.objects.select_related("profile", "school").filter(
+                profile__role=UserRole.STUDENT.value
+            ),
         )
 
     @action(detail=False, methods=["get"], url_path="topics")

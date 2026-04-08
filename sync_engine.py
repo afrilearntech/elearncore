@@ -9,7 +9,7 @@ from typing import Any
 
 import requests
 
-from elearncore.sysutils.constants import Status as StatusEnum
+from elearncore.sysutils.constants import Status as StatusEnum, UserRole
 
 from dotenv import load_dotenv, find_dotenv
 
@@ -49,6 +49,7 @@ STORE_TOKEN_IN_STATE = (os.getenv("SYNC_STORE_TOKEN", "true").strip().lower() no
 REQUEST_TIMEOUT = float(os.getenv("SYNC_TIMEOUT", "120"))
 VERIFY_SSL = (os.getenv("SYNC_VERIFY_SSL", "true").strip().lower() not in {"0", "false", "no"})
 PAGE_LIMIT = int(os.getenv("SYNC_PAGE_LIMIT", "500"))
+UPSYNC_BATCH_SIZE = int(os.getenv("SYNC_UPSYNC_BATCH_SIZE", "200"))
 DOWNLOAD_THREADS = int(os.getenv("SYNC_DOWNLOAD_THREADS", "6"))
 
 # Where to store state + (optionally) other downloaded artifacts.
@@ -204,6 +205,51 @@ def _request_json(
             raise RuntimeError(f"Re-authentication failed: {e}") from e
 
         res = session.request(method, url, timeout=REQUEST_TIMEOUT, verify=VERIFY_SSL, **kwargs)
+
+    res.raise_for_status()
+    return res.json() if res.content else {}
+
+
+def _request_multipart_json(
+    session: requests.Session,
+    *,
+    method: str,
+    url: str,
+    data: dict[str, Any],
+    file_field_name: str,
+    file_path: str,
+    state: dict,
+    retry_on_unauthorized: bool = True,
+) -> dict[str, Any]:
+    """Make a multipart request (with a single file) and return JSON.
+
+    Includes the same single auth-refresh retry behavior as `_request_json`.
+    """
+
+    def _do_request() -> requests.Response:
+        with open(file_path, "rb") as f:
+            files = {file_field_name: f}
+            return session.request(
+                method,
+                url,
+                data=data,
+                files=files,
+                timeout=REQUEST_TIMEOUT,
+                verify=VERIFY_SSL,
+            )
+
+    res = _do_request()
+    if retry_on_unauthorized and res.status_code == 401 and (SYNC_LOGIN_IDENTIFIER and SYNC_LOGIN_PASSWORD):
+        log("Token expired/unauthorized; re-authenticating...")
+        try:
+            token = _login_and_get_token(session)
+            _set_session_token(session, token)
+            _store_token(state, token)
+            save_state(state)
+        except Exception as e:
+            raise RuntimeError(f"Re-authentication failed: {e}") from e
+
+        res = _do_request()
 
     res.raise_for_status()
     return res.json() if res.content else {}
@@ -396,6 +442,616 @@ def _collect_downloads(*, media_root: Path, items: list[dict[str, Any]]) -> list
     return list(dedup.values())
 
 
+def perform_upsync(*, session: requests.Session, state: dict, media_root: Path) -> None:
+    """Push locally-created usage data from the offline box to central."""
+
+    if not API_BASE_URL:
+        raise RuntimeError("SYNC_API_BASE_URL is required (must include /api-v1).")
+
+    from django.db.models import Q  # noqa: WPS433
+    from django.utils.dateparse import parse_datetime  # noqa: WPS433
+    from django.utils import timezone  # noqa: WPS433
+
+    from accounts.models import Student, User  # noqa: WPS433
+    from content.models import (  # noqa: WPS433
+        AssessmentSolution,
+        GamePlay,
+        GeneralAssessmentGrade,
+        LessonAssessmentGrade,
+        LessonAssessmentSolution,
+        TakeLesson,
+    )
+
+    def _parse_dt(value):
+        if value in (None, ""):
+            return None
+        dt = parse_datetime(str(value))
+        if dt is None:
+            return None
+        if timezone.is_naive(dt):
+            dt = timezone.make_aware(dt, timezone=timezone.utc)
+        return dt
+
+    def _dt_iso(dt):
+        if dt is None:
+            return None
+        try:
+            return dt.isoformat()
+        except Exception:
+            return str(dt)
+
+    def _post_batch(endpoint: str, items: list[dict[str, Any]]) -> dict[str, Any]:
+        url = f"{API_BASE_URL}/upsync/{endpoint}/"
+        return _request_json(session, method="POST", url=url, json={"items": items}, state=state)
+
+    def _upload_attachment(*, endpoint: str, data: dict[str, Any], file_path: Path) -> dict[str, Any]:
+        url = f"{API_BASE_URL}/upsync/{endpoint}/"
+        return _request_multipart_json(
+            session,
+            method="POST",
+            url=url,
+            data=data,
+            file_field_name="attachment",
+            file_path=str(file_path),
+            state=state,
+        )
+
+    upsync = state.setdefault("upsync", {})
+    cursors: dict[str, str | None] = upsync.setdefault("cursors", {})
+    attachment_hashes: dict[str, str] = upsync.setdefault("attachment_hashes", {})
+
+    cutoff_dt = timezone.now()
+    cutoff_iso = cutoff_dt.isoformat()
+    batch_size = max(1, int(UPSYNC_BATCH_SIZE))
+
+    def _cursor_dt(resource: str):
+        return _parse_dt(cursors.get(resource))
+
+    def _window_filter(*, qs, cursor_dt):
+        if cursor_dt is not None:
+            qs = qs.filter(updated_at__gte=cursor_dt)
+        return qs.filter(updated_at__lt=cutoff_dt)
+
+    def _advance(resource: str) -> None:
+        cursors[resource] = cutoff_iso
+        save_state(state)
+
+    log(f"Upsync cutoff: {cutoff_iso}")
+
+    # --- students (identity prerequisite)
+    students_resource = "students"
+    student_cursor = _cursor_dt(students_resource)
+    student_qs = Student.objects.select_related("profile").filter(profile__role=UserRole.STUDENT.value)
+    if student_cursor is not None:
+        student_qs = student_qs.filter(Q(updated_at__gte=student_cursor) | Q(profile__updated_at__gte=student_cursor))
+    # Freeze a consistent window.
+    student_qs = student_qs.filter(updated_at__lt=cutoff_dt, profile__updated_at__lt=cutoff_dt).order_by("updated_at", "id")
+
+    student_errors = 0
+    batch: list[dict[str, Any]] = []
+    try:
+        for s in student_qs.iterator(chunk_size=batch_size):
+            u = getattr(s, "profile", None)
+            if not u:
+                continue
+            if not getattr(u, "sync_uuid", None) or not getattr(u, "phone", None) or not getattr(u, "name", None):
+                continue
+            batch.append(
+                {
+                    "sync_uuid": str(u.sync_uuid),
+                    "phone": u.phone,
+                    "name": u.name,
+                    "email": getattr(u, "email", None) or None,
+                    "dob": str(getattr(u, "dob", "") or "") or None,
+                    "gender": getattr(u, "gender", None) or None,
+                    "grade": getattr(s, "grade", None) or None,
+                    "school_id": getattr(s, "school_id", None),
+                }
+            )
+            if len(batch) >= batch_size:
+                resp = _post_batch("students", batch)
+                student_errors += int(resp.get("errors") or 0)
+                # Apply canonical UUID mappings.
+                for r in (resp.get("results") or []):
+                    if not isinstance(r, dict) or r.get("status") != "ok":
+                        continue
+                    c_uuid = r.get("client_sync_uuid")
+                    s_uuid = r.get("server_sync_uuid")
+                    if c_uuid and s_uuid and c_uuid != s_uuid:
+                        try:
+                            user = User.objects.filter(sync_uuid=c_uuid).first()
+                            if user is not None:
+                                user.sync_uuid = s_uuid
+                                user.save(update_fields=["sync_uuid", "updated_at"])
+                        except Exception:
+                            # Best-effort; if this fails, the next run will retry.
+                            pass
+                batch = []
+
+        if batch:
+            resp = _post_batch("students", batch)
+            student_errors += int(resp.get("errors") or 0)
+            for r in (resp.get("results") or []):
+                if not isinstance(r, dict) or r.get("status") != "ok":
+                    continue
+                c_uuid = r.get("client_sync_uuid")
+                s_uuid = r.get("server_sync_uuid")
+                if c_uuid and s_uuid and c_uuid != s_uuid:
+                    try:
+                        user = User.objects.filter(sync_uuid=c_uuid).first()
+                        if user is not None:
+                            user.sync_uuid = s_uuid
+                            user.save(update_fields=["sync_uuid", "updated_at"])
+                    except Exception:
+                        pass
+
+    except requests.exceptions.HTTPError as e:
+        # Backwards-compatible: allow old servers without upsync routes.
+        status_code = getattr(getattr(e, "response", None), "status_code", None)
+        if status_code == 404:
+            log("Upsync endpoints not found (404). Skipping upsync.")
+            return
+        raise
+
+    if student_errors:
+        log(f"Upsync students had {student_errors} errors; not advancing cursor.")
+        return
+
+    _advance(students_resource)
+    log("Upsync students: ok")
+
+    # --- login streaks
+    streak_resource = "login_streaks"
+    streak_cursor_dt = _cursor_dt(streak_resource)
+    streak_cursor_date = streak_cursor_dt.date() if streak_cursor_dt is not None else None
+    cutoff_date = timezone.localdate()
+
+    streak_qs = (
+        Student.objects
+        .select_related("profile")
+        .filter(profile__role=UserRole.STUDENT.value)
+        .exclude(last_login_activity_date__isnull=True)
+        .filter(last_login_activity_date__lte=cutoff_date)
+        .order_by("last_login_activity_date", "id")
+    )
+    if streak_cursor_date is not None:
+        # Use >= to avoid missing same-day activity if upsync runs multiple times.
+        streak_qs = streak_qs.filter(last_login_activity_date__gte=streak_cursor_date)
+
+    streak_errors = 0
+    skip_streaks = False
+    batch = []
+    for s in streak_qs.iterator(chunk_size=batch_size):
+        u = getattr(s, "profile", None)
+        if not u or not getattr(u, "sync_uuid", None):
+            continue
+        last_day = getattr(s, "last_login_activity_date", None)
+        if not last_day:
+            continue
+        batch.append(
+            {
+                "student_sync_uuid": str(u.sync_uuid),
+                "last_login_activity_date": str(last_day),
+                "current_login_streak": int(getattr(s, "current_login_streak", 0) or 0),
+                "max_login_streak": int(getattr(s, "max_login_streak", 0) or 0),
+            }
+        )
+        if len(batch) >= batch_size:
+            try:
+                resp = _post_batch("login-streaks", batch)
+            except requests.exceptions.HTTPError as e:
+                status_code = getattr(getattr(e, "response", None), "status_code", None)
+                if status_code == 404:
+                    log("Upsync login-streaks endpoint not found (404). Skipping login streak upsync.")
+                    skip_streaks = True
+                    batch = []
+                    break
+                raise
+            streak_errors += int(resp.get("errors") or 0)
+            batch = []
+
+    if (not skip_streaks) and batch:
+        try:
+            resp = _post_batch("login-streaks", batch)
+        except requests.exceptions.HTTPError as e:
+            status_code = getattr(getattr(e, "response", None), "status_code", None)
+            if status_code == 404:
+                log("Upsync login-streaks endpoint not found (404). Skipping login streak upsync.")
+                skip_streaks = True
+                resp = None
+            else:
+                raise
+        if resp is not None:
+            streak_errors += int(resp.get("errors") or 0)
+
+    if skip_streaks:
+        pass
+    elif streak_errors:
+        log(f"Upsync login_streaks had {streak_errors} errors; not advancing cursor.")
+    else:
+        _advance(streak_resource)
+        log("Upsync login_streaks: ok")
+
+    # --- taken lessons
+    take_resource = "taken_lessons"
+    take_cursor = _cursor_dt(take_resource)
+    take_qs = TakeLesson.objects.select_related("student__profile").all()
+    take_qs = _window_filter(qs=take_qs, cursor_dt=take_cursor).order_by("updated_at", "id")
+
+    take_errors = 0
+    batch = []
+    for tl in take_qs.iterator(chunk_size=batch_size):
+        stu = getattr(tl, "student", None)
+        u = getattr(stu, "profile", None) if stu is not None else None
+        if not u or not getattr(u, "sync_uuid", None):
+            continue
+        batch.append(
+            {
+                "student_sync_uuid": str(u.sync_uuid),
+                "lesson_id": getattr(tl, "lesson_id", None),
+                "occurred_at": _dt_iso(getattr(tl, "created_at", None)),
+            }
+        )
+        if len(batch) >= batch_size:
+            resp = _post_batch("taken-lessons", batch)
+            take_errors += int(resp.get("errors") or 0)
+            batch = []
+    if batch:
+        resp = _post_batch("taken-lessons", batch)
+        take_errors += int(resp.get("errors") or 0)
+
+    if take_errors:
+        log(f"Upsync taken_lessons had {take_errors} errors; not advancing cursor.")
+    else:
+        _advance(take_resource)
+        log("Upsync taken_lessons: ok")
+
+    # --- gameplays
+    gp_resource = "gameplays"
+    gp_cursor = _cursor_dt(gp_resource)
+    gp_qs = GamePlay.objects.select_related("student__profile").all()
+    gp_qs = _window_filter(qs=gp_qs, cursor_dt=gp_cursor).order_by("updated_at", "id")
+
+    gp_errors = 0
+    skip_gameplays = False
+    batch = []
+    for gp in gp_qs.iterator(chunk_size=batch_size):
+        stu = getattr(gp, "student", None)
+        u = getattr(stu, "profile", None) if stu is not None else None
+        if not u or not getattr(u, "sync_uuid", None):
+            continue
+        batch.append(
+            {
+                "student_sync_uuid": str(u.sync_uuid),
+                "game_id": getattr(gp, "game_id", None),
+                "last_played_at": _dt_iso(getattr(gp, "last_played_at", None)),
+            }
+        )
+        if len(batch) >= batch_size:
+            try:
+                resp = _post_batch("gameplays", batch)
+            except requests.exceptions.HTTPError as e:
+                status_code = getattr(getattr(e, "response", None), "status_code", None)
+                if status_code == 404:
+                    log("Upsync gameplays endpoint not found (404). Skipping gameplays upsync.")
+                    skip_gameplays = True
+                    batch = []
+                    break
+                raise
+            gp_errors += int(resp.get("errors") or 0)
+            batch = []
+
+    if (not skip_gameplays) and batch:
+        try:
+            resp = _post_batch("gameplays", batch)
+        except requests.exceptions.HTTPError as e:
+            status_code = getattr(getattr(e, "response", None), "status_code", None)
+            if status_code == 404:
+                log("Upsync gameplays endpoint not found (404). Skipping gameplays upsync.")
+                skip_gameplays = True
+                resp = None
+            else:
+                raise
+        if resp is not None:
+            gp_errors += int(resp.get("errors") or 0)
+
+    if skip_gameplays:
+        pass
+    elif gp_errors:
+        log(f"Upsync gameplays had {gp_errors} errors; not advancing cursor.")
+    else:
+        _advance(gp_resource)
+        log("Upsync gameplays: ok")
+
+    # --- general assessment solutions + attachments
+    ga_sol_resource = "general_assessment_solutions"
+    ga_sol_cursor = _cursor_dt(ga_sol_resource)
+    ga_sol_qs = AssessmentSolution.objects.select_related("student__profile").all()
+    ga_sol_qs = _window_filter(qs=ga_sol_qs, cursor_dt=ga_sol_cursor).order_by("updated_at", "id")
+
+    ga_sol_errors = 0
+    batch_items: list[dict[str, Any]] = []
+    batch_objs: list[AssessmentSolution] = []
+    for sol in ga_sol_qs.iterator(chunk_size=batch_size):
+        stu = getattr(sol, "student", None)
+        u = getattr(stu, "profile", None) if stu is not None else None
+        if not u or not getattr(u, "sync_uuid", None):
+            continue
+        batch_objs.append(sol)
+        batch_items.append(
+            {
+                "student_sync_uuid": str(u.sync_uuid),
+                "assessment_id": getattr(sol, "assessment_id", None),
+                "solution": getattr(sol, "solution", "") or "",
+                "submitted_at": _dt_iso(getattr(sol, "submitted_at", None)),
+            }
+        )
+        if len(batch_items) >= batch_size:
+            resp = _post_batch("general-assessment-solutions", batch_items)
+            ga_sol_errors += int(resp.get("errors") or 0)
+            # Attachments (best effort but blocks cursor advance on HTTP failures).
+            for obj in batch_objs:
+                try:
+                    name = getattr(getattr(obj, "attachment", None), "name", "") or ""
+                    if not name:
+                        continue
+                    file_path = _safe_local_path(media_root, name)
+                    if not file_path.exists():
+                        log(f"WARN: missing attachment file: {file_path}")
+                        continue
+                    h = file_hash(str(file_path)) or ""
+                    key = f"ga:{obj.assessment_id}:{obj.student_id}"
+                    if h and attachment_hashes.get(key) == h:
+                        continue
+                    stu = getattr(obj, "student", None)
+                    u = getattr(stu, "profile", None) if stu is not None else None
+                    if not u or not getattr(u, "sync_uuid", None):
+                        continue
+                    _upload_attachment(
+                        endpoint="general-assessment-solutions/attachment",
+                        data={
+                            "student_sync_uuid": str(u.sync_uuid),
+                            "assessment_id": str(getattr(obj, "assessment_id", "")),
+                        },
+                        file_path=file_path,
+                    )
+                    if h:
+                        attachment_hashes[key] = h
+                    save_state(state)
+                except requests.exceptions.HTTPError as e:
+                    ga_sol_errors += 1
+                    log(f"Attachment upload failed (general assessment): {e}")
+                except Exception as e:
+                    ga_sol_errors += 1
+                    log(f"Attachment upload error (general assessment): {e}")
+
+            batch_items = []
+            batch_objs = []
+
+    if batch_items:
+        resp = _post_batch("general-assessment-solutions", batch_items)
+        ga_sol_errors += int(resp.get("errors") or 0)
+        for obj in batch_objs:
+            try:
+                name = getattr(getattr(obj, "attachment", None), "name", "") or ""
+                if not name:
+                    continue
+                file_path = _safe_local_path(media_root, name)
+                if not file_path.exists():
+                    log(f"WARN: missing attachment file: {file_path}")
+                    continue
+                h = file_hash(str(file_path)) or ""
+                key = f"ga:{obj.assessment_id}:{obj.student_id}"
+                if h and attachment_hashes.get(key) == h:
+                    continue
+                stu = getattr(obj, "student", None)
+                u = getattr(stu, "profile", None) if stu is not None else None
+                if not u or not getattr(u, "sync_uuid", None):
+                    continue
+                _upload_attachment(
+                    endpoint="general-assessment-solutions/attachment",
+                    data={
+                        "student_sync_uuid": str(u.sync_uuid),
+                        "assessment_id": str(getattr(obj, "assessment_id", "")),
+                    },
+                    file_path=file_path,
+                )
+                if h:
+                    attachment_hashes[key] = h
+                save_state(state)
+            except requests.exceptions.HTTPError as e:
+                ga_sol_errors += 1
+                log(f"Attachment upload failed (general assessment): {e}")
+            except Exception as e:
+                ga_sol_errors += 1
+                log(f"Attachment upload error (general assessment): {e}")
+
+    if ga_sol_errors:
+        log(f"Upsync general_assessment_solutions had {ga_sol_errors} errors; not advancing cursor.")
+    else:
+        _advance(ga_sol_resource)
+        log("Upsync general_assessment_solutions: ok")
+
+    # --- lesson assessment solutions + attachments
+    la_sol_resource = "lesson_assessment_solutions"
+    la_sol_cursor = _cursor_dt(la_sol_resource)
+    la_sol_qs = LessonAssessmentSolution.objects.select_related("student__profile").all()
+    la_sol_qs = _window_filter(qs=la_sol_qs, cursor_dt=la_sol_cursor).order_by("updated_at", "id")
+
+    la_sol_errors = 0
+    batch_items = []
+    batch_objs = []
+    for sol in la_sol_qs.iterator(chunk_size=batch_size):
+        stu = getattr(sol, "student", None)
+        u = getattr(stu, "profile", None) if stu is not None else None
+        if not u or not getattr(u, "sync_uuid", None):
+            continue
+        batch_objs.append(sol)
+        batch_items.append(
+            {
+                "student_sync_uuid": str(u.sync_uuid),
+                "lesson_assessment_id": getattr(sol, "lesson_assessment_id", None),
+                "solution": getattr(sol, "solution", "") or "",
+                "submitted_at": _dt_iso(getattr(sol, "submitted_at", None)),
+            }
+        )
+        if len(batch_items) >= batch_size:
+            resp = _post_batch("lesson-assessment-solutions", batch_items)
+            la_sol_errors += int(resp.get("errors") or 0)
+            for obj in batch_objs:
+                try:
+                    name = getattr(getattr(obj, "attachment", None), "name", "") or ""
+                    if not name:
+                        continue
+                    file_path = _safe_local_path(media_root, name)
+                    if not file_path.exists():
+                        log(f"WARN: missing attachment file: {file_path}")
+                        continue
+                    h = file_hash(str(file_path)) or ""
+                    key = f"la:{obj.lesson_assessment_id}:{obj.student_id}"
+                    if h and attachment_hashes.get(key) == h:
+                        continue
+                    stu = getattr(obj, "student", None)
+                    u = getattr(stu, "profile", None) if stu is not None else None
+                    if not u or not getattr(u, "sync_uuid", None):
+                        continue
+                    _upload_attachment(
+                        endpoint="lesson-assessment-solutions/attachment",
+                        data={
+                            "student_sync_uuid": str(u.sync_uuid),
+                            "lesson_assessment_id": str(getattr(obj, "lesson_assessment_id", "")),
+                        },
+                        file_path=file_path,
+                    )
+                    if h:
+                        attachment_hashes[key] = h
+                    save_state(state)
+                except requests.exceptions.HTTPError as e:
+                    la_sol_errors += 1
+                    log(f"Attachment upload failed (lesson assessment): {e}")
+                except Exception as e:
+                    la_sol_errors += 1
+                    log(f"Attachment upload error (lesson assessment): {e}")
+
+            batch_items = []
+            batch_objs = []
+
+    if batch_items:
+        resp = _post_batch("lesson-assessment-solutions", batch_items)
+        la_sol_errors += int(resp.get("errors") or 0)
+        for obj in batch_objs:
+            try:
+                name = getattr(getattr(obj, "attachment", None), "name", "") or ""
+                if not name:
+                    continue
+                file_path = _safe_local_path(media_root, name)
+                if not file_path.exists():
+                    log(f"WARN: missing attachment file: {file_path}")
+                    continue
+                h = file_hash(str(file_path)) or ""
+                key = f"la:{obj.lesson_assessment_id}:{obj.student_id}"
+                if h and attachment_hashes.get(key) == h:
+                    continue
+                stu = getattr(obj, "student", None)
+                u = getattr(stu, "profile", None) if stu is not None else None
+                if not u or not getattr(u, "sync_uuid", None):
+                    continue
+                _upload_attachment(
+                    endpoint="lesson-assessment-solutions/attachment",
+                    data={
+                        "student_sync_uuid": str(u.sync_uuid),
+                        "lesson_assessment_id": str(getattr(obj, "lesson_assessment_id", "")),
+                    },
+                    file_path=file_path,
+                )
+                if h:
+                    attachment_hashes[key] = h
+                save_state(state)
+            except requests.exceptions.HTTPError as e:
+                la_sol_errors += 1
+                log(f"Attachment upload failed (lesson assessment): {e}")
+            except Exception as e:
+                la_sol_errors += 1
+                log(f"Attachment upload error (lesson assessment): {e}")
+
+    if la_sol_errors:
+        log(f"Upsync lesson_assessment_solutions had {la_sol_errors} errors; not advancing cursor.")
+    else:
+        _advance(la_sol_resource)
+        log("Upsync lesson_assessment_solutions: ok")
+
+    # --- grades
+    ga_grade_resource = "general_assessment_grades"
+    ga_grade_cursor = _cursor_dt(ga_grade_resource)
+    ga_grade_qs = GeneralAssessmentGrade.objects.select_related("student__profile").all()
+    ga_grade_qs = _window_filter(qs=ga_grade_qs, cursor_dt=ga_grade_cursor).order_by("updated_at", "id")
+
+    ga_grade_errors = 0
+    batch = []
+    for g in ga_grade_qs.iterator(chunk_size=batch_size):
+        stu = getattr(g, "student", None)
+        u = getattr(stu, "profile", None) if stu is not None else None
+        if not u or not getattr(u, "sync_uuid", None):
+            continue
+        batch.append(
+            {
+                "student_sync_uuid": str(u.sync_uuid),
+                "assessment_id": getattr(g, "assessment_id", None),
+                "score": float(getattr(g, "score", 0.0) or 0.0),
+                "created_at": _dt_iso(getattr(g, "created_at", None)),
+            }
+        )
+        if len(batch) >= batch_size:
+            resp = _post_batch("general-assessment-grades", batch)
+            ga_grade_errors += int(resp.get("errors") or 0)
+            batch = []
+    if batch:
+        resp = _post_batch("general-assessment-grades", batch)
+        ga_grade_errors += int(resp.get("errors") or 0)
+
+    if ga_grade_errors:
+        log(f"Upsync general_assessment_grades had {ga_grade_errors} errors; not advancing cursor.")
+    else:
+        _advance(ga_grade_resource)
+        log("Upsync general_assessment_grades: ok")
+
+    la_grade_resource = "lesson_assessment_grades"
+    la_grade_cursor = _cursor_dt(la_grade_resource)
+    la_grade_qs = LessonAssessmentGrade.objects.select_related("student__profile").all()
+    la_grade_qs = _window_filter(qs=la_grade_qs, cursor_dt=la_grade_cursor).order_by("updated_at", "id")
+
+    la_grade_errors = 0
+    batch = []
+    for g in la_grade_qs.iterator(chunk_size=batch_size):
+        stu = getattr(g, "student", None)
+        u = getattr(stu, "profile", None) if stu is not None else None
+        if not u or not getattr(u, "sync_uuid", None):
+            continue
+        batch.append(
+            {
+                "student_sync_uuid": str(u.sync_uuid),
+                "lesson_assessment_id": getattr(g, "lesson_assessment_id", None),
+                "score": float(getattr(g, "score", 0.0) or 0.0),
+                "created_at": _dt_iso(getattr(g, "created_at", None)),
+            }
+        )
+        if len(batch) >= batch_size:
+            resp = _post_batch("lesson-assessment-grades", batch)
+            la_grade_errors += int(resp.get("errors") or 0)
+            batch = []
+    if batch:
+        resp = _post_batch("lesson-assessment-grades", batch)
+        la_grade_errors += int(resp.get("errors") or 0)
+
+    if la_grade_errors:
+        log(f"Upsync lesson_assessment_grades had {la_grade_errors} errors; not advancing cursor.")
+    else:
+        _advance(la_grade_resource)
+        log("Upsync lesson_assessment_grades: ok")
+
+    log("Upsync complete")
+
+
 def sync():
     if not API_BASE_URL:
         raise RuntimeError(
@@ -405,10 +1061,16 @@ def sync():
     state = load_state()
     state.setdefault("cursors", {})
     state.setdefault("auth", {})
+
+    state.setdefault("upsync", {})
+    state["upsync"].setdefault("cursors", {})
+    state["upsync"].setdefault("attachment_hashes", {})
     last_sync = state.get("last_sync")
+    last_upsync = state.get("upsync", {}).get("cursors", {}).get("students")
 
     log(f"Server base: {API_BASE_URL}")
     log(f"Last sync cutoff: {last_sync}")
+    log(f"Last upsync cursor (students): {last_upsync}")
 
     # Boot local Django (offline box) and point downloads into MEDIA_ROOT.
     settings = _django_setup()
@@ -416,7 +1078,7 @@ def sync():
     media_root.mkdir(parents=True, exist_ok=True)
 
     # Import models only after Django is ready.
-    from accounts.models import County, District, School  # noqa: WPS433
+    from accounts.models import County, District, School, Student, User  # noqa: WPS433
     from content.models import (  # noqa: WPS433
         Subject,
         Topic,
@@ -428,7 +1090,7 @@ def sync():
         Question,
         Option,
     )
-    from django.utils.dateparse import parse_datetime  # noqa: WPS433
+    from django.utils.dateparse import parse_date, parse_datetime  # noqa: WPS433
     from django.utils import timezone  # noqa: WPS433
 
     def _parse_dt(value):
@@ -441,6 +1103,14 @@ def sync():
             dt = timezone.make_aware(dt, timezone=timezone.utc)
         return dt
 
+    def _parse_date(value):
+        if value in (None, ""):
+            return None
+        try:
+            return parse_date(str(value))
+        except Exception:
+            return None
+
     def _to_int(value):
         try:
             if value in (None, ""):
@@ -451,6 +1121,9 @@ def sync():
 
     session = _build_session()
     _ensure_authenticated_session(session, state)
+
+    # Push local usage (offline) to central before pulling fresh content.
+    perform_upsync(session=session, state=state, media_root=media_root)
 
     # IMPORTANT: we store the cutoff timestamp from the FIRST sync call.
     # This prevents missing updates that happen while we are mid-sync.
@@ -466,6 +1139,8 @@ def sync():
         ("counties", "counties", County),
         ("districts", "districts", District),
         ("schools", "schools", School),
+        ("student-users", "student_users", User),
+        ("students", "students", Student),
         ("subjects", "subjects", Subject),
         ("topics", "topics", Topic),
         ("periods", "periods", Period),
@@ -575,6 +1250,158 @@ def sync():
 
                 if skipped:
                     log(f"schools: skipped {skipped} items (missing/invalid district)")
+
+            elif resource == "student_users":
+                skipped = 0
+                errors = 0
+
+                for it in items:
+                    if not isinstance(it, dict):
+                        continue
+
+                    sync_uuid = (it.get("sync_uuid") or "").strip()
+                    phone = (it.get("phone") or "").strip()
+                    password_hash = (it.get("password_hash") or "").strip()
+
+                    if not sync_uuid or not phone or not password_hash:
+                        skipped += 1
+                        continue
+
+                    try:
+                        user = User.objects.filter(sync_uuid=sync_uuid).first()
+                        if user is None:
+                            # Best-effort fallback by phone (handles legacy local rows).
+                            user = User.objects.filter(phone=phone).first()
+
+                        if user is None:
+                            user = User(sync_uuid=sync_uuid)
+                        else:
+                            if str(getattr(user, "sync_uuid", "") or "") != sync_uuid:
+                                user.sync_uuid = sync_uuid
+
+                        user.phone = phone
+                        user.email = (it.get("email") or None) or None
+                        user.name = (it.get("name") or "").strip() or getattr(user, "name", None) or phone
+                        user.role = it.get("role") or UserRole.STUDENT.value
+                        user.is_active = bool(it.get("is_active", True))
+                        user.deleted = bool(it.get("deleted", False))
+                        user.dob = it.get("dob") or None
+                        user.gender = it.get("gender") or None
+
+                        # Central password hash is required for fully-offline roaming login.
+                        user.password = password_hash
+
+                        # Hardening: never allow student users to become staff/superuser via sync.
+                        user.is_staff = False
+                        user.is_superuser = False
+
+                        user.save()
+                    except Exception as e:
+                        errors += 1
+                        log(f"student_users: failed upsert for {phone or sync_uuid}: {e}")
+
+                if skipped:
+                    log(f"student_users: skipped {skipped} items (missing sync_uuid/phone/password_hash)")
+                if errors:
+                    log(f"student_users: {errors} upsert failures")
+
+            elif resource == "students":
+                school_ids = {_to_int(it.get("school_id")) for it in items if isinstance(it, dict)}
+                school_ids.discard(None)
+                existing_schools = set(School.objects.filter(id__in=school_ids).values_list("id", flat=True))
+
+                skipped = 0
+                errors = 0
+
+                for it in items:
+                    if not isinstance(it, dict):
+                        continue
+
+                    profile_sync_uuid = (it.get("profile_sync_uuid") or "").strip()
+                    if not profile_sync_uuid:
+                        skipped += 1
+                        continue
+
+                    try:
+                        user = User.objects.filter(sync_uuid=profile_sync_uuid).first()
+                        if user is None:
+                            skipped += 1
+                            continue
+
+                        remote_points = _to_int(it.get("points")) or 0
+                        remote_current = _to_int(it.get("current_login_streak")) or 0
+                        remote_max = _to_int(it.get("max_login_streak")) or 0
+                        remote_last = _parse_date(it.get("last_login_activity_date"))
+
+                        student = Student.objects.filter(profile=user).first()
+
+                        if student is None:
+                            school_id = _to_int(it.get("school_id"))
+                            school_id = school_id if school_id in existing_schools else None
+
+                            student = Student.objects.create(
+                                profile=user,
+                                student_id=(it.get("student_id") or "").strip() or None,
+                                school_id=school_id,
+                                grade=(it.get("grade") or "") or "",
+                                points=int(remote_points),
+                                current_login_streak=int(remote_current),
+                                max_login_streak=max(int(remote_max), int(remote_current)),
+                                last_login_activity_date=remote_last,
+                                status=(it.get("status") or "") or StatusEnum.APPROVED.value,
+                                moderation_comment=it.get("moderation_comment") or "",
+                            )
+                            continue
+
+                        # Canonical student profile fields.
+                        incoming_student_id = (it.get("student_id") or "").strip() or None
+                        if incoming_student_id:
+                            student.student_id = incoming_student_id
+
+                        incoming_grade = it.get("grade")
+                        if incoming_grade is not None:
+                            student.grade = incoming_grade
+
+                        incoming_school_id = _to_int(it.get("school_id"))
+                        if incoming_school_id in existing_schools:
+                            student.school_id = incoming_school_id
+                        elif incoming_school_id is None:
+                            student.school_id = None
+
+                        incoming_status = it.get("status")
+                        if incoming_status is not None:
+                            student.status = incoming_status
+                        student.moderation_comment = it.get("moderation_comment") or ""
+
+                        # Merge points safely: never move backwards.
+                        try:
+                            student.points = max(int(getattr(student, "points", 0) or 0), int(remote_points or 0))
+                        except Exception:
+                            pass
+
+                        # Merge login streaks safely: never move the last-login date backwards.
+                        local_last = getattr(student, "last_login_activity_date", None)
+                        local_current = int(getattr(student, "current_login_streak", 0) or 0)
+                        local_max = int(getattr(student, "max_login_streak", 0) or 0)
+
+                        if remote_last is not None:
+                            if local_last is None or remote_last > local_last:
+                                student.last_login_activity_date = remote_last
+                                student.current_login_streak = int(remote_current)
+                                student.max_login_streak = max(local_max, int(remote_max), int(remote_current))
+                            elif remote_last == local_last:
+                                student.current_login_streak = max(local_current, int(remote_current))
+                                student.max_login_streak = max(local_max, int(remote_max), student.current_login_streak)
+
+                        student.save()
+                    except Exception as e:
+                        errors += 1
+                        log(f"students: failed upsert for {profile_sync_uuid}: {e}")
+
+                if skipped:
+                    log(f"students: skipped {skipped} items (missing profile_sync_uuid or user)")
+                if errors:
+                    log(f"students: {errors} upsert failures")
 
             elif resource == "subjects":
                 for it in items:
