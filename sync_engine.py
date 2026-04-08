@@ -451,6 +451,8 @@ def perform_upsync(*, session: requests.Session, state: dict, media_root: Path) 
     from django.db.models import Q  # noqa: WPS433
     from django.utils.dateparse import parse_datetime  # noqa: WPS433
     from django.utils import timezone  # noqa: WPS433
+    from django.core.exceptions import ValidationError  # noqa: WPS433
+    from django.core.validators import validate_email  # noqa: WPS433
 
     from accounts.models import Student, User  # noqa: WPS433
     from content.models import (  # noqa: WPS433
@@ -479,6 +481,21 @@ def perform_upsync(*, session: requests.Session, state: dict, media_root: Path) 
             return dt.isoformat()
         except Exception:
             return str(dt)
+
+    def _clean_email(value: Any) -> str | None:
+        if value in (None, ""):
+            return None
+        try:
+            candidate = str(value).strip()
+        except Exception:
+            return None
+        if not candidate:
+            return None
+        try:
+            validate_email(candidate)
+        except ValidationError:
+            return None
+        return candidate
 
     def _post_batch(endpoint: str, items: list[dict[str, Any]]) -> dict[str, Any]:
         url = f"{API_BASE_URL}/upsync/{endpoint}/"
@@ -534,15 +551,33 @@ def perform_upsync(*, session: requests.Session, state: dict, media_root: Path) 
             u = getattr(s, "profile", None)
             if not u:
                 continue
-            if not getattr(u, "sync_uuid", None) or not getattr(u, "phone", None) or not getattr(u, "name", None):
+            if not getattr(u, "sync_uuid", None):
                 continue
+
+            phone = str(getattr(u, "phone", "") or "").strip()
+            name = str(getattr(u, "name", "") or "").strip()
+            if not phone or not name:
+                continue
+
+            # Central serializer enforces valid email syntax. Some boxes may have
+            # legacy/placeholder values; treat email as best-effort.
+            cleaned_email = _clean_email(getattr(u, "email", None))
+            if cleaned_email is None and getattr(u, "email", None):
+                log(f"Upsync students: dropping invalid email for {u.phone}")
+
+            dob_val = getattr(u, "dob", None)
+            try:
+                dob_str = dob_val.isoformat() if dob_val is not None else None
+            except Exception:
+                dob_str = None
+
             batch.append(
                 {
                     "sync_uuid": str(u.sync_uuid),
-                    "phone": u.phone,
-                    "name": u.name,
-                    "email": getattr(u, "email", None) or None,
-                    "dob": str(getattr(u, "dob", "") or "") or None,
+                    "phone": phone,
+                    "name": name,
+                    "email": cleaned_email,
+                    "dob": dob_str,
                     "gender": getattr(u, "gender", None) or None,
                     "grade": getattr(s, "grade", None) or None,
                     "school_id": getattr(s, "school_id", None),
@@ -1123,7 +1158,12 @@ def sync():
     _ensure_authenticated_session(session, state)
 
     # Push local usage (offline) to central before pulling fresh content.
-    perform_upsync(session=session, state=state, media_root=media_root)
+    try:
+        perform_upsync(session=session, state=state, media_root=media_root)
+    except Exception as e:
+        # Upsync is best-effort; keep pulling fresh content/accounts even if
+        # local usage payloads are temporarily invalid or the server is down.
+        log(f"Upsync failed; continuing with downsync. ({e})")
 
     # IMPORTANT: we store the cutoff timestamp from the FIRST sync call.
     # This prevents missing updates that happen while we are mid-sync.
@@ -1720,6 +1760,20 @@ def sync():
 if __name__ == "__main__":
     try:
         sync()
+    except requests.exceptions.HTTPError as e:
+        resp = getattr(e, "response", None)
+        if resp is not None:
+            try:
+                body = resp.text
+            except Exception:
+                body = None
+            log(f"HTTP {getattr(resp, 'status_code', None)} for {getattr(resp, 'url', '')}")
+            if body:
+                body = str(body).strip()
+                if len(body) > 4000:
+                    body = body[:4000] + "... (truncated)"
+                log(f"Response body: {body}")
+        log(f"ERROR: {e}")
     except Exception as e:
         log(f"ERROR: {e}")
 
