@@ -1,6 +1,8 @@
 import csv
 import io
 import hashlib
+import math
+from statistics import multimode
 from urllib.parse import quote
 from typing import Iterable, Dict, List, Set
 
@@ -98,6 +100,7 @@ from .serializers import (
 	AdminBulkDistrictUploadSerializer,
 	AdminBulkSchoolUploadSerializer,
 	KidsSubjectsAndLessonsResponseSerializer,
+	AssessmentStatisticsResponseSerializer,
 )
 from .pagination import StandardResultsSetPagination
 from messsaging.services import send_sms
@@ -257,6 +260,230 @@ def _parse_leaderboard_timeframe(request, default: str = 'all_time') -> str:
 	if timeframe not in allowed:
 		raise ValueError("timeframe must be one of: this_week, this_month, all_time.")
 	return timeframe
+
+
+def _format_stat_number(value: float | int | None, *, decimals: int = 2) -> str:
+	"""Format a numeric value for range strings and histogram labels."""
+	if value is None:
+		return "0"
+	try:
+		val = float(value)
+	except (TypeError, ValueError):
+		return "0"
+	if math.isfinite(val) and abs(val - round(val)) < 1e-9:
+		return str(int(round(val)))
+	formatted = f"{val:.{decimals}f}".rstrip('0').rstrip('.')
+	return formatted or "0"
+
+
+def _median_sorted(values_sorted: List[float]) -> float:
+	"""Median of a pre-sorted list. Returns 0.0 for empty."""
+	n = len(values_sorted)
+	if n == 0:
+		return 0.0
+	mid = n // 2
+	if n % 2 == 1:
+		return float(values_sorted[mid])
+	return (float(values_sorted[mid - 1]) + float(values_sorted[mid])) / 2.0
+
+
+def _quartiles_sorted(values_sorted: List[float]) -> tuple[float, float]:
+	"""Compute Q1 and Q3 using the Tukey method (median of halves)."""
+	n = len(values_sorted)
+	if n == 0:
+		return 0.0, 0.0
+	if n == 1:
+		val = float(values_sorted[0])
+		return val, val
+
+	mid = n // 2
+	if n % 2 == 0:
+		lower = values_sorted[:mid]
+		upper = values_sorted[mid:]
+	else:
+		lower = values_sorted[:mid]
+		upper = values_sorted[mid + 1:]
+
+	q1 = _median_sorted(lower) if lower else float(values_sorted[0])
+	q3 = _median_sorted(upper) if upper else float(values_sorted[-1])
+	return float(q1), float(q3)
+
+
+def _population_std_dev(values: List[float], mean: float) -> float:
+	"""Population standard deviation (divide by n)."""
+	n = len(values)
+	if n == 0:
+		return 0.0
+	variance = sum((float(x) - mean) ** 2 for x in values) / float(n)
+	return math.sqrt(variance)
+
+
+def _choose_histogram_bins(*, n: int, data_range: float, iqr: float, fallback: int = 5, max_bins: int = 30) -> int:
+	"""Choose a dynamic histogram bin count with a sensible fallback.
+
+	Primary: Freedman–Diaconis (uses IQR). Fallback: Sturges. Final fallback: `fallback`.
+	"""
+	try:
+		if n < 2 or data_range <= 0:
+			return int(fallback)
+		if iqr and iqr > 0:
+			bin_width = (2.0 * float(iqr)) / (float(n) ** (1.0 / 3.0))
+			if bin_width and bin_width > 0:
+				bins = int(math.ceil(float(data_range) / float(bin_width)))
+				if bins >= 1:
+					return max(1, min(bins, int(max_bins)))
+		# Sturges
+		bins = int(math.ceil(math.log2(float(n)) + 1.0))
+		if bins >= 1:
+			return max(1, min(bins, int(max_bins)))
+	except Exception:
+		pass
+	return int(fallback)
+
+
+def _build_histogram(scores: List[float], *, lower: float, upper: float, bin_count: int) -> dict:
+	"""Build histogram labels + counts for a list of scores."""
+	if not scores:
+		return {"labels": [], "values": []}
+	try:
+		lower_val = float(lower)
+		upper_val = float(upper)
+	except (TypeError, ValueError):
+		lower_val = 0.0
+		upper_val = max(scores)
+
+	if not math.isfinite(lower_val):
+		lower_val = 0.0
+	if not math.isfinite(upper_val):
+		upper_val = max(scores)
+	if upper_val <= lower_val:
+		upper_val = lower_val + 1.0
+
+	try:
+		bins = int(bin_count)
+	except (TypeError, ValueError):
+		bins = 1
+	bins = max(1, bins)
+
+	width = (upper_val - lower_val) / float(bins)
+	if width <= 0:
+		width = 1.0
+
+	counts = [0] * bins
+	for s in scores:
+		try:
+			val = float(s)
+		except (TypeError, ValueError):
+			continue
+		# Clamp
+		if val <= lower_val:
+			idx = 0
+		elif val >= upper_val:
+			idx = bins - 1
+		else:
+			idx = int((val - lower_val) / width)
+			if idx >= bins:
+				idx = bins - 1
+			elif idx < 0:
+				idx = 0
+		counts[idx] += 1
+
+	labels: List[str] = []
+	for i in range(bins):
+		start = lower_val + (i * width)
+		end = lower_val + ((i + 1) * width)
+		# Ensure last bin ends exactly at upper
+		if i == bins - 1:
+			end = upper_val
+		if i < bins - 1:
+			labels.append(f"[{_format_stat_number(start)}-{_format_stat_number(end)})")
+		else:
+			labels.append(f"[{_format_stat_number(start)}-{_format_stat_number(end)}]")
+
+	return {"labels": labels, "values": counts}
+
+
+def _compute_assessment_stats_payload(scores: List[float], *, max_score: float | None = None) -> dict:
+	"""Compute the response payload in the required shape."""
+	values = [float(s) for s in scores if s is not None]
+	values_sorted = sorted(values)
+	n = len(values_sorted)
+	if n == 0:
+		return {
+			"summary": {
+				"submissions": 0,
+				"total_score": 0,
+				"mean": 0,
+				"median": 0,
+				"mode": 0,
+				"range": "0 - 0",
+				"Q1": 0,
+				"Q3": 0,
+				"standard_deviation": 0,
+				"skewness_coefficient": 0,
+			},
+			"chart": {"labels": [], "values": []},
+		}
+
+	total = float(sum(values_sorted))
+	mean = total / float(n)
+	median = _median_sorted(values_sorted)
+	q1, q3 = _quartiles_sorted(values_sorted)
+	iqr = float(q3 - q1)
+	std_dev = _population_std_dev(values_sorted, mean)
+	# Pearson's second coefficient: 3(mean - median) / stddev
+	skew = 0.0
+	if std_dev and std_dev > 0:
+		skew = (3.0 * (mean - median)) / std_dev
+
+	try:
+		modes = multimode(values_sorted)
+		mode_value = float(modes[0]) if modes else float(values_sorted[0])
+	except Exception:
+		mode_value = float(values_sorted[0])
+
+	min_val = float(values_sorted[0])
+	max_val = float(values_sorted[-1])
+	range_str = f"{_format_stat_number(min_val)} - {_format_stat_number(max_val)}"
+
+	upper_for_chart = max_val
+	if max_score is not None:
+		try:
+			upper_for_chart = float(max_score)
+		except (TypeError, ValueError):
+			upper_for_chart = max_val
+	if not math.isfinite(upper_for_chart) or upper_for_chart <= 0:
+		upper_for_chart = max_val
+	# Ensure we can build bins even if all values are equal.
+	if upper_for_chart <= 0:
+		upper_for_chart = 1.0
+	if upper_for_chart < max_val:
+		upper_for_chart = max_val
+
+	bin_count = _choose_histogram_bins(
+		n=n,
+		data_range=float(upper_for_chart - 0.0),
+		iqr=iqr,
+		fallback=5,
+		max_bins=30,
+	)
+	chart = _build_histogram(values_sorted, lower=0.0, upper=upper_for_chart, bin_count=bin_count)
+
+	return {
+		"summary": {
+			"submissions": int(n),
+			"total_score": round(total, 2),
+			"mean": round(mean, 2),
+			"median": round(median, 2),
+			"mode": round(mode_value, 2),
+			"range": range_str,
+			"Q1": round(q1, 2),
+			"Q3": round(q3, 2),
+			"standard_deviation": round(std_dev, 2),
+			"skewness_coefficient": round(skew, 4),
+		},
+		"chart": chart,
+	}
 
 
 def _points_timeframe_start(timeframe: str):
@@ -2394,6 +2621,10 @@ class ContentViewSet(viewsets.ViewSet):
 	@action(detail=False, methods=['get', 'post'], url_path='general-assessments')
 	def general_assessments(self, request):
 		"""List or create general assessments."""
+		deny = self._require_creator(request)
+		if deny:
+			return deny
+
 		if request.method == 'GET':
 			qs = GeneralAssessment.objects.select_related('given_by').all().order_by('-created_at')
 			ai_only = request.query_params.get('ai_only')
@@ -2417,9 +2648,8 @@ class ContentViewSet(viewsets.ViewSet):
 						qs = qs.filter(Q(given_by=teacher) | Q(ai_recommended=True))
 					else:
 						qs = qs.filter(ai_recommended=True)
-		deny = self._require_creator(request)
-		if deny:
-			return deny
+			return Response(GeneralAssessmentSerializer(qs, many=True).data)
+
 		ser = GeneralAssessmentSerializer(data=request.data)
 		ser.is_valid(raise_exception=True)
 		obj = ser.save()
@@ -2457,6 +2687,10 @@ class ContentViewSet(viewsets.ViewSet):
 	@action(detail=False, methods=['get', 'post'], url_path='lesson-assessments')
 	def lesson_assessments(self, request):
 		"""List or create lesson assessments."""
+		deny = self._require_creator(request)
+		if deny:
+			return deny
+
 		if request.method == 'GET':
 			qs = LessonAssessment.objects.select_related('lesson').all().order_by('-created_at')
 			ai_only = request.query_params.get('ai_only')
@@ -2479,9 +2713,8 @@ class ContentViewSet(viewsets.ViewSet):
 						qs = qs.filter(Q(given_by=teacher) | Q(ai_recommended=True))
 					else:
 						qs = qs.filter(ai_recommended=True)
-		deny = self._require_creator(request)
-		if deny:
-			return deny
+			return Response(LessonAssessmentSerializer(qs, many=True).data)
+
 		ser = LessonAssessmentSerializer(data=request.data)
 		ser.is_valid(raise_exception=True)
 		obj = ser.save()
@@ -8055,6 +8288,169 @@ class TeacherViewSet(viewsets.ViewSet):
 
 	@extend_schema(
 		description=(
+			"Assessment statistics (scoped). Teachers see only their class submissions, "
+			"head teachers see school submissions, and admins see all submissions. "
+			"Provide exactly one of general_assessment_id or lesson_assessment_id."
+		),
+		parameters=[
+			OpenApiParameter(name='general_assessment_id', required=False, location=OpenApiParameter.QUERY, type=int),
+			OpenApiParameter(name='lesson_assessment_id', required=False, location=OpenApiParameter.QUERY, type=int),
+		],
+		responses={
+			200: OpenApiResponse(
+				description="Assessment statistics payload.",
+				response=AssessmentStatisticsResponseSerializer,
+				examples=[
+					OpenApiExample(
+						name="AssessmentStatisticsResponseExample",
+						value={
+							"summary": {
+								"submissions": 10,
+								"total_score": 164.0,
+								"mean": 16.4,
+								"median": 17.0,
+								"mode": 18.0,
+								"range": "5 - 20",
+								"Q1": 14.5,
+								"Q3": 19.0,
+								"standard_deviation": 4.12,
+								"skewness_coefficient": -0.4369,
+							},
+							"chart": {
+								"labels": ["[0-4)", "[4-8)", "[8-12)", "[12-16)", "[16-20]"],
+								"values": [0, 1, 2, 3, 4],
+							},
+						},
+					),
+				],
+			),
+		},
+	)
+	@action(detail=False, methods=['get'], url_path='assessment-statistics')
+	def assessment_statistics(self, request):
+		deny = self._require_teacher(request)
+		if deny:
+			return deny
+
+		role = getattr(request.user, 'role', None)
+		teacher = getattr(request.user, 'teacher', None)
+
+		ga_id = request.query_params.get('general_assessment_id')
+		la_id = request.query_params.get('lesson_assessment_id')
+		if bool(ga_id) == bool(la_id):
+			return Response(
+				{"detail": "Provide exactly one of general_assessment_id or lesson_assessment_id."},
+				status=status.HTTP_400_BAD_REQUEST,
+			)
+
+		def _teacher_class_grades_for_assessment(assessment_obj) -> List[str]:
+			# Prefer assessment's explicit grade/subject grade when available.
+			try:
+				ass_grade = getattr(assessment_obj, 'grade', None)
+			except Exception:
+				ass_grade = None
+			if ass_grade:
+				return [ass_grade]
+			# For lesson assessments, use subject.grade when present.
+			try:
+				subj_grade = getattr(getattr(getattr(assessment_obj, 'lesson', None), 'subject', None), 'grade', None)
+			except Exception:
+				subj_grade = None
+			if subj_grade:
+				return [subj_grade]
+			# Fallback: grades derived from teacher's assigned subjects.
+			try:
+				return self._teacher_leaderboard_grades(teacher) if teacher else []
+			except Exception:
+				return []
+
+		# ---- Resolve assessment and apply role-based assessment visibility ----
+		assessment_max_score: float | None = None
+		if ga_id:
+			try:
+				ga_id_int = int(ga_id)
+			except (TypeError, ValueError):
+				return Response({"detail": "general_assessment_id must be an integer."}, status=400)
+
+			assessment_qs = GeneralAssessment.objects.all()
+			# Access control: teacher -> own assessments, headteacher -> school assessments
+			if role == UserRole.TEACHER.value:
+				assessment_qs = assessment_qs.filter(given_by=teacher)
+			elif role == UserRole.HEADTEACHER.value and hasattr(self, '_school_teacher_ids'):
+				teacher_ids = getattr(self, '_school_teacher_ids')(request) or []
+				assessment_qs = assessment_qs.filter(given_by_id__in=teacher_ids)
+			# ADMIN uses whatever scope is enforced by routing/permissions.
+			try:
+				assessment = assessment_qs.get(pk=ga_id_int)
+			except GeneralAssessment.DoesNotExist:
+				return Response({"detail": "Assessment not found."}, status=404)
+
+			assessment_max_score = float(getattr(assessment, 'marks', None) or 0.0) or None
+
+			grades_qs = GeneralAssessmentGrade.objects.filter(assessment_id=ga_id_int)
+			# Student scoping
+			if role == UserRole.TEACHER.value:
+				if not teacher or not getattr(teacher, 'school_id', None):
+					grades_qs = grades_qs.none()
+				else:
+					grades = _teacher_class_grades_for_assessment(assessment)
+					if not grades:
+						grades_qs = grades_qs.none()
+					else:
+						grades_qs = grades_qs.filter(student__school_id=teacher.school_id, student__grade__in=grades)
+			elif role == UserRole.HEADTEACHER.value:
+				if teacher and getattr(teacher, 'school_id', None):
+					grades_qs = grades_qs.filter(student__school_id=teacher.school_id)
+				else:
+					grades_qs = grades_qs.none()
+			# ADMIN -> no student filter
+
+			scores = list(grades_qs.order_by('score').values_list('score', flat=True))
+			payload = _compute_assessment_stats_payload(scores, max_score=assessment_max_score)
+			return Response(payload)
+
+		# lesson assessment
+		try:
+			la_id_int = int(la_id)
+		except (TypeError, ValueError):
+			return Response({"detail": "lesson_assessment_id must be an integer."}, status=400)
+
+		assessment_qs = LessonAssessment.objects.select_related('lesson__subject').all()
+		if role == UserRole.TEACHER.value:
+			assessment_qs = assessment_qs.filter(given_by=teacher)
+		elif role == UserRole.HEADTEACHER.value and hasattr(self, '_school_teacher_ids'):
+			teacher_ids = getattr(self, '_school_teacher_ids')(request) or []
+			assessment_qs = assessment_qs.filter(given_by_id__in=teacher_ids)
+
+		try:
+			assessment = assessment_qs.get(pk=la_id_int)
+		except LessonAssessment.DoesNotExist:
+			return Response({"detail": "Assessment not found."}, status=404)
+
+		assessment_max_score = float(getattr(assessment, 'marks', None) or 0.0) or None
+		grades_qs = LessonAssessmentGrade.objects.filter(lesson_assessment_id=la_id_int)
+		if role == UserRole.TEACHER.value:
+			if not teacher or not getattr(teacher, 'school_id', None):
+				grades_qs = grades_qs.none()
+			else:
+				grades = _teacher_class_grades_for_assessment(assessment)
+				if not grades:
+					grades_qs = grades_qs.none()
+				else:
+					grades_qs = grades_qs.filter(student__school_id=teacher.school_id, student__grade__in=grades)
+		elif role == UserRole.HEADTEACHER.value:
+			if teacher and getattr(teacher, 'school_id', None):
+				grades_qs = grades_qs.filter(student__school_id=teacher.school_id)
+			else:
+				grades_qs = grades_qs.none()
+		# ADMIN -> no student filter
+
+		scores = list(grades_qs.order_by('score').values_list('score', flat=True))
+		payload = _compute_assessment_stats_payload(scores, max_score=assessment_max_score)
+		return Response(payload)
+
+	@extend_schema(
+		description=(
 			"List all submissions for assessments created by this teacher. "
 			"Includes grading status and solution details."
 		),
@@ -9237,6 +9633,89 @@ class AdminSystemReportViewSet(viewsets.ViewSet):
 		}
 		ser = AdminSystemReportSerializer(payload)
 		return Response(ser.data)
+
+	@extend_schema(
+		operation_id="admin_assessment_statistics",
+		description="System-wide assessment statistics for a single assessment (nationwide scope).",
+		parameters=[
+			OpenApiParameter(name='general_assessment_id', required=False, location=OpenApiParameter.QUERY, type=int),
+			OpenApiParameter(name='lesson_assessment_id', required=False, location=OpenApiParameter.QUERY, type=int),
+		],
+		responses={
+			200: OpenApiResponse(
+				description="Assessment statistics payload.",
+				response=AssessmentStatisticsResponseSerializer,
+				examples=[
+					OpenApiExample(
+						name="AdminAssessmentStatisticsExample",
+						value={
+							"summary": {
+								"submissions": 10,
+								"total_score": 164.0,
+								"mean": 16.4,
+								"median": 17.0,
+								"mode": 18.0,
+								"range": "5 - 20",
+								"Q1": 14.5,
+								"Q3": 19.0,
+								"standard_deviation": 4.12,
+								"skewness_coefficient": -0.4369,
+							},
+							"chart": {
+								"labels": ["[0-4)", "[4-8)", "[8-12)", "[12-16)", "[16-20]"],
+								"values": [0, 1, 2, 3, 4],
+							},
+						},
+					),
+				],
+			),
+		},
+	)
+	@action(detail=False, methods=['get'], url_path='assessment-statistics')
+	def assessment_statistics(self, request):
+		ga_id = request.query_params.get('general_assessment_id')
+		la_id = request.query_params.get('lesson_assessment_id')
+		if bool(ga_id) == bool(la_id):
+			return Response(
+				{"detail": "Provide exactly one of general_assessment_id or lesson_assessment_id."},
+				status=status.HTTP_400_BAD_REQUEST,
+			)
+
+		if ga_id:
+			try:
+				ga_id_int = int(ga_id)
+			except (TypeError, ValueError):
+				return Response({"detail": "general_assessment_id must be an integer."}, status=400)
+			try:
+				assessment = GeneralAssessment.objects.get(pk=ga_id_int)
+			except GeneralAssessment.DoesNotExist:
+				return Response({"detail": "Assessment not found."}, status=404)
+			assessment_max_score = float(getattr(assessment, 'marks', None) or 0.0) or None
+			scores = list(
+				GeneralAssessmentGrade.objects
+				.filter(assessment_id=ga_id_int)
+				.order_by('score')
+				.values_list('score', flat=True)
+			)
+			return Response(_compute_assessment_stats_payload(scores, max_score=assessment_max_score))
+
+		# lesson
+		try:
+			la_id_int = int(la_id)
+		except (TypeError, ValueError):
+			return Response({"detail": "lesson_assessment_id must be an integer."}, status=400)
+		try:
+			assessment = LessonAssessment.objects.get(pk=la_id_int)
+		except LessonAssessment.DoesNotExist:
+			return Response({"detail": "Assessment not found."}, status=404)
+		assessment_max_score = float(getattr(assessment, 'marks', None) or 0.0) or None
+		scores = list(
+			LessonAssessmentGrade.objects
+			.filter(lesson_assessment_id=la_id_int)
+			.order_by('score')
+			.values_list('score', flat=True)
+		)
+		return Response(_compute_assessment_stats_payload(scores, max_score=assessment_max_score))
 
 class AdminStudentViewSet(viewsets.ReadOnlyModelViewSet):
 	"""Admin-only read and moderation access to all students."""

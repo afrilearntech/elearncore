@@ -10,7 +10,7 @@ from unittest.mock import patch
 from rest_framework.test import APIClient
 
 from accounts.models import User, Student, Teacher, Parent, County, District, School
-from content.models import Subject, Topic, Period, LessonResource, LessonAssessment, LessonAssessmentGrade, TakeLesson, LessonAssessmentSolution, GeneralAssessment, AssessmentSolution, GameModel, GamePlay, Activity, LessonTemporaryUnlock, Story, Question
+from content.models import Subject, Topic, Period, LessonResource, LessonAssessment, LessonAssessmentGrade, TakeLesson, LessonAssessmentSolution, GeneralAssessment, GeneralAssessmentGrade, AssessmentSolution, GameModel, GamePlay, Activity, LessonTemporaryUnlock, Story, Question
 from elearncore.sysutils.constants import (
 	ASSESSMENT_SUBMISSION_POINTS,
 	GAME_PLAY_POINTS,
@@ -850,6 +850,56 @@ class StoryWorkflowVisibilityTests(TestCase):
 			format='json',
 		)
 		self.assertEqual(teacher_forbidden.status_code, 403)
+
+
+class ContentAssessmentListEndpointsTests(TestCase):
+	def setUp(self):
+		cache.clear()
+		self.client = APIClient()
+		self.creator_user = User.objects.create_user(
+			phone='231770799001',
+			name='Creator Assessments List',
+			email='creator.assessments.list@example.com',
+			password='pass',
+			role=UserRole.CONTENTCREATOR.value,
+		)
+		self.client.force_authenticate(user=self.creator_user)
+
+	def test_content_lesson_assessments_get_returns_200(self):
+		resp = self.client.get('/api-v1/content/lesson-assessments/')
+		self.assertEqual(resp.status_code, 200)
+		# Empty DB should still serialize as a list, not error.
+		self.assertIsInstance(resp.json(), list)
+
+	def test_content_general_assessments_get_returns_200(self):
+		resp = self.client.get('/api-v1/content/general-assessments/')
+		self.assertEqual(resp.status_code, 200)
+		self.assertIsInstance(resp.json(), list)
+
+
+class ContentAssessmentListEndpointsTests(TestCase):
+	def setUp(self):
+		cache.clear()
+		self.client = APIClient()
+		self.creator_user = User.objects.create_user(
+			phone='231770799001',
+			name='Creator Assessments List',
+			email='creator.assessments.list@example.com',
+			password='pass',
+			role=UserRole.CONTENTCREATOR.value,
+		)
+		self.client.force_authenticate(user=self.creator_user)
+
+	def test_content_lesson_assessments_get_returns_200(self):
+		resp = self.client.get('/api-v1/content/lesson-assessments/')
+		self.assertEqual(resp.status_code, 200)
+		# Empty DB should still serialize as a list, not error.
+		self.assertIsInstance(resp.json(), list)
+
+	def test_content_general_assessments_get_returns_200(self):
+		resp = self.client.get('/api-v1/content/general-assessments/')
+		self.assertEqual(resp.status_code, 200)
+		self.assertIsInstance(resp.json(), list)
 
 
 class KidsProgressGardenRankingTests(TestCase):
@@ -2144,6 +2194,55 @@ class HeadTeacherViewSetIsolationTests(TestCase):
 		self.assertNotIn('School Two Assessment', titles)
 		self.assertNotIn('School Two Lesson Assessment', titles)
 
+	def test_headteacher_assessment_statistics_scopes_to_school_general_assessment(self):
+		GeneralAssessmentGrade.objects.create(
+			assessment=self.school_one_assessment,
+			student=self.school_one_student,
+			score=12,
+		)
+		# Cross-school submission must be excluded from head teacher scope.
+		GeneralAssessmentGrade.objects.create(
+			assessment=self.school_one_assessment,
+			student=self.school_two_student,
+			score=15,
+		)
+
+		resp = self.client.get(
+			f'/api-v1/headteacher/assessment-statistics/?general_assessment_id={self.school_one_assessment.id}'
+		)
+		self.assertEqual(resp.status_code, 200)
+		payload = resp.json()
+		self.assertEqual(payload['summary']['submissions'], 1)
+		self.assertEqual(payload['summary']['total_score'], 12.0)
+		self.assertEqual(sum(payload['chart']['values']), 1)
+
+	def test_headteacher_assessment_statistics_denies_other_school_assessment(self):
+		GeneralAssessmentGrade.objects.create(
+			assessment=self.school_two_assessment,
+			student=self.school_two_student,
+			score=15,
+		)
+		resp = self.client.get(
+			f'/api-v1/headteacher/assessment-statistics/?general_assessment_id={self.school_two_assessment.id}'
+		)
+		self.assertEqual(resp.status_code, 404)
+
+	def test_headteacher_assessment_statistics_lesson_assessment_scopes_to_school(self):
+		# Cross-school submission must be excluded from head teacher scope.
+		LessonAssessmentGrade.objects.create(
+			lesson_assessment=self.school_one_lesson_assessment,
+			student=self.school_two_student,
+			score=9,
+		)
+		resp = self.client.get(
+			f'/api-v1/headteacher/assessment-statistics/?lesson_assessment_id={self.school_one_lesson_assessment.id}'
+		)
+		self.assertEqual(resp.status_code, 200)
+		payload = resp.json()
+		self.assertEqual(payload['summary']['submissions'], 1)
+		self.assertEqual(payload['summary']['total_score'], 7.0)
+		self.assertEqual(sum(payload['chart']['values']), 1)
+
 	def test_headteacher_create_teacher_forces_own_school(self):
 		resp = self.client.post(
 			'/api-v1/headteacher/teachers/create/',
@@ -2177,6 +2276,184 @@ class HeadTeacherViewSetIsolationTests(TestCase):
 		self.client.force_authenticate(user=self.school_one_teacher_user)
 		resp = self.client.get('/api-v1/headteacher/teachers/')
 		self.assertEqual(resp.status_code, 403)
+
+
+class TeacherAssessmentStatisticsScopeTests(TestCase):
+	def setUp(self):
+		cache.clear()
+		self.client = APIClient()
+
+		county = County.objects.create(name='Montserrado')
+		district = District.objects.create(county=county, name='Careysburg')
+		self.school_one = School.objects.create(district=district, name='School One')
+		self.school_two = School.objects.create(district=district, name='School Two')
+
+		self.teacher_user = User.objects.create_user(
+			phone='231770020001',
+			name='Teacher Stats',
+			email='teacher.stats@example.com',
+			password='pass',
+			role=UserRole.TEACHER.value,
+		)
+		self.teacher = Teacher.objects.create(
+			profile=self.teacher_user,
+			school=self.school_one,
+			status=StatusEnum.APPROVED.value,
+		)
+
+		self.student_one_user = User.objects.create_user(
+			phone='231770020002',
+			name='Student One',
+			email='student.one@example.com',
+			password='pass',
+			role=UserRole.STUDENT.value,
+		)
+		self.student_one = Student.objects.create(
+			profile=self.student_one_user,
+			school=self.school_one,
+			grade=StudentLevel.GRADE3.value,
+			status=StatusEnum.APPROVED.value,
+		)
+
+		self.student_two_user = User.objects.create_user(
+			phone='231770020003',
+			name='Student Two',
+			email='student.two@example.com',
+			password='pass',
+			role=UserRole.STUDENT.value,
+		)
+		self.student_two = Student.objects.create(
+			profile=self.student_two_user,
+			school=self.school_one,
+			grade=StudentLevel.GRADE3.value,
+			status=StatusEnum.APPROVED.value,
+		)
+
+		self.other_grade_user = User.objects.create_user(
+			phone='231770020004',
+			name='Other Grade',
+			email='student.othergrade@example.com',
+			password='pass',
+			role=UserRole.STUDENT.value,
+		)
+		self.other_grade_student = Student.objects.create(
+			profile=self.other_grade_user,
+			school=self.school_one,
+			grade=StudentLevel.GRADE4.value,
+			status=StatusEnum.APPROVED.value,
+		)
+
+		self.other_school_user = User.objects.create_user(
+			phone='231770020005',
+			name='Other School',
+			email='student.otherschool@example.com',
+			password='pass',
+			role=UserRole.STUDENT.value,
+		)
+		self.other_school_student = Student.objects.create(
+			profile=self.other_school_user,
+			school=self.school_two,
+			grade=StudentLevel.GRADE3.value,
+			status=StatusEnum.APPROVED.value,
+		)
+
+		self.assessment = GeneralAssessment.objects.create(
+			title='Stats Assessment',
+			given_by=self.teacher,
+			marks=20,
+			grade=StudentLevel.GRADE3.value,
+		)
+
+		GeneralAssessmentGrade.objects.create(assessment=self.assessment, student=self.student_one, score=10)
+		GeneralAssessmentGrade.objects.create(assessment=self.assessment, student=self.student_two, score=20)
+		# Should be excluded: wrong grade.
+		GeneralAssessmentGrade.objects.create(assessment=self.assessment, student=self.other_grade_student, score=5)
+		# Should be excluded: other school.
+		GeneralAssessmentGrade.objects.create(assessment=self.assessment, student=self.other_school_student, score=7)
+
+		self.client.force_authenticate(user=self.teacher_user)
+
+	def test_teacher_assessment_statistics_scopes_to_school_and_grade(self):
+		resp = self.client.get(
+			f'/api-v1/teacher/assessment-statistics/?general_assessment_id={self.assessment.id}'
+		)
+		self.assertEqual(resp.status_code, 200)
+		payload = resp.json()
+		self.assertEqual(payload['summary']['submissions'], 2)
+		self.assertEqual(payload['summary']['total_score'], 30.0)
+		self.assertEqual(payload['summary']['mean'], 15.0)
+		self.assertEqual(sum(payload['chart']['values']), 2)
+
+
+class AdminAssessmentStatisticsEndpointTests(TestCase):
+	def setUp(self):
+		cache.clear()
+		self.client = APIClient()
+
+		self.admin_user = User.objects.create_user(
+			phone='231770030001',
+			name='Admin Stats',
+			email='admin.stats@example.com',
+			password='pass',
+			role=UserRole.ADMIN.value,
+		)
+		self.admin_user.is_staff = True
+		self.admin_user.is_superuser = True
+		self.admin_user.save(update_fields=['is_staff', 'is_superuser'])
+		self.client.force_authenticate(user=self.admin_user)
+
+		county = County.objects.create(name='Montserrado')
+		district = District.objects.create(county=county, name='Careysburg')
+		school_one = School.objects.create(district=district, name='School One')
+		school_two = School.objects.create(district=district, name='School Two')
+
+		teacher_user = User.objects.create_user(
+			phone='231770030002',
+			name='Teacher Admin Stats',
+			email='teacher.adminstats@example.com',
+			password='pass',
+			role=UserRole.TEACHER.value,
+		)
+		teacher = Teacher.objects.create(profile=teacher_user, school=school_one, status=StatusEnum.APPROVED.value)
+
+		self.assessment = GeneralAssessment.objects.create(
+			title='Admin Stats Assessment',
+			given_by=teacher,
+			marks=20,
+			grade=StudentLevel.GRADE3.value,
+		)
+
+		student_scores = [
+			(school_one, StudentLevel.GRADE3.value, 10, '231770030003', 'Student A', 'student.a@example.com'),
+			(school_one, StudentLevel.GRADE4.value, 5, '231770030004', 'Student B', 'student.b@example.com'),
+			(school_two, StudentLevel.GRADE3.value, 7, '231770030005', 'Student C', 'student.c@example.com'),
+			(school_two, StudentLevel.GRADE4.value, 20, '231770030006', 'Student D', 'student.d@example.com'),
+		]
+		for school, grade, score, phone, name, email in student_scores:
+			user = User.objects.create_user(
+				phone=phone,
+				name=name,
+				email=email,
+				password='pass',
+				role=UserRole.STUDENT.value,
+			)
+			student = Student.objects.create(
+				profile=user,
+				school=school,
+				grade=grade,
+				status=StatusEnum.APPROVED.value,
+			)
+			GeneralAssessmentGrade.objects.create(assessment=self.assessment, student=student, score=score)
+
+	def test_admin_assessment_statistics_is_system_wide(self):
+		resp = self.client.get(
+			f'/api-v1/admin/system-reports/assessment-statistics/?general_assessment_id={self.assessment.id}'
+		)
+		self.assertEqual(resp.status_code, 200)
+		payload = resp.json()
+		self.assertEqual(payload['summary']['submissions'], 4)
+		self.assertEqual(payload['summary']['total_score'], 42.0)
+		self.assertEqual(sum(payload['chart']['values']), 4)
 
 
 class LeaderboardScopeTests(TestCase):

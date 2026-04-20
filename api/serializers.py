@@ -230,6 +230,29 @@ class AdminSystemReportSerializer(serializers.Serializer):
     activity_stats = AdminSystemReportActivityStatsSerializer()
 
 
+class AssessmentStatisticsSummarySerializer(serializers.Serializer):
+    submissions = serializers.IntegerField()
+    total_score = serializers.FloatField()
+    mean = serializers.FloatField()
+    median = serializers.FloatField()
+    mode = serializers.FloatField()
+    range = serializers.CharField()
+    Q1 = serializers.FloatField()
+    Q3 = serializers.FloatField()
+    standard_deviation = serializers.FloatField()
+    skewness_coefficient = serializers.FloatField()
+
+
+class AssessmentStatisticsChartSerializer(serializers.Serializer):
+    labels = serializers.ListField(child=serializers.CharField())
+    values = serializers.ListField(child=serializers.IntegerField())
+
+
+class AssessmentStatisticsResponseSerializer(serializers.Serializer):
+    summary = AssessmentStatisticsSummarySerializer()
+    chart = AssessmentStatisticsChartSerializer()
+
+
 class TeacherCreateStudentSerializer(serializers.Serializer):
     name = serializers.CharField(max_length=255)
     phone = serializers.CharField(max_length=25)
