@@ -5927,6 +5927,7 @@ class KidsViewSet(viewsets.ViewSet):
 				"title": ga['title'],
 				"type": "general",
 				"marks": ga['marks'],
+				"is_targeted": ga.is_targeted or ga.target_student == student,
 			})
 		for la in lesson_qs:
 			items.append({
@@ -5935,6 +5936,7 @@ class KidsViewSet(viewsets.ViewSet):
 				"type": "lesson",
 				"lesson_id": la['lesson_id'],
 				"marks": la['marks'],
+				"is_targeted": la.is_targeted or la.target_student == student,
 			})
 
 		payload = _paginate_payload(request, items, 'assessments')
