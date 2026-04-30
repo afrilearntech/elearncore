@@ -5908,7 +5908,7 @@ class KidsViewSet(viewsets.ViewSet):
 				(models.Q(grade__isnull=True) | models.Q(grade=student.grade))
 				& (models.Q(is_targeted=False) | models.Q(target_student=student))
 			)
-			.values('id', 'title', 'marks')
+			.values('id', 'title', 'marks', 'is_targeted', 'target_student')
 			.order_by('title')
 		)
 		lesson_qs = (
@@ -5916,7 +5916,7 @@ class KidsViewSet(viewsets.ViewSet):
 			.filter(
 				lesson__subject__grade=student.grade,
 			).filter(models.Q(is_targeted=False) | models.Q(target_student=student))
-			.values('id', 'title', 'lesson_id', 'marks')
+			.values('id', 'title', 'lesson_id', 'marks', 'is_targeted', 'target_student')
 			.order_by('title')
 		)
 
