@@ -6611,8 +6611,8 @@ class TeacherViewSet(viewsets.ViewSet):
 
 	@extend_schema(
 		description=(
-			"List published stories for a teacher's grade scope. Returns global published stories "
-			"plus published stories tied to the teacher's school."
+			"List published stories for a teacher's grade scope. \nReturns global published stories "
+			"plus published stories tied to the teacher's school. \nTeachers can also see thier own unpublished stories."
 		),
 		parameters=[
 			OpenApiParameter(name='grade', required=False, location=OpenApiParameter.QUERY, type=str),
