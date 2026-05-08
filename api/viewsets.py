@@ -51,13 +51,19 @@ from content.serializers import (
 	LessonResourceSerializer,
 	TakeLessonSerializer,
 	GeneralAssessmentSerializer,
+	GeneralAssessmentUpdateSerializer,
+	GeneralAssessmentTeacherUpdateSerializer,
 	LessonAssessmentSerializer,
+	LessonAssessmentUpdateSerializer,
+	LessonAssessmentTeacherUpdateSerializer,
 	QuestionSerializer,
 	OptionSerializer,
 	QuestionCreateSerializer,
+	QuestionUpdateSerializer,
 	GameSerializer,
 	StoryListSerializer,
 	StoryDetailSerializer,
+	StoryUpdateSerializer,
 	StoryGenerateRequestSerializer,
 	StoryPublishRequestSerializer,
 )
@@ -81,6 +87,8 @@ from .serializers import (
 	ChangePasswordSerializer,
 	ContentModerationSerializer,
 	ContentModerationResponseSerializer,
+	GenerateAIAssessmentsRequestSerializer,
+	ContentGenerateAIAssessmentsRequestSerializer,
 	ContentAssessmentItemSerializer,
 	ContentDashboardSerializer,
 	TeacherCreateStudentSerializer,
@@ -2475,6 +2483,32 @@ class ContentViewSet(viewsets.ViewSet):
 			"story_ids": story_ids,
 		})
 
+	@extend_schema(
+		operation_id="content_update_story",
+		request=StoryUpdateSerializer,
+		responses={200: StoryDetailSerializer},
+		description=(
+			"Partially update a story. Content creators may only update stories they created; "
+			"validators/admins can update any story. Publication and ownership fields are not editable here."
+		),
+	)
+	@action(detail=False, methods=['patch'], url_path='stories/(?P<pk>[^/.]+)')
+	def update_story(self, request, pk=None):
+		deny = self._require_creator(request)
+		if deny:
+			return deny
+		try:
+			story = Story.objects.get(pk=pk)
+		except Story.DoesNotExist:
+			return Response({"detail": "Story not found."}, status=status.HTTP_404_NOT_FOUND)
+		if not IsContentValidator().has_permission(request, self):
+			if story.created_by_id != request.user.pk:
+				return Response({"detail": "You can only update stories you created."}, status=status.HTTP_403_FORBIDDEN)
+		ser = StoryUpdateSerializer(story, data=request.data, partial=True)
+		ser.is_valid(raise_exception=True)
+		updated = ser.save()
+		return Response(StoryDetailSerializer(updated).data)
+
 	
 	@extend_schema(
 		operation_id="content_subjects",
@@ -2719,6 +2753,63 @@ class ContentViewSet(viewsets.ViewSet):
 		ser.is_valid(raise_exception=True)
 		obj = ser.save()
 		return Response(LessonAssessmentSerializer(obj).data, status=status.HTTP_201_CREATED)
+
+	@extend_schema(
+		operation_id="content_generate_ai_assessments",
+		description=(
+			"Use AI to generate assessments from a student's recent activity. Content creators, "
+			"validators, and admins may generate either student-targeted assessments or class-wide "
+			"assessments for the selected student's school/grade. If the requester has a teacher "
+			"profile, generated assessments are linked to that teacher; otherwise given_by is null."
+		),
+		request=ContentGenerateAIAssessmentsRequestSerializer,
+		responses={200: OpenApiResponse(description="AI-generated assessments.")},
+	)
+	@action(detail=False, methods=['post'], url_path='generate-ai-assessments')
+	def generate_ai_assessments(self, request):
+		if not _user_role_in(
+			request.user,
+			{UserRole.ADMIN.value, UserRole.CONTENTCREATOR.value, UserRole.CONTENTVALIDATOR.value},
+		):
+			return Response({"detail": "Admin or content manager role required."}, status=403)
+
+		ser = ContentGenerateAIAssessmentsRequestSerializer(data=request.data)
+		ser.is_valid(raise_exception=True)
+		data = ser.validated_data
+		target_scope = data.get('target_scope') or 'student'
+		max_items = data.get('max_items') or 2
+
+		try:
+			student = Student.objects.select_related('school', 'profile').get(pk=data['student_id'])
+		except Student.DoesNotExist:
+			return Response({"detail": "Student not found."}, status=404)
+
+		if target_scope == "class":
+			if not getattr(student, 'school_id', None):
+				return Response({"detail": "Student must belong to a school for class-wide generation."}, status=400)
+			class_student_count = Student.objects.filter(
+				school_id=student.school_id,
+				grade=student.grade,
+				status=StatusEnum.APPROVED.value,
+			).count()
+			if class_student_count == 0:
+				return Response({"detail": "No approved students found for this class."}, status=404)
+
+		result = generate_targeted_assessments_for_student(
+			student,
+			max_items=max_items,
+			triggered_by_teacher=getattr(request.user, 'teacher', None),
+			triggered_by_user=request.user,
+			target_scope=target_scope,
+		)
+		general_ser = GeneralAssessmentSerializer(result.get("general", []), many=True)
+		lesson_ser = LessonAssessmentSerializer(result.get("lesson", []), many=True)
+		return Response({
+			"target_scope": target_scope,
+			"student_id": student.id,
+			"general_assessments": general_ser.data,
+			"lesson_assessments": lesson_ser.data,
+		})
 
 	@extend_schema(
 		operation_id="content_list_questions",
@@ -3829,7 +3920,7 @@ class ContentViewSet(viewsets.ViewSet):
 
 	@extend_schema(
 		operation_id="content_update_general_assessment",
-		request=GeneralAssessmentSerializer,
+		request=GeneralAssessmentUpdateSerializer,
 		responses={200: GeneralAssessmentSerializer},
 		description=(
 			"Partially update a general assessment. "
@@ -3848,20 +3939,28 @@ class ContentViewSet(viewsets.ViewSet):
 			return Response({"detail": "General assessment not found."}, status=status.HTTP_404_NOT_FOUND)
 		if not IsContentValidator().has_permission(request, self):
 			teacher = getattr(request.user, 'teacher', None)
-			if not obj.ai_recommended:
+			if getattr(request.user, 'role', None) in {UserRole.TEACHER.value, UserRole.HEADTEACHER.value}:
+				if teacher is None or obj.given_by_id != teacher.id:
+					return Response({"detail": "You can only update your own assessments."}, status=status.HTTP_403_FORBIDDEN)
+			elif not obj.ai_recommended:
 				if teacher is None or obj.given_by_id != teacher.id:
 					return Response(
 						{"detail": "You can only update your own assessments or AI-generated ones."},
 						status=status.HTTP_403_FORBIDDEN,
 					)
-		ser = GeneralAssessmentSerializer(obj, data=request.data, partial=True)
+		serializer_class = (
+			GeneralAssessmentTeacherUpdateSerializer
+			if getattr(request.user, 'role', None) in {UserRole.TEACHER.value, UserRole.HEADTEACHER.value}
+			else GeneralAssessmentUpdateSerializer
+		)
+		ser = serializer_class(obj, data=request.data, partial=True)
 		ser.is_valid(raise_exception=True)
 		updated = ser.save()
 		return Response(GeneralAssessmentSerializer(updated).data)
 
 	@extend_schema(
 		operation_id="content_update_lesson_assessment",
-		request=LessonAssessmentSerializer,
+		request=LessonAssessmentUpdateSerializer,
 		responses={200: LessonAssessmentSerializer},
 		description=(
 			"Partially update a lesson assessment. "
@@ -3880,13 +3979,21 @@ class ContentViewSet(viewsets.ViewSet):
 			return Response({"detail": "Lesson assessment not found."}, status=status.HTTP_404_NOT_FOUND)
 		if not IsContentValidator().has_permission(request, self):
 			teacher = getattr(request.user, 'teacher', None)
-			if not obj.ai_recommended:
+			if getattr(request.user, 'role', None) in {UserRole.TEACHER.value, UserRole.HEADTEACHER.value}:
+				if teacher is None or obj.given_by_id != teacher.id:
+					return Response({"detail": "You can only update your own assessments."}, status=status.HTTP_403_FORBIDDEN)
+			elif not obj.ai_recommended:
 				if teacher is None or obj.given_by_id != teacher.id:
 					return Response(
 						{"detail": "You can only update your own assessments or AI-generated ones."},
 						status=status.HTTP_403_FORBIDDEN,
 					)
-		ser = LessonAssessmentSerializer(obj, data=request.data, partial=True)
+		serializer_class = (
+			LessonAssessmentTeacherUpdateSerializer
+			if getattr(request.user, 'role', None) in {UserRole.TEACHER.value, UserRole.HEADTEACHER.value}
+			else LessonAssessmentUpdateSerializer
+		)
+		ser = serializer_class(obj, data=request.data, partial=True)
 		ser.is_valid(raise_exception=True)
 		updated = ser.save()
 		return Response(LessonAssessmentSerializer(updated).data)
@@ -3985,7 +4092,7 @@ class ContentViewSet(viewsets.ViewSet):
 
 	@extend_schema(
 		operation_id="content_update_question",
-		request=QuestionCreateSerializer,
+		request=QuestionUpdateSerializer,
 		responses={200: QuestionSerializer},
 		description=(
 			"Partially update a question's type, text, or answer. "
@@ -4002,14 +4109,10 @@ class ContentViewSet(viewsets.ViewSet):
 			obj = Question.objects.prefetch_related('options').get(pk=pk)
 		except Question.DoesNotExist:
 			return Response({"detail": "Question not found."}, status=status.HTTP_404_NOT_FOUND)
-		allowed_fields = {'type', 'question', 'answer'}
-		update_data = {k: v for k, v in request.data.items() if k in allowed_fields}
-		if not update_data:
-			return Response({"detail": "No updatable fields provided. Allowed: type, question, answer."}, status=status.HTTP_400_BAD_REQUEST)
-		for field, value in update_data.items():
-			setattr(obj, field, value)
-		obj.save(update_fields=list(update_data.keys()))
-		return Response(QuestionSerializer(obj).data)
+		ser = QuestionUpdateSerializer(obj, data=request.data, partial=True)
+		ser.is_valid(raise_exception=True)
+		updated = ser.save()
+		return Response(QuestionSerializer(updated).data)
 
 
 class OnboardingViewSet(viewsets.ViewSet):
@@ -6389,6 +6492,8 @@ class TeacherViewSet(viewsets.ViewSet):
 	permission_classes = [permissions.IsAuthenticated]
 
 	class GenerateAIAssessmentsResponseSerializer(serializers.Serializer):
+		target_scope = serializers.CharField(required=False)
+		student_id = serializers.IntegerField(required=False)
 		general_assessments = GeneralAssessmentSerializer(many=True)
 		lesson_assessments = LessonAssessmentSerializer(many=True)
 
@@ -6468,6 +6573,11 @@ class TeacherViewSet(viewsets.ViewSet):
 			'school_name': getattr(school, 'name', None),
 			'grades': self._teacher_leaderboard_grades(teacher),
 		}
+
+	def _teacher_can_manage_student_grade(self, teacher: Teacher, student: Student, user: User) -> bool:
+		if getattr(user, 'role', None) == UserRole.HEADTEACHER.value:
+			return True
+		return student.grade in self._teacher_leaderboard_grades(teacher)
 
 	def _validate_unlock_scope(self, teacher: Teacher, student: Student, lesson: LessonResource) -> str | None:
 		if not getattr(teacher, 'school_id', None) or student.school_id != teacher.school_id:
@@ -6554,6 +6664,31 @@ class TeacherViewSet(viewsets.ViewSet):
 			return Response({"detail": "Story not found."}, status=404)
 
 		return Response(StoryDetailSerializer(story).data)
+
+	@extend_schema(
+		description=(
+			"Partially update an unpublished or published story generated by the current teacher/headteacher. "
+			"Ownership, school, creator, and publication fields are not editable."
+		),
+		request=StoryUpdateSerializer,
+		responses={200: StoryDetailSerializer},
+	)
+	@action(detail=False, methods=['patch'], url_path='stories/(?P<pk>[^/.]+)/update')
+	def update_story(self, request, pk=None):
+		deny = self._require_teacher(request)
+		if deny:
+			return deny
+
+		teacher = request.user.teacher
+		try:
+			story = Story.objects.get(pk=pk, created_by=request.user, school_id=getattr(teacher, 'school_id', None))
+		except Story.DoesNotExist:
+			return Response({"detail": "Story not found."}, status=404)
+
+		ser = StoryUpdateSerializer(story, data=request.data, partial=True)
+		ser.is_valid(raise_exception=True)
+		updated = ser.save()
+		return Response(StoryDetailSerializer(updated).data)
 
 	@extend_schema(
 		description=(
@@ -7193,6 +7328,31 @@ class TeacherViewSet(viewsets.ViewSet):
 		return Response(GeneralAssessmentSerializer(ga).data, status=201)
 
 	@extend_schema(
+		description=(
+			"Partially update an AI-generated general assessment created by this teacher/headteacher. "
+			"Ownership and targeting fields are not editable."
+		),
+		request=GeneralAssessmentTeacherUpdateSerializer,
+		responses={200: GeneralAssessmentSerializer},
+	)
+	@action(detail=False, methods=['patch'], url_path='general-assessments/(?P<pk>[^/.]+)')
+	def update_general_assessment(self, request, pk=None):
+		deny = self._require_teacher(request)
+		if deny:
+			return deny
+		teacher = request.user.teacher
+		try:
+			ga = GeneralAssessment.objects.get(pk=pk, given_by=teacher, ai_recommended=True)
+		except GeneralAssessment.DoesNotExist:
+			return Response({"detail": "AI-generated general assessment not found."}, status=404)
+		ser = GeneralAssessmentTeacherUpdateSerializer(ga, data=request.data, partial=True)
+		ser.is_valid(raise_exception=True)
+		if 'grade' in ser.validated_data and ser.validated_data['grade'] not in self._teacher_leaderboard_grades(teacher):
+			return Response({"detail": "You can only use grades you teach."}, status=403)
+		updated = ser.save()
+		return Response(GeneralAssessmentSerializer(updated).data)
+
+	@extend_schema(
 		description="List lesson assessments created by this teacher.",
 		responses={200: LessonAssessmentSerializer(many=True)},
 		parameters=[
@@ -7258,6 +7418,32 @@ class TeacherViewSet(viewsets.ViewSet):
 
 	@extend_schema(
 		description=(
+			"Partially update an AI-generated lesson assessment created by this teacher/headteacher. "
+			"Ownership and targeting fields are not editable."
+		),
+		request=LessonAssessmentTeacherUpdateSerializer,
+		responses={200: LessonAssessmentSerializer},
+	)
+	@action(detail=False, methods=['patch'], url_path='lesson-assessments/(?P<pk>[^/.]+)')
+	def update_lesson_assessment(self, request, pk=None):
+		deny = self._require_teacher(request)
+		if deny:
+			return deny
+		teacher = request.user.teacher
+		try:
+			la = LessonAssessment.objects.select_related('lesson__subject').get(pk=pk, given_by=teacher, ai_recommended=True)
+		except LessonAssessment.DoesNotExist:
+			return Response({"detail": "AI-generated lesson assessment not found."}, status=404)
+		ser = LessonAssessmentTeacherUpdateSerializer(la, data=request.data, partial=True)
+		ser.is_valid(raise_exception=True)
+		next_lesson = ser.validated_data.get('lesson', la.lesson)
+		if not Subject.objects.filter(id=next_lesson.subject_id, teachers=teacher).exists():
+			return Response({"detail": "You can only use lessons for subjects you teach."}, status=403)
+		updated = ser.save()
+		return Response(LessonAssessmentSerializer(updated).data)
+
+	@extend_schema(
+		description=(
 			"Create a question (with optional options) for one of this teacher's "
 			"general or lesson assessments. Exactly one of general_assessment_id "
 			"or lesson_assessment_id must be provided."
@@ -7290,6 +7476,37 @@ class TeacherViewSet(viewsets.ViewSet):
 		ser.is_valid(raise_exception=True)
 		question = ser.save()
 		return Response(QuestionSerializer(question).data, status=201)
+
+	@extend_schema(
+		description=(
+			"Partially update a question belonging to one of this teacher's AI-generated assessments. "
+			"Assessment associations cannot be changed."
+		),
+		request=QuestionUpdateSerializer,
+		responses={200: QuestionSerializer},
+	)
+	@action(detail=False, methods=['patch'], url_path='questions/(?P<pk>[^/.]+)')
+	def update_question(self, request, pk=None):
+		deny = self._require_teacher(request)
+		if deny:
+			return deny
+		teacher = request.user.teacher
+		try:
+			question = (
+				Question.objects
+				.prefetch_related('options')
+				.get(
+					Q(general_assessment__given_by=teacher, general_assessment__ai_recommended=True) |
+					Q(lesson_assessment__given_by=teacher, lesson_assessment__ai_recommended=True),
+					pk=pk,
+				)
+			)
+		except Question.DoesNotExist:
+			return Response({"detail": "AI-generated assessment question not found."}, status=404)
+		ser = QuestionUpdateSerializer(question, data=request.data, partial=True)
+		ser.is_valid(raise_exception=True)
+		updated = ser.save()
+		return Response(QuestionSerializer(updated).data)
 
 	@extend_schema(
 		description=(
@@ -7400,7 +7617,8 @@ class TeacherViewSet(viewsets.ViewSet):
 	@extend_schema(
 		description=(
 			"Use AI to generate targeted quizzes/assignments for a specific student "
-			"based on their recent activity. Returns the created assessments."
+			"or for that student's whole school/grade class based on recent activity. "
+			"Returns the created assessments."
 		),
 		parameters=[
 			OpenApiParameter(
@@ -7411,7 +7629,7 @@ class TeacherViewSet(viewsets.ViewSet):
 				description="Student primary key.",
 			),
 		],
-		request=None,
+		request=GenerateAIAssessmentsRequestSerializer,
 		responses={
 			200: OpenApiResponse(
 				description="AI-generated targeted assessments for the student.",
@@ -7421,7 +7639,7 @@ class TeacherViewSet(viewsets.ViewSet):
 	)
 	@action(detail=True, methods=['post'], url_path='generate-ai-assessments')
 	def generate_ai_assessments(self, request, pk=None):
-		"""Generate AI-targeted assessments (quizzes/assignments) for a student.
+		"""Generate AI assessments (quizzes/assignments) for a student or class.
 
 		The "pk" here refers to the Student's primary key.
 		"""
@@ -7429,15 +7647,43 @@ class TeacherViewSet(viewsets.ViewSet):
 		if deny:
 			return deny
 		teacher = request.user.teacher
+		ser = GenerateAIAssessmentsRequestSerializer(data=request.data)
+		ser.is_valid(raise_exception=True)
+		data = ser.validated_data
+		target_scope = data.get('target_scope') or 'student'
+		max_items = data.get('max_items') or 2
+
 		try:
 			student = Student.objects.get(pk=pk, school=teacher.school)
 		except Student.DoesNotExist:
 			return Response({"detail": "Student not found in your school."}, status=404)
 
-		result = generate_targeted_assessments_for_student(student)
+		if not self._teacher_can_manage_student_grade(teacher, student, request.user):
+			return Response({"detail": "You can only generate assessments for grades you teach."}, status=403)
+
+		if target_scope == "class":
+			if not getattr(teacher, 'school_id', None):
+				return Response({"detail": "Teacher must be assigned to a school."}, status=403)
+			class_student_count = Student.objects.filter(
+				school_id=teacher.school_id,
+				grade=student.grade,
+				status=StatusEnum.APPROVED.value,
+			).count()
+			if class_student_count == 0:
+				return Response({"detail": "No approved students found for this class."}, status=404)
+
+		result = generate_targeted_assessments_for_student(
+			student,
+			max_items=max_items,
+			triggered_by_teacher=teacher,
+			triggered_by_user=request.user,
+			target_scope=target_scope,
+		)
 		general_ser = GeneralAssessmentSerializer(result.get("general", []), many=True)
 		lesson_ser = LessonAssessmentSerializer(result.get("lesson", []), many=True)
 		return Response({
+			"target_scope": target_scope,
+			"student_id": student.id,
 			"general_assessments": general_ser.data,
 			"lesson_assessments": lesson_ser.data,
 		})

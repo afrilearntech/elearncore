@@ -72,6 +72,26 @@ class ContentModerationResponseSerializer(serializers.Serializer):
     moderation_comment = serializers.CharField(allow_null=True, required=False)
 
 
+class GenerateAIAssessmentsRequestSerializer(serializers.Serializer):
+    target_scope = serializers.ChoiceField(
+        choices=["student", "class"],
+        default="student",
+        required=False,
+        help_text="Use student for a targeted assessment or class for the selected student's whole school/grade class.",
+    )
+    max_items = serializers.IntegerField(
+        min_value=1,
+        max_value=10,
+        default=2,
+        required=False,
+        help_text="Maximum number of assessments to request from AI.",
+    )
+
+
+class ContentGenerateAIAssessmentsRequestSerializer(GenerateAIAssessmentsRequestSerializer):
+    student_id = serializers.IntegerField(help_text="Student primary key used as the generation context.")
+
+
 class ContentAssessmentItemSerializer(serializers.Serializer):
     kind = serializers.ChoiceField(choices=["general", "lesson"])
     id = serializers.IntegerField()

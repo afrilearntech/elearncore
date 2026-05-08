@@ -57,6 +57,19 @@ class StoryDetailSerializer(serializers.ModelSerializer):
 		read_only_fields = fields
 
 
+class StoryUpdateSerializer(serializers.ModelSerializer):
+	characters = StoryCharacterSerializer(many=True, required=False)
+	vocabulary = StoryVocabularySerializer(many=True, required=False)
+	cover_image = StoryCoverImageSerializer(required=False)
+
+	class Meta:
+		model = Story
+		fields = [
+			'title', 'grade', 'tag', 'estimated_minutes',
+			'cover_image', 'characters', 'vocabulary', 'moral', 'body',
+		]
+
+
 class StoryGenerateRequestSerializer(serializers.Serializer):
 	grade = serializers.ChoiceField(choices=[(lvl.value, lvl.value) for lvl in StudentLevel])
 	tag = serializers.ChoiceField(choices=STORY_TAG_CHOICES)
@@ -183,6 +196,23 @@ class GeneralAssessmentSerializer(serializers.ModelSerializer):
 		read_only_fields = ['created_at', 'updated_at']
 
 
+class GeneralAssessmentUpdateSerializer(serializers.ModelSerializer):
+	class Meta:
+		model = GeneralAssessment
+		fields = [
+			'title', 'type', 'instructions', 'marks', 'due_at', 'grade',
+			'status', 'moderation_comment',
+		]
+
+
+class GeneralAssessmentTeacherUpdateSerializer(serializers.ModelSerializer):
+	class Meta:
+		model = GeneralAssessment
+		fields = [
+			'title', 'type', 'instructions', 'marks', 'due_at', 'grade',
+		]
+
+
 class AssessmentSolutionSerializer(serializers.ModelSerializer):
 	class Meta:
 		model = AssessmentSolution
@@ -216,6 +246,23 @@ class LessonAssessmentSerializer(serializers.ModelSerializer):
 			'status', 'moderation_comment', 'created_at', 'updated_at',
 		]
 		read_only_fields = ['created_at', 'updated_at']
+
+
+class LessonAssessmentUpdateSerializer(serializers.ModelSerializer):
+	class Meta:
+		model = LessonAssessment
+		fields = [
+			'lesson', 'type', 'title', 'instructions', 'marks', 'due_at',
+			'status', 'moderation_comment',
+		]
+
+
+class LessonAssessmentTeacherUpdateSerializer(serializers.ModelSerializer):
+	class Meta:
+		model = LessonAssessment
+		fields = [
+			'lesson', 'type', 'title', 'instructions', 'marks', 'due_at',
+		]
 
 
 class LessonAssessmentGradeSerializer(serializers.ModelSerializer):
@@ -327,6 +374,52 @@ class QuestionCreateSerializer(serializers.Serializer):
 			if text:
 				Option.objects.create(question=question, value=text)
 		return question
+
+
+class QuestionUpdateSerializer(serializers.Serializer):
+	type = serializers.ChoiceField(
+		choices=[(qt.value, qt.value) for qt in QTypeEnum],
+		required=False,
+	)
+	question = serializers.CharField(required=False)
+	answer = serializers.CharField(required=False, allow_blank=True)
+	options = serializers.ListField(
+		child=serializers.CharField(),
+		required=False,
+		allow_empty=True,
+		help_text="Optional replacement list of options.",
+	)
+
+	def validate(self, attrs):
+		if not attrs:
+			raise serializers.ValidationError("Provide at least one field to update.")
+		qtype = attrs.get("type") or getattr(self.instance, "type", None)
+		options = attrs.get("options")
+		if qtype == QTypeEnum.MULTIPLE_CHOICE.value and options is not None:
+			clean_options = [str(opt).strip() for opt in options if str(opt).strip()]
+			if not clean_options:
+				raise serializers.ValidationError({"options": ["Options are required for multiple-choice questions."]})
+			attrs["options"] = clean_options
+		if qtype == QTypeEnum.TRUE_FALSE.value and "options" in attrs:
+			attrs["options"] = ["True", "False"]
+		return attrs
+
+	def update(self, instance, validated_data):
+		options = validated_data.pop("options", None)
+		update_fields = []
+		for field in ("type", "question", "answer"):
+			if field in validated_data:
+				setattr(instance, field, validated_data[field])
+				update_fields.append(field)
+		if update_fields:
+			instance.save(update_fields=update_fields)
+		if options is not None:
+			instance.options.all().delete()
+			for val in options:
+				text = str(val).strip()
+				if text:
+					Option.objects.create(question=instance, value=text)
+		return instance
 
 
 class GameSerializer(serializers.ModelSerializer):

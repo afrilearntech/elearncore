@@ -36,6 +36,54 @@ def _get_openai_client():
         return None
 
 
+def _openai_json_text(client, *, model: str, system: str, prompt: str, data: Dict, schema: Dict) -> str:
+    """Return JSON text using the newest available OpenAI API on this install."""
+    import json
+
+    if hasattr(client, 'responses'):
+        resp = client.responses.create(
+            model=model,
+            input=[
+                {"role": "system", "content": system},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {"type": "input_json", "input_json": data},
+                    ],
+                },
+            ],
+            response_format={"type": "json_schema", "json_schema": schema},
+        )
+        return getattr(resp, "output_text", "") or ""
+
+    if hasattr(client, 'chat') and hasattr(client.chat, 'completions'):
+        messages = [
+            {"role": "system", "content": system},
+            {
+                "role": "user",
+                "content": (
+                    f"{prompt}\n\nContext JSON:\n"
+                    f"{json.dumps(data, ensure_ascii=True, default=str)}"
+                ),
+            },
+        ]
+        try:
+            resp = client.chat.completions.create(
+                model=model,
+                messages=messages,
+                response_format={"type": "json_object"},
+            )
+        except Exception:
+            resp = client.chat.completions.create(
+                model=model,
+                messages=messages,
+            )
+        return (resp.choices[0].message.content or "") if getattr(resp, "choices", None) else ""
+
+    return ""
+
+
 def ai_runtime_diagnostics() -> Dict:
     """Return non-sensitive diagnostics for AI/Celery runtime health.
 
@@ -330,16 +378,30 @@ def _parse_assessments_json(text: str) -> List[Dict]:
     return []
 
 
-def generate_targeted_assessments_for_student(student: Student, max_items: int = 2) -> Dict[str, List[object]]:
+def generate_targeted_assessments_for_student(
+    student: Student,
+    max_items: int = 2,
+    *,
+    triggered_by_teacher=None,
+    triggered_by_user=None,
+    target_scope: str = "student",
+) -> Dict[str, List[object]]:
     """Use OpenAI to generate targeted quizzes/assignments for a specific student.
 
     Returns a dictionary with "general" and "lesson" keys containing the
     created GeneralAssessment and LessonAssessment instances. All created
-    assessments are flagged as AI recommended and targeted to the student.
+    assessments are flagged as AI recommended. Student scope targets only the
+    selected student; class scope leaves target_student empty so the whole
+    school/grade class can see the assessment.
     """
     client = _get_openai_client()
     if client is None:
         return {"general": [], "lesson": []}
+
+    target_scope = (target_scope or "student").strip().lower()
+    if target_scope not in {"student", "class"}:
+        target_scope = "student"
+    targets_student = target_scope == "student"
 
     activity = build_student_activity(student)
 
@@ -401,29 +463,31 @@ def generate_targeted_assessments_for_student(student: Student, max_items: int =
         "Return strictly as JSON per the provided schema."
     ) % max_items
 
-    resp = client.responses.create(
-        model=os.getenv('OPENAI_RECOMMENDER_MODEL', 'gpt-4o-mini'),
-        input=[
-            {
-                "role": "system",
-                "content": (
-                    "You generate targeted assessments (quizzes and assignments) "
-                    "for a single student on the Liberia eLearn platform. "
-                    "Use concise, age-appropriate language."
-                ),
-            },
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt},
-                    {"type": "input_json", "input_json": activity},
-                ],
-            },
-        ],
-        response_format={"type": "json_schema", "json_schema": schema},
-    )
+    if target_scope == "class":
+        prompt += (
+            "\n\nThese assessments will be assigned to the whole class in the "
+            "student's school and grade, so avoid references to one student's "
+            "private performance or name."
+        )
 
-    text = resp.output_text
+    try:
+        text = _openai_json_text(
+            client,
+            model=os.getenv('OPENAI_RECOMMENDER_MODEL', 'gpt-4o-mini'),
+            system=(
+                "You generate targeted assessments (quizzes and assignments) "
+                "for learners on the Liberia eLearn platform. "
+                "Use concise, age-appropriate language."
+            ),
+            prompt=prompt,
+            data=activity,
+            schema=schema,
+        )
+    except Exception as e:
+        print("Error generating targeted assessments from OpenAI.")
+        print(e)
+        return {"general": [], "lesson": []}
+
     items = _parse_assessments_json(text)
 
     from django.utils import timezone
@@ -452,12 +516,18 @@ def generate_targeted_assessments_for_student(student: Student, max_items: int =
                 pass
 
         assessment_type = AssessmentType.QUIZ.value if kind == 'QUIZ' else AssessmentType.ASSIGNMENT.value
-        teacher = getattr(student.profile, 'teacher', None)
+        teacher = triggered_by_teacher
 
         if scope == 'LESSON':
             lesson = _match_lesson(subject_name, topic_name, lesson_title)
             if not lesson:
                 continue
+            if getattr(getattr(lesson, "subject", None), "grade", None) != student.grade:
+                continue
+            if teacher is not None:
+                teaches_subject = Subject.objects.filter(id=lesson.subject_id, teachers=teacher).exists()
+                if not teaches_subject:
+                    continue
             la = LessonAssessment.objects.create(
                 lesson=lesson,
                 given_by=teacher,
@@ -468,8 +538,8 @@ def generate_targeted_assessments_for_student(student: Student, max_items: int =
                 due_at=due_at,
                 status=StatusEnum.PENDING.value,
                 ai_recommended=True,
-                is_targeted=True,
-                target_student=student,
+                is_targeted=targets_student,
+                target_student=student if targets_student else None,
             )
             _created_questions = []
             for q in questions:
@@ -488,8 +558,8 @@ def generate_targeted_assessments_for_student(student: Student, max_items: int =
                 grade=student.grade,
                 status=StatusEnum.PENDING.value,
                 ai_recommended=True,
-                is_targeted=True,
-                target_student=student,
+                is_targeted=targets_student,
+                target_student=student if targets_student else None,
             )
             for q in questions:
                 _create_question_from_ai(q, lesson_assessment=None, general_assessment=ga)
@@ -497,7 +567,7 @@ def generate_targeted_assessments_for_student(student: Student, max_items: int =
 
         # Log a generic activity for the student so dashboards can surface this
         try:
-            user = getattr(student, 'profile', None)
+            user = triggered_by_user or getattr(student, 'profile', None)
             if user is not None:
                 Activity.objects.create(
                     user=user,
@@ -506,6 +576,8 @@ def generate_targeted_assessments_for_student(student: Student, max_items: int =
                     metadata={
                         "kind": kind,
                         "scope": scope,
+                        "target_scope": target_scope,
+                        "student_id": student.id,
                         "assessment_type": assessment_type,
                     },
                 )
