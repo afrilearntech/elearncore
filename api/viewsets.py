@@ -203,8 +203,17 @@ TEACHER_UNLOCK_REASON = "Temporarily unlocked by teacher."
 STUDENT_LESSON_CACHE_TTL = 120
 
 
-def _published_stories_for_school(school_id: int | None):
-	qs = Story.objects.filter(is_published=True)
+def _published_stories_for_school(school_id: int | None, creator: User | None):
+	"""
+	creators can see their own stories in any state,\n 
+	but non-creators can only see published stories.\n 
+	Both can see stories without a school or with their school.\n
+	"""
+	qs = Story.objects.none()
+	if creator:
+		qs = Story.objects.filter(created_by=creator)
+	else:
+		qs = Story.objects.filter(is_published=True)
 	if school_id:
 		return qs.filter(Q(school__isnull=True) | Q(school_id=school_id))
 	return qs.filter(school__isnull=True)
@@ -6622,7 +6631,9 @@ class TeacherViewSet(viewsets.ViewSet):
 		if not teacher_grades:
 			return Response([])
 
-		qs = _published_stories_for_school(getattr(teacher, 'school_id', None)).filter(grade__in=teacher_grades)
+		qs = _published_stories_for_school(getattr(teacher, 'school_id', None),
+									 creator=request.user
+									 ).filter(grade__in=teacher_grades)
 
 		grade = (request.query_params.get('grade') or '').strip()
 		if grade:
