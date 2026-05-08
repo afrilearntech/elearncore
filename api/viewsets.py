@@ -5027,7 +5027,9 @@ class KidsViewSet(viewsets.ViewSet):
 		if not student:
 			return Response({"detail": "Student profile required."}, status=403)
 
-		qs = _published_stories_for_school(getattr(student, 'school_id', None)).order_by('-created_at')
+		qs = _published_stories_for_school(getattr(student, 'school_id', None),
+									 	creator=request.user
+									 ).order_by('-created_at')
 
 		grade = request.query_params.get('grade')
 		if grade:
@@ -5057,7 +5059,9 @@ class KidsViewSet(viewsets.ViewSet):
 			return Response({"detail": "Student profile required."}, status=403)
 
 		try:
-			story = _published_stories_for_school(getattr(student, 'school_id', None)).get(pk=pk)
+			story = _published_stories_for_school(getattr(student, 'school_id', None),
+										creator=request.user
+										 ).get(pk=pk)
 		except Story.DoesNotExist:
 			return Response({"detail": "Story not found."}, status=404)
 
@@ -6667,7 +6671,8 @@ class TeacherViewSet(viewsets.ViewSet):
 
 		try:
 			story = (
-				_published_stories_for_school(getattr(teacher, 'school_id', None))
+				_published_stories_for_school(getattr(teacher, 'school_id', None),
+											creator=request.user)
 				.filter(grade__in=teacher_grades)
 				.get(pk=pk)
 			)
