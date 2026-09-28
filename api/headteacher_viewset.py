@@ -12,6 +12,7 @@ from rest_framework.response import Response
 
 from elearncore.sysutils.constants import UserRole, Status as StatusEnum
 from elearncore.sysutils.tasks import fire_and_forget
+from messsaging.invitations import queue_account_invitation
 
 from accounts.models import Student, Teacher, User
 from accounts.security import assign_temporary_password
@@ -248,18 +249,7 @@ class HeadTeacherViewSet(TeacherViewSet):
 				status=StatusEnum.APPROVED.value,
 			)
 
-		message = (
-			f"Hi {name}, your Liberia eLearn teacher account has been created.\n"
-			f"Login with phone: {phone} and password: {temp_password}.\n"
-			"Please change this password after your first login."
-		)
-		fire_and_forget(
-			_send_account_notifications,
-			message,
-			phone,
-			email,
-			"Your Liberia eLearn teacher account",
-		)
+		fire_and_forget(queue_account_invitation, user, temp_password)
 		return Response(TeacherSerializer(teacher).data, status=status.HTTP_201_CREATED)
 
 	@extend_schema(
@@ -352,18 +342,7 @@ class HeadTeacherViewSet(TeacherViewSet):
 				failed_count += 1
 				continue
 
-			message = (
-				f"Hi {name}, your Liberia eLearn teacher account has been created.\n"
-				f"Login with phone: {phone} and password: {temp_password}.\n"
-				"Please change this password after your first login."
-			)
-			fire_and_forget(
-				_send_account_notifications,
-				message,
-				phone,
-				email,
-				"Your Liberia eLearn teacher account",
-			)
+			fire_and_forget(queue_account_invitation, user, temp_password)
 
 			created_count += 1
 			results.append({

@@ -349,18 +349,31 @@ UPLOAD_SCANNER = os.getenv('UPLOAD_SCANNER', '')
 REQUIRE_UPLOAD_SCAN = env_bool('REQUIRE_UPLOAD_SCAN', default=False)
 AI_GENERATION_RATE = os.getenv('AI_GENERATION_RATE', '10/hour')
 TEMPORARY_PASSWORD_TTL_HOURS = int(os.getenv('TEMPORARY_PASSWORD_TTL_HOURS', '24'))
+FRONTEND_BASE_URL = os.getenv(
+    'FRONTEND_BASE_URL',
+    'https://digitallearning.moe.gov.lr' if IS_PRODUCTION else 'http://localhost:3000',
+).rstrip('/')
+SELF_SERVICE_REGISTRATION_ENABLED = env_bool('SELF_SERVICE_REGISTRATION_ENABLED', default=False)
 
 # NOTIFICATION SETTINGS
-# email settings
-EMAIL_BACKEND = os.getenv('EMAIL_BACKEND', 'django.core.mail.backends.smtp.EmailBackend')
-EMAIL_HOST = os.getenv('EMAIL_HOST', 'smtp.gmail.com')
-EMAIL_PORT = int(os.getenv('EMAIL_PORT', '587'))
-EMAIL_HOST_USER = os.getenv('EMAIL_HOST_USER', '')
-EMAIL_HOST_PASSWORD = os.getenv('EMAIL_HOST_PASSWORD', '')
-EMAIL_USE_TLS = env_bool('EMAIL_USE_TLS', default=True)
-EMAIL_USE_SSL = env_bool('EMAIL_USE_SSL', default=False)
-EMAIL_TIMEOUT = int(os.getenv('EMAIL_TIMEOUT', '15'))
-DEFAULT_FROM_EMAIL = os.getenv('DEFAULT_FROM_EMAIL', os.getenv('DEFAULT_FROM_MAIL', ''))
+# Resend is the production email provider. Local environments without a key log
+# messages to the console instead of silently attempting an unconfigured SMTP connection.
+RESEND_API_KEY = os.getenv('RESEND_API_KEY', '').strip()
+ANYMAIL = {'RESEND_API_KEY': RESEND_API_KEY}
+EMAIL_BACKEND = os.getenv('EMAIL_BACKEND') or (
+    'anymail.backends.resend.EmailBackend'
+    if RESEND_API_KEY
+    else 'django.core.mail.backends.console.EmailBackend'
+)
+if IS_PRODUCTION and not RESEND_API_KEY:
+    raise ImproperlyConfigured('RESEND_API_KEY is required in production.')
+DEFAULT_FROM_EMAIL = os.getenv(
+    'DEFAULT_FROM_EMAIL',
+    os.getenv(
+        'DEFAULT_FROM_MAIL',
+        'LR Digital Leanrning Platform <onboarding@resend.dev>',
+    ),
+).strip()
  
 # KEYS
 SENDER_ID = os.getenv('SMS_SENDER_ID') # 11 characters max

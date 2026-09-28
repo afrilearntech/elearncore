@@ -7,6 +7,8 @@ from django.contrib.auth.password_validation import validate_password
 from django.utils import timezone
 
 from elearncore.sysutils.constants import UserRole
+from elearncore.sysutils.tasks import fire_and_forget
+from messsaging.invitations import queue_account_invitation
 
 
 class Command(BaseCommand):
@@ -82,6 +84,7 @@ class Command(BaseCommand):
                     hours=settings.TEMPORARY_PASSWORD_TTL_HOURS
                 ),
             )
+            fire_and_forget(queue_account_invitation, user, password)
 
             created += 1
             self.stdout.write(self.style.SUCCESS(f"Created temp admin: {user.email} ({user.name})"))

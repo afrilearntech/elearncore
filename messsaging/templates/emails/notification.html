@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ subject }}</title>
+</head>
+<body style="margin:0;padding:0;background:#eef3f8;color:#172033;font-family:Arial,Helvetica,sans-serif;">
+  <div style="display:none;max-height:0;overflow:hidden;opacity:0;color:transparent;">
+    {% if is_invitation %}Your secure LR Digital Learning Platform sign-in details are ready.{% else %}An update from the LR Digital Learning Platform.{% endif %}
+  </div>
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;background:#eef3f8;">
+    <tr>
+      <td align="center" style="padding:32px 16px;">
+        <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;max-width:620px;">
+          <tr>
+            <td style="padding:0 4px 18px;">
+              <table role="presentation" cellspacing="0" cellpadding="0" border="0">
+                <tr>
+                  <td width="46" height="46" align="center" style="width:46px;height:46px;background:#0b6b4f;border-radius:6px;color:#ffffff;font-size:20px;font-weight:700;">LR</td>
+                  <td style="padding-left:12px;">
+                    <div style="font-size:17px;line-height:22px;font-weight:700;color:#12233f;">Digital Learning Platform</div>
+                    <div style="font-size:12px;line-height:18px;color:#536176;">Ministry of Education</div>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+          <tr>
+            <td style="background:#ffffff;border:1px solid #dce4ec;border-radius:8px;overflow:hidden;box-shadow:0 8px 24px rgba(18,35,63,0.08);">
+              <div style="height:6px;background:#1464b8;font-size:0;line-height:0;">&nbsp;</div>
+              <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0">
+                <tr>
+                  <td style="padding:36px 40px 14px;">
+                    <div style="font-size:12px;line-height:18px;font-weight:700;color:#0b6b4f;text-transform:uppercase;">{% if is_invitation %}Account invitation{% else %}Account notification{% endif %}</div>
+                    <h1 style="margin:8px 0 14px;font-size:26px;line-height:34px;color:#12233f;font-weight:700;">{% if is_invitation %}Welcome to Liberia eLearn{% else %}{{ subject }}{% endif %}</h1>
+                    {% if is_invitation %}
+                      <p style="margin:0;font-size:16px;line-height:26px;color:#46546a;">Hello {{ recipient_name }}, your <strong style="color:#12233f;">{{ role_label }}</strong> account is ready. Use the secure details below for your first sign-in.</p>
+                    {% else %}
+                      <div style="font-size:16px;line-height:26px;color:#46546a;">{{ message|linebreaksbr }}</div>
+                    {% endif %}
+                  </td>
+                </tr>
+                {% if is_invitation %}
+                <tr>
+                  <td style="padding:18px 40px 8px;">
+                    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;background:#f6f9fc;border:1px solid #dce4ec;border-radius:6px;">
+                      <tr>
+                        <td style="padding:20px 22px 8px;font-size:12px;line-height:18px;font-weight:700;color:#66758b;text-transform:uppercase;">Sign-in ID</td>
+                      </tr>
+                      <tr>
+                        <td style="padding:0 22px 18px;font-size:16px;line-height:24px;color:#12233f;word-break:break-word;">{{ login_identifier }}</td>
+                      </tr>
+                      <tr>
+                        <td style="padding:0 22px 8px;font-size:12px;line-height:18px;font-weight:700;color:#66758b;text-transform:uppercase;">Temporary password</td>
+                      </tr>
+                      <tr>
+                        <td style="padding:0 22px 20px;">
+                          <div style="padding:13px 15px;background:#ffffff;border:1px solid #bfcbd8;border-radius:5px;font-family:Consolas,'Courier New',monospace;font-size:17px;line-height:24px;font-weight:700;color:#12233f;word-break:break-all;">{{ temporary_password }}</div>
+                        </td>
+                      </tr>
+                    </table>
+                  </td>
+                </tr>
+                <tr>
+                  <td align="center" style="padding:20px 40px 12px;">
+                    <a href="{{ login_url }}" style="display:inline-block;padding:14px 28px;background:#1464b8;border-radius:5px;color:#ffffff;font-size:16px;line-height:20px;font-weight:700;text-decoration:none;">Sign in to your account</a>
+                  </td>
+                </tr>
+                <tr>
+                  <td style="padding:8px 40px 34px;">
+                    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;background:#fff8e8;border-left:4px solid #d99a16;">
+                      <tr>
+                        <td style="padding:14px 16px;font-size:13px;line-height:20px;color:#5d4b24;">This password expires in {{ expires_in_hours }} hours. Change it immediately after signing in, and never share it with anyone.</td>
+                      </tr>
+                    </table>
+                  </td>
+                </tr>
+                {% else %}
+                <tr><td style="padding:0 40px 34px;">&nbsp;</td></tr>
+                {% endif %}
+              </table>
+            </td>
+          </tr>
+          <tr>
+            <td align="center" style="padding:20px 18px 0;font-size:12px;line-height:19px;color:#718096;">
+              LR Digital Learning Platform &middot; Ministry of Education<br>
+              This is an automated service notification. Please do not reply.
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>

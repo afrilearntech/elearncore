@@ -63,6 +63,28 @@ class PublicContentSecurityTests(TestCase):
         self.assertNotIn('status', items[0])
 
 
+@override_settings(SELF_SERVICE_REGISTRATION_ENABLED=False)
+class SelfServiceRegistrationSecurityTests(TestCase):
+    def test_public_profile_setup_cannot_create_an_account(self):
+        response = APIClient().post(
+            '/api-v1/onboarding/profilesetup/',
+            {
+                'name': 'Unapproved Signup',
+                'email': 'signup@example.com',
+                'phone': '231770819999',
+                'password': 'NotAllowed-42',
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(
+            response.json()['detail'],
+            'Self-service registration is currently disabled.',
+        )
+        self.assertFalse(User.objects.filter(email='signup@example.com').exists())
+
+
 class TeacherApprovalSecurityTests(TestCase):
     def test_pending_teacher_cannot_use_teacher_endpoints(self):
         school = create_school('Pending Teacher School')

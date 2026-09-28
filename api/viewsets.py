@@ -128,6 +128,7 @@ from .uploads import (
 )
 from .throttles import AIGenerationThrottle
 from messsaging.services import send_sms
+from messsaging.invitations import queue_account_invitation
 from messsaging.tasks import send_account_notifications_task
 
 logger = logging.getLogger(__name__)
@@ -167,6 +168,7 @@ def _send_account_notifications(message: str, phone: str | None, email: str | No
     send_account_notifications_task.apply_async(
         args=(str(uuid.uuid4()), message, phone, email, email_subject),
         retry=False,
+        argsrepr='(<redacted account notification>)',
     )
 
 
@@ -3279,18 +3281,7 @@ class ContentViewSet(viewsets.ViewSet):
 				status=StatusEnum.APPROVED.value,
 			)
 
-		message = (
-			f"Hi {name}, your Liberia eLearn teacher account has been created.\n"
-			f"Login with phone: {phone} and password: {temp_password}.\n"
-			"Please change this password after your first login."
-		)
-		fire_and_forget(
-			_send_account_notifications,
-			message,
-			phone,
-			email,
-			"Your Liberia eLearn teacher account",
-		)
+		fire_and_forget(queue_account_invitation, user, temp_password)
 
 		return Response(TeacherSerializer(teacher).data, status=status.HTTP_201_CREATED)
 
@@ -3428,18 +3419,7 @@ class ContentViewSet(viewsets.ViewSet):
 				failed_count += 1
 				continue
 
-			message = (
-				f"Hi {name}, your Liberia eLearn teacher account has been created.\n"
-				f"Login with phone: {phone} and password: {temp_password}.\n"
-				"Please change this password after your first login."
-			)
-			fire_and_forget(
-				_send_account_notifications,
-				message,
-				phone,
-				email,
-				"Your Liberia eLearn teacher account",
-			)
+			fire_and_forget(queue_account_invitation, user, temp_password)
 
 			created_count += 1
 			results.append({
@@ -3640,18 +3620,7 @@ class ContentViewSet(viewsets.ViewSet):
 				student_kwargs["grade"] = grade
 			student = StudentModel.objects.create(**student_kwargs)
 
-		message = (
-			f"Hi {name}, your Liberia eLearn student account has been created.\n"
-			f"Login with phone: {phone} and password: {temp_password}.\n"
-			"Please change this password after your first login."
-		)
-		fire_and_forget(
-			_send_account_notifications,
-			message,
-			phone,
-			email,
-			"Your Liberia eLearn student account",
-		)
+		fire_and_forget(queue_account_invitation, user, temp_password)
 
 		return Response(StudentSerializer(student).data, status=status.HTTP_201_CREATED)
 
@@ -3780,18 +3749,7 @@ class ContentViewSet(viewsets.ViewSet):
 				failed_count += 1
 				continue
 
-			message = (
-				f"Hi {name}, your Liberia eLearn student account has been created.\n"
-				f"Login with phone: {phone} and password: {temp_password}.\n"
-				"Please change this password after your first login."
-			)
-			fire_and_forget(
-				_send_account_notifications,
-				message,
-				phone,
-				email,
-				"Your Liberia eLearn student account",
-			)
+			fire_and_forget(queue_account_invitation, user, temp_password)
 
 			created_count += 1
 			results.append({
@@ -4245,6 +4203,11 @@ class OnboardingViewSet(viewsets.ViewSet):
 	@extend_schema(request=ProfileSetupSerializer, responses={201: OpenApiResponse(description="Token and user payload")})
 	@action(detail=False, methods=['post'], permission_classes=[permissions.AllowAny])
 	def profilesetup(self, request):
+		if not settings.SELF_SERVICE_REGISTRATION_ENABLED:
+			return Response(
+				{'detail': 'Self-service registration is currently disabled.'},
+				status=status.HTTP_403_FORBIDDEN,
+			)
 		data = request.data
 		email = (data.get('email') or '').strip().lower()
 		phone = (data.get('phone') or '').strip()
@@ -8342,19 +8305,7 @@ class TeacherViewSet(viewsets.ViewSet):
 				student_kwargs["grade"] = grade
 			student = Student.objects.create(**student_kwargs)
 
-		# Notify student via SMS/email with temp password
-		message = (
-			f"Hi {name}, your Liberia eLearn student account has been created.\n"
-			f"Login with phone: {phone} and password: {temp_password}.\n"
-			"Please change this password after your first login."
-		)
-		fire_and_forget(
-			_send_account_notifications,
-			message,
-			phone,
-			email,
-			"Your Liberia eLearn student account",
-		)
+		fire_and_forget(queue_account_invitation, user, temp_password)
 
 		return Response(StudentSerializer(student).data, status=status.HTTP_201_CREATED)
 
@@ -8508,19 +8459,7 @@ class TeacherViewSet(viewsets.ViewSet):
 				failed_count += 1
 				continue
 
-			# Notify via SMS/email with temp password
-			message = (
-				f"Hi {name}, your Liberia eLearn student account has been created.\n"
-				f"Login with phone: {phone} and password: {temp_password}.\n"
-				"Please change this password after your first login."
-			)
-			fire_and_forget(
-				_send_account_notifications,
-				message,
-				phone,
-				email,
-				"Your Liberia eLearn student account",
-			)
+			fire_and_forget(queue_account_invitation, user, temp_password)
 
 			created_count += 1
 			results.append({
@@ -10444,18 +10383,7 @@ class AdminContentManagerViewSet(viewsets.ViewSet):
 			temp_password = assign_temporary_password(user)
 			user.save()
 
-		message = (
-			f"Hi {name}, your Liberia eLearn content manager account has been created.\n"
-			f"Login with phone: {phone} and password: {temp_password}.\n"
-			"Please change this password after your first login."
-		)
-		fire_and_forget(
-			_send_account_notifications,
-			message,
-			phone,
-			email,
-			"Your Liberia eLearn content manager account",
-		)
+		fire_and_forget(queue_account_invitation, user, temp_password)
 
 		return Response(UserSerializer(user).data, status=status.HTTP_201_CREATED)
 
@@ -10596,18 +10524,7 @@ class AdminContentManagerViewSet(viewsets.ViewSet):
 				failed_count += 1
 				continue
 
-			message = (
-				f"Hi {name}, your Liberia eLearn content manager account has been created.\n"
-				f"Login with phone: {phone} and password: {temp_password}.\n"
-				"Please change this password after your first login."
-			)
-			fire_and_forget(
-				_send_account_notifications,
-				message,
-				phone,
-				email,
-				"Your Liberia eLearn content manager account",
-			)
+			fire_and_forget(queue_account_invitation, user, temp_password)
 
 			created_count += 1
 			results.append({

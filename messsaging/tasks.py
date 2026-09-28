@@ -3,10 +3,9 @@ import logging
 from collections.abc import Callable
 
 from celery import shared_task
-from django.conf import settings
-from django.core.mail import send_mail
 from django.utils import timezone
 
+from .emailing import send_branded_email
 from .models import NotificationDelivery
 from .services import send_sms
 
@@ -52,6 +51,7 @@ def _deliver_channel_once(
 
 @shared_task(
     bind=True,
+    ignore_result=True,
     autoretry_for=(Exception,),
     retry_backoff=True,
     retry_jitter=True,
@@ -64,6 +64,7 @@ def send_account_notifications_task(
     phone: str | None,
     email: str | None,
     email_subject: str,
+    email_context: dict | None = None,
 ) -> dict:
     """Deliver account credentials through retryable, observable channels."""
     delivered = []
@@ -76,17 +77,12 @@ def send_account_notifications_task(
         ):
             delivered.append('sms')
     if email:
-        from_email = getattr(settings, 'DEFAULT_FROM_EMAIL', None)
-
         def _send_email():
-            if not from_email:
-                raise RuntimeError('DEFAULT_FROM_EMAIL is not configured')
-            return send_mail(
+            return send_branded_email(
                 subject=email_subject,
-                message=message,
-                from_email=from_email,
-                recipient_list=[email],
-                fail_silently=False,
+                plain_body=message,
+                recipient=email,
+                template_context=email_context,
             )
 
         if _deliver_channel_once(
