@@ -381,7 +381,7 @@ DEFAULT_FROM_EMAIL = os.getenv(
     'DEFAULT_FROM_EMAIL',
     os.getenv(
         'DEFAULT_FROM_MAIL',
-        'LR Digital Leanrning Platform <onboarding@resend.dev>',
+        'LR Digital Learning Platform <onboarding@resend.dev>',
     ),
 ).strip()
  

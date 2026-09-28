@@ -30,7 +30,7 @@ class NotificationDeliveryTests(TestCase):
 
 @override_settings(
     EMAIL_BACKEND='django.core.mail.backends.locmem.EmailBackend',
-    DEFAULT_FROM_EMAIL='LR Digital Leanrning Platform <notifications@example.com>',
+    DEFAULT_FROM_EMAIL='LR Digital Learning Platform <notifications@example.com>',
     FRONTEND_BASE_URL='https://learn.example',
     TEMPORARY_PASSWORD_TTL_HOURS=24,
 )
@@ -62,7 +62,7 @@ class AccountInvitationTests(TestCase):
         email = mail.outbox[0]
         self.assertEqual(
             email.from_email,
-            'LR Digital Leanrning Platform <notifications@example.com>',
+            'LR Digital Learning Platform <notifications@example.com>',
         )
         self.assertEqual(email.to, ['pat@example.com'])
         self.assertIn('Teacher account', email.subject)
