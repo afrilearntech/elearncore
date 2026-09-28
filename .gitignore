@@ -1,11 +1,13 @@
 venv
+.venv/
 *.pyc
 __pycache__/
 .DS_Store
 .env
 *.sqlite3
 cmd.txt
-deployment
 assets
 schema.yaml
 code-review.md
+.private/
+temp_admins.csv

@@ -24,6 +24,11 @@ from elearncore.sysutils.constants import (
 )
 
 
+def response_items(response):
+	payload = response.json()
+	return payload.get('results', []) if isinstance(payload, dict) else payload
+
+
 class AdminGeographyBulkUploadTests(TestCase):
 	def setUp(self):
 		cache.clear()
@@ -79,7 +84,7 @@ class SyncEndpointsTests(TestCase):
 			name='Sync User',
 			email='sync@example.com',
 			password='pass',
-			role=UserRole.ADMIN.value,
+			role=UserRole.SYNC_SERVICE.value,
 		)
 		self.client.force_authenticate(user=user)
 
@@ -111,6 +116,8 @@ class SyncEndpointsTests(TestCase):
 			name='Pending School',
 			status=StatusEnum.PENDING.value,
 		)
+		user.sync_school = self.school_approved
+		user.save(update_fields=['sync_school', 'updated_at'])
 
 		subject_thumb = SimpleUploadedFile('subject.png', b'img', content_type='image/png')
 		lesson_file = SimpleUploadedFile('lesson.mp4', b'lesson-bytes', content_type='video/mp4')
@@ -594,7 +601,7 @@ class KidsStoriesEndpointTests(TestCase):
 		self.client.force_authenticate(user=self.student_user)
 		resp = self.client.get('/api-v1/kids/stories/')
 		self.assertEqual(resp.status_code, 200)
-		titles = {item['title'] for item in resp.json()}
+		titles = {item['title'] for item in response_items(resp)}
 		self.assertIn('Kona and the Lost Lunch Box', titles)
 		self.assertIn('The Broken Pencil', titles)
 		self.assertNotIn('Older Grade Story', titles)
@@ -604,8 +611,9 @@ class KidsStoriesEndpointTests(TestCase):
 		self.client.force_authenticate(user=self.student_user)
 		resp = self.client.get('/api-v1/kids/stories/?grade=GRADE%202&tag=Honesty')
 		self.assertEqual(resp.status_code, 200)
-		self.assertEqual(len(resp.json()), 1)
-		self.assertEqual(resp.json()[0]['title'], 'The Broken Pencil')
+		items = response_items(resp)
+		self.assertEqual(len(items), 1)
+		self.assertEqual(items[0]['title'], 'The Broken Pencil')
 
 	def test_student_can_retrieve_story_detail(self):
 		self.client.force_authenticate(user=self.student_user)
@@ -769,7 +777,7 @@ class StoryWorkflowVisibilityTests(TestCase):
 		self.client.force_authenticate(user=self.student_user)
 		resp = self.client.get('/api-v1/kids/stories/')
 		self.assertEqual(resp.status_code, 200)
-		titles = {item['title'] for item in resp.json()}
+		titles = {item['title'] for item in response_items(resp)}
 		self.assertIn('Global Published Story', titles)
 		self.assertIn('School One Published Story', titles)
 		self.assertNotIn('School One Draft Story', titles)
@@ -779,7 +787,7 @@ class StoryWorkflowVisibilityTests(TestCase):
 		self.client.force_authenticate(user=self.teacher_user)
 		resp = self.client.get('/api-v1/teacher/stories/')
 		self.assertEqual(resp.status_code, 200)
-		titles = {item['title'] for item in resp.json()}
+		titles = {item['title'] for item in response_items(resp)}
 		self.assertIn('Global Published Story', titles)
 		self.assertIn('School One Published Story', titles)
 		self.assertNotIn('School One Draft Story', titles)
@@ -790,7 +798,7 @@ class StoryWorkflowVisibilityTests(TestCase):
 		self.client.force_authenticate(user=self.headteacher_user)
 		resp = self.client.get('/api-v1/headteacher/stories/')
 		self.assertEqual(resp.status_code, 200)
-		titles = {item['title'] for item in resp.json()}
+		titles = {item['title'] for item in response_items(resp)}
 		self.assertIn('School One Published Story', titles)
 		self.assertIn('School One Draft Story', titles)
 		self.assertNotIn('Global Published Story', titles)
@@ -868,38 +876,12 @@ class ContentAssessmentListEndpointsTests(TestCase):
 	def test_content_lesson_assessments_get_returns_200(self):
 		resp = self.client.get('/api-v1/content/lesson-assessments/')
 		self.assertEqual(resp.status_code, 200)
-		# Empty DB should still serialize as a list, not error.
-		self.assertIsInstance(resp.json(), list)
+		self.assertEqual(resp.json()['results'], [])
 
 	def test_content_general_assessments_get_returns_200(self):
 		resp = self.client.get('/api-v1/content/general-assessments/')
 		self.assertEqual(resp.status_code, 200)
-		self.assertIsInstance(resp.json(), list)
-
-
-class ContentAssessmentListEndpointsTests(TestCase):
-	def setUp(self):
-		cache.clear()
-		self.client = APIClient()
-		self.creator_user = User.objects.create_user(
-			phone='231770799001',
-			name='Creator Assessments List',
-			email='creator.assessments.list@example.com',
-			password='pass',
-			role=UserRole.CONTENTCREATOR.value,
-		)
-		self.client.force_authenticate(user=self.creator_user)
-
-	def test_content_lesson_assessments_get_returns_200(self):
-		resp = self.client.get('/api-v1/content/lesson-assessments/')
-		self.assertEqual(resp.status_code, 200)
-		# Empty DB should still serialize as a list, not error.
-		self.assertIsInstance(resp.json(), list)
-
-	def test_content_general_assessments_get_returns_200(self):
-		resp = self.client.get('/api-v1/content/general-assessments/')
-		self.assertEqual(resp.status_code, 200)
-		self.assertIsInstance(resp.json(), list)
+		self.assertEqual(resp.json()['results'], [])
 
 
 class KidsProgressGardenRankingTests(TestCase):
@@ -1615,6 +1597,7 @@ class StudentGamificationPointsTests(TestCase):
 			name='Letter Match',
 			type='WORD_PUZZLE',
 			correct_answer='A',
+			grade=StudentLevel.GRADE3.value,
 			status=StatusEnum.APPROVED.value,
 		)
 
@@ -2127,7 +2110,7 @@ class HeadTeacherViewSetIsolationTests(TestCase):
 	def test_headteacher_lists_only_teachers_in_own_school(self):
 		resp = self.client.get('/api-v1/headteacher/teachers/')
 		self.assertEqual(resp.status_code, 200)
-		payload = resp.json()
+		payload = response_items(resp)
 		returned_ids = {item['id'] for item in payload}
 		self.assertIn(self.head_teacher.id, returned_ids)
 		self.assertIn(self.school_one_teacher.id, returned_ids)
@@ -2136,7 +2119,7 @@ class HeadTeacherViewSetIsolationTests(TestCase):
 	def test_headteacher_lists_only_school_subjects(self):
 		resp = self.client.get('/api-v1/headteacher/subjects/')
 		self.assertEqual(resp.status_code, 200)
-		payload = resp.json()
+		payload = response_items(resp)
 		returned_ids = {item['id'] for item in payload}
 		self.assertIn(self.school_one_subject.id, returned_ids)
 		self.assertNotIn(self.school_two_subject.id, returned_ids)
@@ -2144,7 +2127,7 @@ class HeadTeacherViewSetIsolationTests(TestCase):
 	def test_headteacher_lists_only_school_general_assessments(self):
 		resp = self.client.get('/api-v1/headteacher/general-assessments/')
 		self.assertEqual(resp.status_code, 200)
-		titles = {item['title'] for item in resp.json()}
+		titles = {item['title'] for item in response_items(resp)}
 		self.assertIn('School One Assessment', titles)
 		self.assertNotIn('School Two Assessment', titles)
 
@@ -2673,18 +2656,20 @@ class UpSyncEndpointsTests(TestCase):
 	def setUp(self):
 		cache.clear()
 		self.client = APIClient()
-		admin = User.objects.create_user(
+		sync_user = User.objects.create_user(
 			phone='231770555555',
 			name='Admin',
 			email='admin@example.com',
 			password='pass',
-			role=UserRole.ADMIN.value,
+			role=UserRole.SYNC_SERVICE.value,
 		)
-		self.client.force_authenticate(user=admin)
 
 		county = County.objects.create(name='Montserrado', status=StatusEnum.APPROVED.value)
 		district = District.objects.create(county=county, name='Careysburg', status=StatusEnum.APPROVED.value)
 		self.school = School.objects.create(district=district, name='Afrilearn Academy', status=StatusEnum.APPROVED.value)
+		sync_user.sync_school = self.school
+		sync_user.save(update_fields=['sync_school', 'updated_at'])
+		self.client.force_authenticate(user=sync_user)
 
 		lesson_file = SimpleUploadedFile('lesson.mp4', b'lesson-bytes', content_type='video/mp4')
 		self.subject = Subject.objects.create(
@@ -2708,6 +2693,7 @@ class UpSyncEndpointsTests(TestCase):
 			name='Letter Match',
 			type='WORD_PUZZLE',
 			correct_answer='A',
+			grade=StudentLevel.GRADE3.value,
 			status=StatusEnum.APPROVED.value,
 		)
 

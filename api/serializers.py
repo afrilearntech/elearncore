@@ -1,4 +1,5 @@
 from rest_framework import serializers
+from .uploads import validate_csv_upload
 
 
 class ProfileSetupSerializer(serializers.Serializer):
@@ -283,6 +284,8 @@ class TeacherCreateStudentSerializer(serializers.Serializer):
     school_id = serializers.IntegerField(required=False)
 
     def validate(self, attrs):
+        if self.context.get('skip_identity_uniqueness'):
+            return attrs
         from accounts.models import User
         phone = attrs.get("phone")
         email = attrs.get("email")
@@ -301,10 +304,7 @@ class TeacherBulkStudentUploadSerializer(serializers.Serializer):
     file = serializers.FileField()
 
     def validate_file(self, value):
-        name = getattr(value, "name", "") or ""
-        if not name.lower().endswith(".csv"):
-            raise serializers.ValidationError("Only CSV files with .csv extension are supported.")
-        return value
+        return validate_csv_upload(value)
 
 
 class ContentCreateTeacherSerializer(serializers.Serializer):
@@ -316,6 +316,8 @@ class ContentCreateTeacherSerializer(serializers.Serializer):
     school_id = serializers.IntegerField(required=True)
 
     def validate(self, attrs):
+        if self.context.get('skip_identity_uniqueness'):
+            return attrs
         from accounts.models import User
         phone = attrs.get("phone")
         email = attrs.get("email")
@@ -331,10 +333,7 @@ class ContentBulkTeacherUploadSerializer(serializers.Serializer):
     file = serializers.FileField()
 
     def validate_file(self, value):
-        name = getattr(value, "name", "") or ""
-        if not name.lower().endswith(".csv"):
-            raise serializers.ValidationError("Only CSV files with .csv extension are supported.")
-        return value
+        return validate_csv_upload(value)
 
 
 class AssignSubjectsToTeacherSerializer(serializers.Serializer):
@@ -362,6 +361,8 @@ class AdminCreateContentManagerSerializer(serializers.Serializer):
     dob = serializers.DateField(required=False)
 
     def validate(self, attrs):
+        if self.context.get('skip_identity_uniqueness'):
+            return attrs
         from accounts.models import User
 
         phone = attrs.get("phone")
@@ -379,10 +380,7 @@ class AdminBulkContentManagerUploadSerializer(serializers.Serializer):
     file = serializers.FileField()
 
     def validate_file(self, value):
-        name = getattr(value, "name", "") or ""
-        if not name.lower().endswith(".csv"):
-            raise serializers.ValidationError("Only CSV files with .csv extension are supported.")
-        return value
+        return validate_csv_upload(value)
 
 
 class AdminBulkCountyUploadSerializer(serializers.Serializer):
@@ -391,10 +389,7 @@ class AdminBulkCountyUploadSerializer(serializers.Serializer):
     file = serializers.FileField()
 
     def validate_file(self, value):
-        name = getattr(value, "name", "") or ""
-        if not name.lower().endswith(".csv"):
-            raise serializers.ValidationError("Only CSV files with .csv extension are supported.")
-        return value
+        return validate_csv_upload(value)
 
 
 class AdminBulkDistrictUploadSerializer(serializers.Serializer):
@@ -403,10 +398,7 @@ class AdminBulkDistrictUploadSerializer(serializers.Serializer):
     file = serializers.FileField()
 
     def validate_file(self, value):
-        name = getattr(value, "name", "") or ""
-        if not name.lower().endswith(".csv"):
-            raise serializers.ValidationError("Only CSV files with .csv extension are supported.")
-        return value
+        return validate_csv_upload(value)
 
 
 class AdminBulkSchoolUploadSerializer(serializers.Serializer):
@@ -415,10 +407,7 @@ class AdminBulkSchoolUploadSerializer(serializers.Serializer):
     file = serializers.FileField()
 
     def validate_file(self, value):
-        name = getattr(value, "name", "") or ""
-        if not name.lower().endswith(".csv"):
-            raise serializers.ValidationError("Only CSV files with .csv extension are supported.")
-        return value
+        return validate_csv_upload(value)
 
 
 class AdminContentManagerListSerializer(serializers.Serializer):

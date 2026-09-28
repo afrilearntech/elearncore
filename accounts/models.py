@@ -36,6 +36,15 @@ class User(AbstractBaseUser, PermissionsMixin):
     is_superuser = models.BooleanField(default=False)
     phone_verified = models.BooleanField(default=False)
     email_verified = models.BooleanField(default=False)
+    must_change_password = models.BooleanField(default=False)
+    temporary_password_expires_at = models.DateTimeField(null=True, blank=True)
+    sync_school = models.ForeignKey(
+        'accounts.School',
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name='sync_service_users',
+    )
     # onboarding extras
     dob = models.DateField(null=True, blank=True)
     gender = models.CharField(max_length=20, null=True, blank=True)
@@ -88,6 +97,13 @@ class District(TimestampedModel):
     name = models.CharField(max_length=100)
     status = models.CharField(max_length=30, choices=[(s.value, s.value) for s in StatusEnum], default=StatusEnum.PENDING.value)
     moderation_comment = models.TextField(blank=True, default="")
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='districts_created',
+    )
 
     class Meta:
         unique_together = ("county", "name")
@@ -101,6 +117,13 @@ class School(TimestampedModel):
     name = models.CharField(max_length=150)
     status = models.CharField(max_length=30, choices=[(s.value, s.value) for s in StatusEnum], default=StatusEnum.PENDING.value)
     moderation_comment = models.TextField(blank=True, default="")
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='schools_created',
+    )
 
     class Meta:
         unique_together = ("district", "name")

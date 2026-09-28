@@ -35,7 +35,7 @@ SYNC_TOKEN = os.getenv("SYNC_TOKEN") or ""
 
 # Optional auto-login (recommended for boxes that may stay offline for days/weeks)
 # If SYNC_TOKEN isn't set (or expires), the engine will login using these creds.
-SYNC_LOGIN_KIND = (os.getenv("SYNC_LOGIN_KIND") or "content").strip().lower()  # content|admin|student|parent
+SYNC_LOGIN_KIND = (os.getenv("SYNC_LOGIN_KIND") or "sync").strip().lower()
 SYNC_LOGIN_IDENTIFIER = (os.getenv("SYNC_LOGIN_IDENTIFIER") or "").strip()
 SYNC_LOGIN_PASSWORD = os.getenv("SYNC_LOGIN_PASSWORD") or ""
 SYNC_LOGIN_URL = (os.getenv("SYNC_LOGIN_URL") or "").strip()  # optional override
@@ -132,9 +132,9 @@ def _login_and_get_token(session: requests.Session) -> str:
             "Auto-login requires SYNC_LOGIN_IDENTIFIER and SYNC_LOGIN_PASSWORD (or set SYNC_TOKEN)."
         )
 
-    kind = SYNC_LOGIN_KIND or "content"
-    if kind not in {"content", "admin", "student", "parent"}:
-        raise RuntimeError("SYNC_LOGIN_KIND must be one of: content, admin, student, parent")
+    kind = SYNC_LOGIN_KIND or "sync"
+    if kind != "sync":
+        raise RuntimeError("SYNC_LOGIN_KIND must be 'sync' for a school-scoped service account")
 
     login_url = SYNC_LOGIN_URL or f"{API_BASE_URL}/auth/{kind}/"
 

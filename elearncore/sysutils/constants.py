@@ -8,6 +8,7 @@ class UserRole(Enum):
     PARENT = "PARENT"
     CONTENTCREATOR = "CONTENTCREATOR"
     CONTENTVALIDATOR = "CONTENTVALIDATOR"
+    SYNC_SERVICE = "SYNC_SERVICE"
 
 
 class ContentType(Enum):

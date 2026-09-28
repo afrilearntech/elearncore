@@ -6,7 +6,7 @@ from datetime import timedelta
 from django.db import transaction
 from django.db.models import F
 from django.utils import timezone
-from rest_framework import permissions, status, viewsets
+from rest_framework import serializers, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
 
@@ -43,15 +43,8 @@ from .upsync_serializers import (
     UpSyncStudentsPayloadSerializer,
     UpSyncTakeLessonsPayloadSerializer,
 )
-
-
-_ALLOWED_UPSYNC_ROLES = {
-    UserRole.ADMIN.value,
-    UserRole.CONTENTCREATOR.value,
-    UserRole.CONTENTVALIDATOR.value,
-    UserRole.TEACHER.value,
-    UserRole.HEADTEACHER.value,
-}
+from .sync_permissions import IsScopedSyncService
+from .uploads import validate_solution_upload
 
 
 def _award_student_points(student: Student | None, points: int) -> int | None:
@@ -70,6 +63,12 @@ class _UpSyncResult:
     errors: int = 0
 
 
+class UpSyncSchemaSerializer(serializers.Serializer):
+    """Fallback schema for action-only upsync routes."""
+
+    detail = serializers.CharField(read_only=True)
+
+
 class UpSyncViewSet(viewsets.ViewSet):
     """Offline upsync endpoints (box -> central).
 
@@ -86,13 +85,58 @@ class UpSyncViewSet(viewsets.ViewSet):
     - POST /api-v1/upsync/lesson-assessment-grades/
     """
 
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [IsScopedSyncService]
+    serializer_class = UpSyncSchemaSerializer
 
     def _require_upsync_role(self, request):
-        user = getattr(request, "user", None)
-        if not user or getattr(user, "role", None) not in _ALLOWED_UPSYNC_ROLES:
+        if not IsScopedSyncService().has_permission(request, self):
             return Response({"detail": "Not authorized for upsync."}, status=403)
         return None
+
+    def _scoped_student(self, request, sync_uuid):
+        user = (
+            User.objects
+            .filter(sync_uuid=sync_uuid, student__school_id=request.user.sync_school_id)
+            .select_related('student')
+            .first()
+        )
+        student = getattr(user, 'student', None) if user is not None else None
+        if student is None:
+            raise ValueError('student not found in sync service school')
+        return student
+
+    def _eligible_general_assessment(self, student, assessment_id):
+        assessment = GeneralAssessment.objects.filter(pk=assessment_id, status=StatusEnum.APPROVED.value).first()
+        if assessment is None:
+            raise ValueError('approved assessment not found')
+        if assessment.grade and assessment.grade != student.grade:
+            raise ValueError('assessment is outside student grade')
+        if assessment.is_targeted and assessment.target_student_id != student.id:
+            raise ValueError('assessment targets a different student')
+        return assessment
+
+    def _eligible_lesson_assessment(self, student, assessment_id):
+        assessment = (
+            LessonAssessment.objects
+            .select_related('lesson__subject')
+            .filter(
+                pk=assessment_id,
+                status=StatusEnum.APPROVED.value,
+                lesson__status=StatusEnum.APPROVED.value,
+                lesson__subject__status=StatusEnum.APPROVED.value,
+                lesson__subject__grade=student.grade,
+            )
+            .first()
+        )
+        if assessment is None:
+            raise ValueError('approved lesson assessment not found for student grade')
+        if assessment.is_targeted and assessment.target_student_id != student.id:
+            raise ValueError('assessment targets a different student')
+        from .viewsets import _build_student_lesson_progression
+        state = _build_student_lesson_progression(student)['states'].get(assessment.lesson_id)
+        if not state or state['is_locked']:
+            raise ValueError('assessment lesson is locked for student')
+        return assessment
 
     @action(detail=False, methods=["post"], url_path="students")
     def students(self, request):
@@ -115,10 +159,13 @@ class UpSyncViewSet(viewsets.ViewSet):
             dob = it.get("dob")
             gender = (it.get("gender") or "").strip() or None
             grade = (it.get("grade") or "").strip() or None
-            school_id = it.get("school_id")
+            requested_school_id = it.get("school_id")
+            school_id = request.user.sync_school_id
 
             try:
                 with transaction.atomic():
+                    if requested_school_id not in (None, school_id):
+                        raise ValueError('school_id is outside sync service scope')
                     user = User.objects.filter(sync_uuid=client_uuid).first()
                     canonical_uuid = None
 
@@ -141,7 +188,9 @@ class UpSyncViewSet(viewsets.ViewSet):
                             dob=dob,
                             gender=gender,
                         )
-                        user.set_password("password123")
+                        # Device-created accounts require an explicit central reset
+                        # instead of sharing a predictable credential.
+                        user.set_unusable_password()
                         user.save()
                         canonical_uuid = user.sync_uuid
                         created += 1
@@ -151,6 +200,9 @@ class UpSyncViewSet(viewsets.ViewSet):
                         # Guard against attaching offline student payloads to a non-student account.
                         if getattr(user, "role", None) != UserRole.STUDENT.value:
                             raise ValueError("phone belongs to a non-student account")
+                        existing_student = getattr(user, 'student', None)
+                        if existing_student is not None and existing_student.school_id not in (None, school_id):
+                            raise ValueError('student belongs to another school')
 
                         # Best-effort updates (do not overwrite with blanks).
                         update_fields = []
@@ -175,16 +227,15 @@ class UpSyncViewSet(viewsets.ViewSet):
                     # Ensure student profile exists and is linked.
                     student = getattr(user, "student", None)
                     if student is None:
-                        school = None
-                        if school_id is not None:
-                            school = School.objects.filter(pk=school_id).first()
+                        school = School.objects.filter(pk=school_id, status=StatusEnum.APPROVED.value).first()
+                        if school is None:
+                            raise ValueError('approved sync service school not found')
 
                         student_kwargs = {
                             "profile": user,
                             "status": StatusEnum.APPROVED.value,
                         }
-                        if school is not None:
-                            student_kwargs["school"] = school
+                        student_kwargs["school"] = school
                         if grade:
                             student_kwargs["grade"] = grade
 
@@ -195,11 +246,11 @@ class UpSyncViewSet(viewsets.ViewSet):
                         if grade and getattr(student, "grade", None) != grade:
                             student.grade = grade
                             student_update_fields.append("grade")
-                        if school_id is not None and getattr(student, "school_id", None) != school_id:
-                            school = School.objects.filter(pk=school_id).first()
-                            if school is not None:
-                                student.school = school
-                                student_update_fields.append("school")
+                        if getattr(student, "school_id", None) is None:
+                            student.school_id = school_id
+                            student_update_fields.append("school")
+                        elif student.school_id != school_id:
+                            raise ValueError('student belongs to another school')
                         if student_update_fields:
                             student_update_fields.append("updated_at")
                             student.save(update_fields=student_update_fields)
@@ -257,14 +308,16 @@ class UpSyncViewSet(viewsets.ViewSet):
 
             try:
                 with transaction.atomic():
-                    user = User.objects.filter(sync_uuid=student_uuid).select_related("student").first()
-                    student = getattr(user, "student", None) if user is not None else None
-                    if student is None:
-                        raise ValueError("student not found")
+                    student = self._scoped_student(request, student_uuid)
 
-                    lesson = LessonResource.objects.filter(pk=lesson_id).first()
+                    lesson = LessonResource.objects.filter(
+                        pk=lesson_id,
+                        status=StatusEnum.APPROVED.value,
+                        subject__status=StatusEnum.APPROVED.value,
+                        subject__grade=student.grade,
+                    ).first()
                     if lesson is None:
-                        raise ValueError("lesson not found")
+                        raise ValueError("approved lesson not found for student grade")
 
                     obj, was_created = TakeLesson.objects.get_or_create(student=student, lesson=lesson)
                     if was_created:
@@ -326,14 +379,15 @@ class UpSyncViewSet(viewsets.ViewSet):
 
             try:
                 with transaction.atomic():
-                    user = User.objects.filter(sync_uuid=student_uuid).select_related("student").first()
-                    student = getattr(user, "student", None) if user is not None else None
-                    if student is None:
-                        raise ValueError("student not found")
+                    student = self._scoped_student(request, student_uuid)
 
-                    game = GameModel.objects.filter(pk=game_id).first()
+                    game = GameModel.objects.filter(
+                        pk=game_id,
+                        status=StatusEnum.APPROVED.value,
+                        grade=student.grade,
+                    ).first()
                     if game is None:
-                        raise ValueError("game not found")
+                        raise ValueError("approved game not found for student grade")
 
                     obj, was_created = GamePlay.objects.get_or_create(student=student, game=game)
                     if was_created:
@@ -399,10 +453,7 @@ class UpSyncViewSet(viewsets.ViewSet):
 
             try:
                 with transaction.atomic():
-                    user = User.objects.filter(sync_uuid=student_uuid).select_related("student").first()
-                    student: Student | None = getattr(user, "student", None) if user is not None else None
-                    if student is None:
-                        raise ValueError("student not found")
+                    student = self._scoped_student(request, student_uuid)
 
                     existing_last = getattr(student, "last_login_activity_date", None)
                     if existing_last is not None and last_day <= existing_last:
@@ -494,14 +545,9 @@ class UpSyncViewSet(viewsets.ViewSet):
 
             try:
                 with transaction.atomic():
-                    user = User.objects.filter(sync_uuid=student_uuid).select_related("student").first()
-                    student = getattr(user, "student", None) if user is not None else None
-                    if student is None:
-                        raise ValueError("student not found")
+                    student = self._scoped_student(request, student_uuid)
 
-                    assessment = GeneralAssessment.objects.filter(pk=assessment_id).first()
-                    if assessment is None:
-                        raise ValueError("assessment not found")
+                    assessment = self._eligible_general_assessment(student, assessment_id)
 
                     existing = (
                         AssessmentSolution.objects
@@ -584,14 +630,8 @@ class UpSyncViewSet(viewsets.ViewSet):
 
             try:
                 with transaction.atomic():
-                    user = User.objects.filter(sync_uuid=student_uuid).select_related("student").first()
-                    student = getattr(user, "student", None) if user is not None else None
-                    if student is None:
-                        raise ValueError("student not found")
-
-                    assessment = LessonAssessment.objects.filter(pk=lesson_assessment_id).first()
-                    if assessment is None:
-                        raise ValueError("lesson assessment not found")
+                    student = self._scoped_student(request, student_uuid)
+                    assessment = self._eligible_lesson_assessment(student, lesson_assessment_id)
 
                     existing = (
                         LessonAssessmentSolution.objects
@@ -667,15 +707,13 @@ class UpSyncViewSet(viewsets.ViewSet):
         attachment = request.FILES.get("attachment")
         if attachment is None:
             return Response({"detail": "attachment file is required"}, status=400)
+        validate_solution_upload(attachment)
 
-        user = User.objects.filter(sync_uuid=student_uuid).select_related("student").first()
-        student = getattr(user, "student", None) if user is not None else None
-        if student is None:
-            return Response({"detail": "student not found"}, status=400)
-
-        assessment = GeneralAssessment.objects.filter(pk=assessment_id).first()
-        if assessment is None:
-            return Response({"detail": "assessment not found"}, status=400)
+        try:
+            student = self._scoped_student(request, student_uuid)
+            assessment = self._eligible_general_assessment(student, assessment_id)
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=400)
 
         sol = (
             AssessmentSolution.objects
@@ -714,15 +752,13 @@ class UpSyncViewSet(viewsets.ViewSet):
         attachment = request.FILES.get("attachment")
         if attachment is None:
             return Response({"detail": "attachment file is required"}, status=400)
+        validate_solution_upload(attachment)
 
-        user = User.objects.filter(sync_uuid=student_uuid).select_related("student").first()
-        student = getattr(user, "student", None) if user is not None else None
-        if student is None:
-            return Response({"detail": "student not found"}, status=400)
-
-        assessment = LessonAssessment.objects.filter(pk=lesson_assessment_id).first()
-        if assessment is None:
-            return Response({"detail": "lesson assessment not found"}, status=400)
+        try:
+            student = self._scoped_student(request, student_uuid)
+            assessment = self._eligible_lesson_assessment(student, lesson_assessment_id)
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=400)
 
         sol = (
             LessonAssessmentSolution.objects
@@ -768,14 +804,10 @@ class UpSyncViewSet(viewsets.ViewSet):
 
             try:
                 with transaction.atomic():
-                    user = User.objects.filter(sync_uuid=student_uuid).select_related("student").first()
-                    student = getattr(user, "student", None) if user is not None else None
-                    if student is None:
-                        raise ValueError("student not found")
-
-                    assessment = GeneralAssessment.objects.filter(pk=assessment_id).first()
-                    if assessment is None:
-                        raise ValueError("assessment not found")
+                    student = self._scoped_student(request, student_uuid)
+                    assessment = self._eligible_general_assessment(student, assessment_id)
+                    if score < 0 or score > float(assessment.marks):
+                        raise ValueError('score must be between 0 and assessment marks')
 
                     obj, was_created = GeneralAssessmentGrade.objects.update_or_create(
                         assessment=assessment,
@@ -842,14 +874,10 @@ class UpSyncViewSet(viewsets.ViewSet):
 
             try:
                 with transaction.atomic():
-                    user = User.objects.filter(sync_uuid=student_uuid).select_related("student").first()
-                    student = getattr(user, "student", None) if user is not None else None
-                    if student is None:
-                        raise ValueError("student not found")
-
-                    assessment = LessonAssessment.objects.filter(pk=lesson_assessment_id).first()
-                    if assessment is None:
-                        raise ValueError("lesson assessment not found")
+                    student = self._scoped_student(request, student_uuid)
+                    assessment = self._eligible_lesson_assessment(student, lesson_assessment_id)
+                    if score < 0 or score > float(assessment.marks):
+                        raise ValueError('score must be between 0 and assessment marks')
 
                     obj, was_created = LessonAssessmentGrade.objects.update_or_create(
                         lesson_assessment=assessment,

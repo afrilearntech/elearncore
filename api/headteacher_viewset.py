@@ -14,6 +14,7 @@ from elearncore.sysutils.constants import UserRole, Status as StatusEnum
 from elearncore.sysutils.tasks import fire_and_forget
 
 from accounts.models import Student, Teacher, User
+from accounts.security import assign_temporary_password
 from accounts.serializers import StudentSerializer, TeacherSerializer
 from content.models import (
 	AssessmentSolution,
@@ -53,8 +54,12 @@ from .viewsets import (
 	TeacherGradesResponseSerializer,
 	TeacherViewSet,
 	_build_student_leaderboard_response,
+	build_bulk_identity_index,
+	claim_bulk_identity,
 	_parse_leaderboard_limit,
 	_parse_bulk_date,
+	parse_bounded_csv,
+	_paginated_serializer_response,
 	_send_account_notifications,
 )
 
@@ -73,6 +78,8 @@ class HeadTeacherViewSet(TeacherViewSet):
 			return Response({"detail": "Head teacher role required."}, status=403)
 		if not hasattr(user, 'teacher'):
 			return Response({"detail": "Teacher profile required."}, status=403)
+		if user.teacher.status != StatusEnum.APPROVED.value:
+			return Response({"detail": "Head teacher account approval required."}, status=403)
 		if not getattr(user.teacher, 'school_id', None):
 			return Response({"detail": "Head teacher must be assigned to a school."}, status=403)
 		return None
@@ -130,14 +137,14 @@ class HeadTeacherViewSet(TeacherViewSet):
 		elif is_published in {'0', 'false', 'False'}:
 			qs = qs.filter(is_published=False)
 
-		return Response(StoryListSerializer(qs, many=True).data)
+		return _paginated_serializer_response(request, qs, StoryListSerializer)
 
 	@extend_schema(
 		description="Read a single story in the head teacher's school scope.",
 		parameters=[OpenApiParameter(name='pk', required=True, location=OpenApiParameter.PATH, type=int)],
 		responses={200: StoryDetailSerializer},
 	)
-	@action(detail=False, methods=['get'], url_path='stories/(?P<pk>[^/.]+)')
+	@action(detail=False, methods=['get'], url_path='stories/(?P<pk>[0-9]+)')
 	def story_detail(self, request, pk=None):
 		deny = self._require_teacher(request)
 		if deny:
@@ -193,7 +200,7 @@ class HeadTeacherViewSet(TeacherViewSet):
 			return deny
 		school_id = request.user.teacher.school_id
 		qs = Teacher.objects.filter(school_id=school_id).select_related('profile', 'school').order_by('profile__name')
-		return Response(TeacherSerializer(qs, many=True).data)
+		return _paginated_serializer_response(request, qs, TeacherSerializer)
 
 	@extend_schema(
 		description="Create a teacher account in the head teacher's school.",
@@ -224,8 +231,6 @@ class HeadTeacherViewSet(TeacherViewSet):
 		email = (data.get('email') or '').strip() or None
 		gender = (data.get('gender') or '').strip() or None
 		dob = data.get('dob')
-		temp_password = "password123"
-
 		with transaction.atomic():
 			user = User(
 				name=name,
@@ -235,7 +240,7 @@ class HeadTeacherViewSet(TeacherViewSet):
 				dob=dob,
 				gender=gender,
 			)
-			user.set_password(temp_password)
+			temp_password = assign_temporary_password(user)
 			user.save()
 			teacher = Teacher.objects.create(
 				profile=user,
@@ -278,28 +283,21 @@ class HeadTeacherViewSet(TeacherViewSet):
 		upload_ser.is_valid(raise_exception=True)
 		file_obj = upload_ser.validated_data['file']
 
-		try:
-			decoded = file_obj.read().decode('utf-8-sig')
-		except Exception:
-			return Response({"detail": "Unable to read uploaded file as UTF-8 text."}, status=status.HTTP_400_BAD_REQUEST)
-
-		if not decoded.strip():
-			return Response({"detail": "Uploaded file is empty."}, status=status.HTTP_400_BAD_REQUEST)
-
-		reader = csv.DictReader(io.StringIO(decoded))
-		if not reader.fieldnames:
+		fieldnames, rows = parse_bounded_csv(file_obj)
+		if not fieldnames:
 			return Response({"detail": "CSV file has no header row."}, status=status.HTTP_400_BAD_REQUEST)
 
 		required_columns = ['name', 'phone']
-		missing = [c for c in required_columns if c not in reader.fieldnames]
+		missing = [c for c in required_columns if c not in fieldnames]
 		if missing:
 			return Response({"detail": f"Missing required columns: {', '.join(missing)}."}, status=status.HTTP_400_BAD_REQUEST)
 
 		results = []
 		created_count = 0
 		failed_count = 0
+		identity_index = build_bulk_identity_index(rows)
 
-		for row_index, row in enumerate(reader, start=2):
+		for row_index, row in enumerate(rows, start=2):
 			row_result = {'row': row_index}
 			mapped = {
 				'name': (row.get('name') or '').strip(),
@@ -310,11 +308,19 @@ class HeadTeacherViewSet(TeacherViewSet):
 				'school_id': head_teacher.school_id,
 			}
 
-			ser = ContentCreateTeacherSerializer(data=mapped)
+			ser = ContentCreateTeacherSerializer(
+				data=mapped,
+				context={'skip_identity_uniqueness': True},
+			)
 			try:
 				ser.is_valid(raise_exception=True)
 			except ValidationError as exc:
 				results.append({**row_result, 'status': 'error', 'errors': exc.detail})
+				failed_count += 1
+				continue
+			identity_errors = claim_bulk_identity(identity_index, mapped['phone'], mapped.get('email'))
+			if identity_errors:
+				results.append({**row_result, 'status': 'error', 'errors': identity_errors})
 				failed_count += 1
 				continue
 
@@ -324,8 +330,6 @@ class HeadTeacherViewSet(TeacherViewSet):
 			email = (data.get('email') or '').strip() or None
 			gender = (data.get('gender') or '').strip() or None
 			dob = data.get('dob')
-			temp_password = "password123"
-
 			try:
 				with transaction.atomic():
 					user = User(
@@ -336,7 +340,7 @@ class HeadTeacherViewSet(TeacherViewSet):
 						dob=dob,
 						gender=gender,
 					)
-					user.set_password(temp_password)
+					temp_password = assign_temporary_password(user)
 					user.save()
 					teacher = Teacher.objects.create(
 						profile=user,
@@ -384,7 +388,7 @@ class HeadTeacherViewSet(TeacherViewSet):
 			return deny
 		school_id = request.user.teacher.school_id
 		qs = Subject.objects.filter(teachers__school_id=school_id).distinct().order_by('name')
-		return Response(SubjectSerializer(qs, many=True, context={"request": request}).data)
+		return _paginated_serializer_response(request, qs, SubjectSerializer)
 
 	@extend_schema(description="List topics for subjects taught in the head teacher's school.", responses={200: TopicSerializer(many=True)})
 	@action(detail=False, methods=['get'], url_path='topics')
@@ -394,7 +398,7 @@ class HeadTeacherViewSet(TeacherViewSet):
 			return deny
 		school_id = request.user.teacher.school_id
 		qs = Topic.objects.filter(subject__teachers__school_id=school_id).select_related('subject').distinct().order_by('subject__name', 'name')
-		return Response(TopicSerializer(qs, many=True).data)
+		return _paginated_serializer_response(request, qs, TopicSerializer)
 
 	@extend_schema(description="List lessons for subjects taught in the head teacher's school.", responses={200: LessonResourceSerializer(many=True)})
 	@action(detail=False, methods=['get'], url_path='lessons')
@@ -404,7 +408,7 @@ class HeadTeacherViewSet(TeacherViewSet):
 			return deny
 		school_id = request.user.teacher.school_id
 		qs = LessonResource.objects.filter(subject__teachers__school_id=school_id).select_related('subject').distinct().order_by('-created_at')
-		return Response(LessonResourceSerializer(qs, many=True, context={"request": request}).data)
+		return _paginated_serializer_response(request, qs, LessonResourceSerializer)
 
 	@extend_schema(
 		description="List general assessments created by teachers in the head teacher's school.",
@@ -432,7 +436,7 @@ class HeadTeacherViewSet(TeacherViewSet):
 				qs = qs.filter(target_student_id=int(student_id))
 			except ValueError:
 				qs = qs.none()
-		return Response(GeneralAssessmentSerializer(qs, many=True).data)
+		return _paginated_serializer_response(request, qs, GeneralAssessmentSerializer)
 
 	@extend_schema(
 		description="List lesson assessments created by teachers in the head teacher's school.",
@@ -460,7 +464,7 @@ class HeadTeacherViewSet(TeacherViewSet):
 				qs = qs.filter(target_student_id=int(student_id))
 			except ValueError:
 				qs = qs.none()
-		return Response(LessonAssessmentSerializer(qs, many=True).data)
+		return _paginated_serializer_response(request, qs, LessonAssessmentSerializer)
 
 	@extend_schema(description="Create a question for assessments owned by teachers in the head teacher's school.", request=QuestionCreateSerializer, responses={201: QuestionSerializer})
 	@action(detail=False, methods=['post'], url_path='questions/create')
@@ -511,7 +515,7 @@ class HeadTeacherViewSet(TeacherViewSet):
 			except ValueError:
 				return Response({'detail': 'lesson_assessment_id must be an integer.'}, status=status.HTTP_400_BAD_REQUEST)
 			qs = qs.filter(lesson_assessment_id=la_id_int, lesson_assessment__given_by_id__in=teacher_ids)
-		return Response(QuestionSerializer(qs.order_by('created_at'), many=True).data)
+		return _paginated_serializer_response(request, qs.order_by('created_at'), QuestionSerializer)
 
 	@extend_schema(description="School dashboard for head teachers.", responses={200: TeacherDashboardResponseSerializer})
 	@action(detail=False, methods=['get'], url_path='dashboard')
@@ -717,6 +721,10 @@ class HeadTeacherViewSet(TeacherViewSet):
 			student = Student.objects.get(pk=student_id, school_id=request.user.teacher.school_id)
 		except Student.DoesNotExist:
 			return Response({'detail': 'Student not found in your school.'}, status=404)
+		if assessment.grade and assessment.grade != student.grade:
+			return Response({'detail': 'Student is outside the assessment grade.'}, status=403)
+		if assessment.is_targeted and assessment.target_student_id != student.id:
+			return Response({'detail': 'Assessment targets a different student.'}, status=403)
 		try:
 			score_value = float(score)
 		except (TypeError, ValueError):
@@ -748,6 +756,10 @@ class HeadTeacherViewSet(TeacherViewSet):
 			student = Student.objects.get(pk=student_id, school_id=request.user.teacher.school_id)
 		except Student.DoesNotExist:
 			return Response({'detail': 'Student not found in your school.'}, status=404)
+		if student.grade != assessment.lesson.subject.grade:
+			return Response({'detail': 'Student is outside the lesson grade.'}, status=403)
+		if assessment.is_targeted and assessment.target_student_id != student.id:
+			return Response({'detail': 'Assessment targets a different student.'}, status=403)
 		try:
 			score_value = float(score)
 		except (TypeError, ValueError):

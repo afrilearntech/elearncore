@@ -3,18 +3,21 @@ from django.conf.urls.static import static
 from django.contrib import admin
 from django.urls import include, path
 from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView, SpectacularRedocView
-from django.views.decorators.cache import cache_page
+from rest_framework.permissions import IsAdminUser
 
 urlpatterns = [
     path('admin/', admin.site.urls),
     # api path
     path('api-v1/', include('api.urls')),
-    # schema & docs
-    # path('api-v1/schema/', cache_page(60 * 60)(SpectacularAPIView.as_view()), name='schema'),
-    path('api-v1/schema/', SpectacularAPIView.as_view(), name='schema'),
-    path('api-v1/docs/', SpectacularSwaggerView.as_view(url_name='schema'), name='swagger-ui'),
-    path('api-v1/redoc/', SpectacularRedocView.as_view(url_name='schema'), name='redoc'),
 ]
+
+if settings.API_DOCS_ENABLED:
+    docs_permissions = [] if settings.DEBUG else [IsAdminUser]
+    urlpatterns += [
+        path('api-v1/schema/', SpectacularAPIView.as_view(permission_classes=docs_permissions), name='schema'),
+        path('api-v1/docs/', SpectacularSwaggerView.as_view(url_name='schema', permission_classes=docs_permissions), name='swagger-ui'),
+        path('api-v1/redoc/', SpectacularRedocView.as_view(url_name='schema', permission_classes=docs_permissions), name='redoc'),
+    ]
 
 
 # Let django serve static files in development mode

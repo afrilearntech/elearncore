@@ -8,30 +8,45 @@ class UserSerializer(serializers.ModelSerializer):
 		model = User
 		fields = [
 			'id', 'email', 'phone', 'name', 'role', 'dob', 'gender', 'is_active', 'is_staff', 'is_superuser',
-			'phone_verified', 'email_verified', 'created_at', 'updated_at'
+			'phone_verified', 'email_verified', 'must_change_password', 'created_at', 'updated_at'
 		]
-		read_only_fields = ['is_staff', 'is_superuser', 'created_at', 'updated_at']
+		read_only_fields = ['is_staff', 'is_superuser', 'must_change_password', 'created_at', 'updated_at']
 
 
 class CountySerializer(serializers.ModelSerializer):
 	class Meta:
 		model = County
-		fields = ['id', 'name', 'status', 'moderation_comment', 'created_at', 'updated_at']
-		read_only_fields = ['created_at', 'updated_at']
+		fields = ['id', 'name', 'status', 'moderation_comment', 'created_by', 'created_at', 'updated_at']
+		read_only_fields = ['created_by', 'created_at', 'updated_at']
+
+
+class CountyCreatorSerializer(CountySerializer):
+	class Meta(CountySerializer.Meta):
+		read_only_fields = CountySerializer.Meta.read_only_fields + ['status', 'moderation_comment']
 
 
 class DistrictSerializer(serializers.ModelSerializer):
 	class Meta:
 		model = District
-		fields = ['id', 'county', 'name', 'status', 'moderation_comment', 'created_at', 'updated_at']
-		read_only_fields = ['created_at', 'updated_at']
+		fields = ['id', 'county', 'name', 'status', 'moderation_comment', 'created_by', 'created_at', 'updated_at']
+		read_only_fields = ['created_by', 'created_at', 'updated_at']
+
+
+class DistrictCreatorSerializer(DistrictSerializer):
+	class Meta(DistrictSerializer.Meta):
+		read_only_fields = DistrictSerializer.Meta.read_only_fields + ['status', 'moderation_comment']
 
 
 class SchoolSerializer(serializers.ModelSerializer):
 	class Meta:
 		model = School
-		fields = ['id', 'district', 'name', 'status', 'moderation_comment', 'created_at', 'updated_at']
-		read_only_fields = ['created_at', 'updated_at']
+		fields = ['id', 'district', 'name', 'status', 'moderation_comment', 'created_by', 'created_at', 'updated_at']
+		read_only_fields = ['created_by', 'created_at', 'updated_at']
+
+
+class SchoolCreatorSerializer(SchoolSerializer):
+	class Meta(SchoolSerializer.Meta):
+		read_only_fields = SchoolSerializer.Meta.read_only_fields + ['status', 'moderation_comment']
 
 
 class CountyLookupSerializer(serializers.ModelSerializer):

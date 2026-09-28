@@ -1,6 +1,8 @@
 import os
+import sys
 from pathlib import Path
 from datetime import timedelta
+from django.core.exceptions import ImproperlyConfigured
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -10,25 +12,60 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
-# SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = os.getenv('DJANGO_SECRET_KEY')
+def env_bool(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
 
+
+def env_list(name: str, default: list[str] | None = None) -> list[str]:
+    value = os.getenv(name)
+    if value is None:
+        return list(default or [])
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
+# SECURITY WARNING: keep the secret key used in production secret!
 ENVIRONMENT = os.getenv('ENVIRONMENT', 'LOCAL').upper()
+IS_PRODUCTION = ENVIRONMENT in {"LIVE", "PRODUCTION", "PROD"}
+
+SECRET_KEY = os.getenv('DJANGO_SECRET_KEY')
+if not SECRET_KEY:
+    if IS_PRODUCTION:
+        raise ImproperlyConfigured("DJANGO_SECRET_KEY is required in production.")
+    SECRET_KEY = "local-development-only-change-me"
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+DEBUG = env_bool('DJANGO_DEBUG', default=not IS_PRODUCTION)
 
-ALLOWED_HOSTS = ["*"]
+ALLOWED_HOSTS = env_list('DJANGO_ALLOWED_HOSTS', ['localhost', '127.0.0.1', '[::1]'] if not IS_PRODUCTION else [])
+if IS_PRODUCTION and not ALLOWED_HOSTS:
+    raise ImproperlyConfigured("DJANGO_ALLOWED_HOSTS is required in production.")
 
 # CSRF trusted origins for HTTPS (required when behind a proxy)
-if ENVIRONMENT in ["LIVE", "PRODUCTION", "PROD"]:
-    CSRF_TRUSTED_ORIGINS = [
+if IS_PRODUCTION:
+    CSRF_TRUSTED_ORIGINS = env_list('CSRF_TRUSTED_ORIGINS', [
         "https://elearnapi.afrilearntech.com",
         "https://elapi.afrilearntech.com",
         "https://digitallearningapi.moe.gov.lr",
         "https://digitallearning.moe.gov.lr",
         "https://*.afrilearntech.com",
-    ]
+    ])
+
+SECURE_SSL_REDIRECT = env_bool('SECURE_SSL_REDIRECT', default=IS_PRODUCTION)
+SESSION_COOKIE_SECURE = env_bool('SESSION_COOKIE_SECURE', default=IS_PRODUCTION)
+CSRF_COOKIE_SECURE = env_bool('CSRF_COOKIE_SECURE', default=IS_PRODUCTION)
+SECURE_HSTS_SECONDS = int(os.getenv('SECURE_HSTS_SECONDS', '31536000' if IS_PRODUCTION else '0'))
+SECURE_HSTS_INCLUDE_SUBDOMAINS = env_bool('SECURE_HSTS_INCLUDE_SUBDOMAINS', default=IS_PRODUCTION)
+SECURE_HSTS_PRELOAD = env_bool('SECURE_HSTS_PRELOAD', default=IS_PRODUCTION)
+SECURE_CONTENT_TYPE_NOSNIFF = True
+SECURE_REFERRER_POLICY = 'same-origin'
+SESSION_COOKIE_HTTPONLY = True
+CSRF_COOKIE_HTTPONLY = True
+X_FRAME_OPTIONS = 'DENY'
+if env_bool('TRUST_PROXY_SSL_HEADER', default=IS_PRODUCTION):
+    SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
 
 
 # Application definition
@@ -165,7 +202,7 @@ MEDIA_ROOT = BASE_DIR / "assets"
 
 # Use Spaces if DO_SPACES_BUCKET is provided; otherwise fall back to local MEDIA settings above.
 ENVIRONMENT = os.getenv('ENVIRONMENT', 'LOCAL').upper()
-if os.getenv('DO_SPACES_BUCKET') and ENVIRONMENT in ["LIVE", "PRODUCTION", "PROD"]:
+if os.getenv('DO_SPACES_BUCKET') and IS_PRODUCTION:
     DEFAULT_FILE_STORAGE = 'storages.backends.s3boto3.S3Boto3Storage'
 
     AWS_ACCESS_KEY_ID = os.getenv('DO_SPACES_KEY') or os.getenv('AWS_ACCESS_KEY_ID')
@@ -175,8 +212,11 @@ if os.getenv('DO_SPACES_BUCKET') and ENVIRONMENT in ["LIVE", "PRODUCTION", "PROD
     AWS_S3_ENDPOINT_URL = os.getenv('DO_SPACES_ENDPOINT', f'https://{AWS_S3_REGION_NAME}.digitaloceanspaces.com')
     AWS_S3_CUSTOM_DOMAIN = os.getenv('DO_SPACES_CUSTOM_DOMAIN')  # optional CDN/custom domain
 
-    # Public media files by default; change to None/'' for private files
-    AWS_DEFAULT_ACL = 'public-read'
+    # Keep uploads private. API serializers return short-lived signed URLs.
+    AWS_DEFAULT_ACL = None
+    AWS_QUERYSTRING_AUTH = True
+    AWS_QUERYSTRING_EXPIRE = int(os.getenv('AWS_QUERYSTRING_EXPIRE', '300'))
+    AWS_S3_FILE_OVERWRITE = False
     AWS_S3_OBJECT_PARAMETERS = {
         'CacheControl': 'max-age=86400',
     }
@@ -220,7 +260,7 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 # Django REST Framework Configuration
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': [
-        'knox.auth.TokenAuthentication',
+        'api.authentication.PasswordChangeAwareTokenAuthentication',
     ],
     'DEFAULT_FILTER_BACKENDS': [
         'django_filters.rest_framework.DjangoFilterBackend',
@@ -237,14 +277,34 @@ REST_KNOX = {
     'AUTO_REFRESH': True,
 }
 
-# Celery settings (defaults use local Redis)
-CELERY_BROKER_URL = os.getenv('CELERY_BROKER_URL', os.getenv('REDIS_URL', 'redis://localhost:6379/0'))
+# Celery settings (defaults use local Redis; tests use an in-memory broker).
+RUNNING_TESTS = 'test' in sys.argv
+if RUNNING_TESTS:
+    # Keep production hashers unchanged while avoiding costly fixture hashing in CI.
+    PASSWORD_HASHERS = ['django.contrib.auth.hashers.MD5PasswordHasher']
+CELERY_BROKER_URL = os.getenv(
+    'CELERY_BROKER_URL',
+    'memory://' if RUNNING_TESTS else os.getenv('REDIS_URL', 'redis://localhost:6379/0'),
+)
 CELERY_RESULT_BACKEND = os.getenv('CELERY_RESULT_BACKEND', 'django-db')
 CELERY_CACHE_BACKEND = 'django-cache'
 CELERY_ACCEPT_CONTENT = ['json']
 CELERY_TASK_SERIALIZER = 'json'
 CELERY_RESULT_SERIALIZER = 'json'
 CELERY_TIMEZONE = TIME_ZONE
+CELERY_TASK_ACKS_LATE = True
+CELERY_TASK_REJECT_ON_WORKER_LOST = True
+CELERY_TASK_PUBLISH_RETRY = True
+CELERY_TASK_PUBLISH_RETRY_POLICY = {
+    'max_retries': 3,
+    'interval_start': 0,
+    'interval_step': 0.2,
+    'interval_max': 1,
+}
+CELERY_BROKER_TRANSPORT_OPTIONS = {
+    'socket_connect_timeout': float(os.getenv('CELERY_BROKER_CONNECT_TIMEOUT', '2')),
+    'socket_timeout': float(os.getenv('CELERY_BROKER_SOCKET_TIMEOUT', '5')),
+}
 
 # DRF Spectacular Configuration
 SPECTACULAR_SETTINGS = {
@@ -256,21 +316,51 @@ SPECTACULAR_SETTINGS = {
     'SECURITY': [
         {'TokenAuth': []},
     ],
+    'ENUM_NAME_OVERRIDES': {
+        'UserRoleEnum': 'elearncore.sysutils.constants.UserRole',
+        'StudentLevelEnum': 'elearncore.sysutils.constants.StudentLevel',
+        'ContentStatusEnum': 'elearncore.sysutils.constants.Status',
+        'ContentTypeEnum': 'elearncore.sysutils.constants.ContentType',
+        'QuestionTypeEnum': 'elearncore.sysutils.constants.QType',
+        'GameTypeEnum': 'elearncore.sysutils.constants.GameType',
+        'AssessmentTypeEnum': 'elearncore.sysutils.constants.AssessmentType',
+        'MonthEnum': [
+            (1, 'January'), (2, 'February'), (3, 'March'),
+            (4, 'April'), (5, 'May'), (6, 'June'),
+            (7, 'July'), (8, 'August'), (9, 'September'),
+            (10, 'October'), (11, 'November'), (12, 'December'),
+        ],
+    },
 }
 
 # django cors headers settings
-CORS_ALLOW_ALL_ORIGINS = True
+CORS_ALLOW_ALL_ORIGINS = env_bool('CORS_ALLOW_ALL_ORIGINS', default=False)
+CORS_ALLOWED_ORIGINS = env_list('CORS_ALLOWED_ORIGINS', [])
+if IS_PRODUCTION and CORS_ALLOW_ALL_ORIGINS:
+    raise ImproperlyConfigured("CORS_ALLOW_ALL_ORIGINS cannot be enabled in production.")
+
+API_DOCS_ENABLED = env_bool('API_DOCS_ENABLED', default=DEBUG)
+
+MAX_CSV_UPLOAD_BYTES = int(os.getenv('MAX_CSV_UPLOAD_BYTES', str(2 * 1024 * 1024)))
+MAX_CSV_ROWS = int(os.getenv('MAX_CSV_ROWS', '5000'))
+MAX_IMAGE_UPLOAD_BYTES = int(os.getenv('MAX_IMAGE_UPLOAD_BYTES', str(5 * 1024 * 1024)))
+MAX_DOCUMENT_UPLOAD_BYTES = int(os.getenv('MAX_DOCUMENT_UPLOAD_BYTES', str(100 * 1024 * 1024)))
+UPLOAD_SCANNER = os.getenv('UPLOAD_SCANNER', '')
+REQUIRE_UPLOAD_SCAN = env_bool('REQUIRE_UPLOAD_SCAN', default=False)
+AI_GENERATION_RATE = os.getenv('AI_GENERATION_RATE', '10/hour')
+TEMPORARY_PASSWORD_TTL_HOURS = int(os.getenv('TEMPORARY_PASSWORD_TTL_HOURS', '24'))
 
 # NOTIFICATION SETTINGS
 # email settings
-EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
-EMAIL_HOST = 'smtp.gmail.com'
-EMAIL_PORT = 587
-EMAIL_HOST_USER = ''
-EMAIL_HOST_PASSWORD = ''
-EMAIL_USE_TLS = True
-EMAIL_USE_SSL = False
-DEFAULT_FROM_EMAIL = os.getenv('DEFAULT_FROM_MAIL')
+EMAIL_BACKEND = os.getenv('EMAIL_BACKEND', 'django.core.mail.backends.smtp.EmailBackend')
+EMAIL_HOST = os.getenv('EMAIL_HOST', 'smtp.gmail.com')
+EMAIL_PORT = int(os.getenv('EMAIL_PORT', '587'))
+EMAIL_HOST_USER = os.getenv('EMAIL_HOST_USER', '')
+EMAIL_HOST_PASSWORD = os.getenv('EMAIL_HOST_PASSWORD', '')
+EMAIL_USE_TLS = env_bool('EMAIL_USE_TLS', default=True)
+EMAIL_USE_SSL = env_bool('EMAIL_USE_SSL', default=False)
+EMAIL_TIMEOUT = int(os.getenv('EMAIL_TIMEOUT', '15'))
+DEFAULT_FROM_EMAIL = os.getenv('DEFAULT_FROM_EMAIL', os.getenv('DEFAULT_FROM_MAIL', ''))
  
 # KEYS
 SENDER_ID = os.getenv('SMS_SENDER_ID') # 11 characters max

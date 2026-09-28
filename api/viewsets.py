@@ -2,14 +2,17 @@ import csv
 import io
 import hashlib
 import math
+import logging
+import secrets
+import uuid
 from statistics import multimode
 from urllib.parse import quote
 from typing import Iterable, Dict, List, Set
 
 from rest_framework import permissions, viewsets, status, filters, serializers
+from rest_framework.exceptions import APIException
 from drf_spectacular.utils import extend_schema, OpenApiResponse, OpenApiExample, OpenApiParameter
 from django.conf import settings
-from django.core.mail import send_mail
 from django.http import HttpResponse
 from rest_framework.decorators import action
 from rest_framework.response import Response
@@ -45,10 +48,12 @@ from content.serializers import (
 	AssessmentSolutionSerializer,
 	LessonAssessmentSolutionSerializer,
 	SubjectSerializer,
+	SubjectPublicSerializer,
 	SubjectWriteSerializer,
 	TopicSerializer,
 	PeriodSerializer,
 	LessonResourceSerializer,
+	LessonResourcePublicSerializer,
 	TakeLessonSerializer,
 	GeneralAssessmentSerializer,
 	GeneralAssessmentUpdateSerializer,
@@ -57,10 +62,12 @@ from content.serializers import (
 	LessonAssessmentUpdateSerializer,
 	LessonAssessmentTeacherUpdateSerializer,
 	QuestionSerializer,
+	StudentQuestionSerializer,
 	OptionSerializer,
 	QuestionCreateSerializer,
 	QuestionUpdateSerializer,
 	GameSerializer,
+	GamePublicSerializer,
 	StoryListSerializer,
 	StoryDetailSerializer,
 	StoryUpdateSerializer,
@@ -73,9 +80,11 @@ from agentic.serializers import AIRecommendationSerializer, AIAbuseReportSeriali
 from agentic.services import generate_targeted_assessments_for_student
 from knox.models import AuthToken
 from accounts.models import User, Student, Teacher, Parent, School, County, District
+from accounts.security import assign_temporary_password
 from accounts.serializers import (
 	SchoolLookupSerializer, CountyLookupSerializer, DistrictLookupSerializer,
 	CountySerializer, DistrictSerializer, SchoolSerializer,
+	CountyCreatorSerializer, DistrictCreatorSerializer, SchoolCreatorSerializer,
 	StudentSerializer, TeacherSerializer, UserSerializer,
 )
 from .serializers import (
@@ -111,7 +120,17 @@ from .serializers import (
 	AssessmentStatisticsResponseSerializer,
 )
 from .pagination import StandardResultsSetPagination
+from .uploads import (
+	build_bulk_identity_index,
+	claim_bulk_identity,
+	parse_bounded_csv,
+	validate_solution_upload,
+)
+from .throttles import AIGenerationThrottle
 from messsaging.services import send_sms
+from messsaging.tasks import send_account_notifications_task
+
+logger = logging.getLogger(__name__)
 
 
 def _parse_bulk_date(value: str):
@@ -144,32 +163,11 @@ def _parse_bulk_date(value: str):
 
 
 def _send_account_notifications(message: str, phone: str | None, email: str | None, email_subject: str) -> None:
-	"""Send SMS and email notifications for new accounts.
-
-	Designed to be called via ``fire_and_forget`` so that SMS/email I/O
-	does not block API responses. All exceptions are swallowed inside the
-	send functions to avoid impacting the caller.
-	"""
-	try:
-		if phone:
-			# send_sms expects an iterable of recipients
-			send_sms(message, [phone])
-	except Exception:
-		pass
-
-	try:
-		if email:
-			from_email = getattr(settings, "DEFAULT_FROM_EMAIL", None) or None
-			if from_email:
-				send_mail(
-					subject=email_subject,
-					message=message,
-					from_email=from_email,
-					recipient_list=[email],
-					fail_silently=True,
-				)
-	except Exception:
-		pass
+    """Queue retryable delivery outside the request process."""
+    send_account_notifications_task.apply_async(
+        args=(str(uuid.uuid4()), message, phone, email, email_subject),
+        retry=False,
+    )
 
 
 class ParentChildSerializer(serializers.Serializer):
@@ -197,6 +195,11 @@ def _user_role_in(user, roles: Iterable[str]) -> bool:
 		return False
 
 
+def _has_approved_teacher_profile(user) -> bool:
+	teacher = getattr(user, 'teacher', None)
+	return bool(teacher and teacher.status == StatusEnum.APPROVED.value)
+
+
 LESSON_LOCK_REASON = "Complete the previous lesson and submit all of its assessments to unlock this lesson."
 TEACHER_UNLOCK_MAX_HOURS = 72
 TEACHER_UNLOCK_REASON = "Temporarily unlocked by teacher."
@@ -209,21 +212,24 @@ def _published_stories_for_school(school_id: int | None, creator: User | None):
 	but non-creators can only see published stories.\n 
 	Both can see stories without a school or with their school.\n
 	"""
-	qs = Story.objects.none()
-	if creator:
-		qs = Story.objects.filter(created_by=creator)
-	else:
-		qs = Story.objects.filter(is_published=True)
+	qs = Story.objects.filter(is_published=True)
+	creator_roles = {
+		UserRole.ADMIN.value,
+		UserRole.CONTENTCREATOR.value,
+		UserRole.CONTENTVALIDATOR.value,
+		UserRole.TEACHER.value,
+		UserRole.HEADTEACHER.value,
+	}
+	if creator and getattr(creator, 'role', None) in creator_roles:
+		qs = Story.objects.filter(Q(is_published=True) | Q(created_by=creator))
 	if school_id:
 		return qs.filter(Q(school__isnull=True) | Q(school_id=school_id))
 	return qs.filter(school__isnull=True)
 
 
 def _enqueue_story_generation(*, requested_by_id: int, grade: str, tag: str, count: int, school_id: int | None):
-	# Local import keeps app startup resilient if Celery isn't installed yet.
-	# If Celery isn't available (common in local/dev), run synchronously so the API still works.
+	"""Queue story generation without performing paid LLM work in the request."""
 	from agentic import tasks as agentic_tasks
-	import uuid
 
 	try:
 		generate_stories_task = agentic_tasks.generate_stories_task
@@ -234,21 +240,15 @@ def _enqueue_story_generation(*, requested_by_id: int, grade: str, tag: str, cou
 			count=count,
 			school_id=school_id,
 		)
-	except Exception:
-		result = agentic_tasks.generate_stories_task_sync(
-			requested_by_id=requested_by_id,
-			grade=grade,
-			tag=tag,
-			count=count,
-			school_id=school_id,
-		)
+	except Exception as exc:
+		logger.exception('Unable to enqueue AI story generation')
+		raise AIQueueUnavailable() from exc
 
-		class _ImmediateResult:
-			def __init__(self, payload):
-				self.id = uuid.uuid4()
-				self.payload = payload
 
-		return _ImmediateResult(result)
+class AIQueueUnavailable(APIException):
+	status_code = 503
+	default_detail = 'AI generation queue is temporarily unavailable. Try again later.'
+	default_code = 'ai_queue_unavailable'
 
 
 def _award_student_points(student: Student | None, points: int) -> int | None:
@@ -546,23 +546,29 @@ def _student_points_for_timeframe(students: List[Student], timeframe: str) -> Di
 
 
 def _build_student_leaderboard_response(queryset, *, scope: dict, limit: int, timeframe: str = 'all_time') -> dict:
-	all_students = list(
-		queryset
-		.select_related('profile', 'school__district__county')
-		.order_by('profile__name', 'id')
-	)
-	points_by_student_id = _student_points_for_timeframe(all_students, timeframe)
-
-	all_students.sort(
-		key=lambda student: (
-			-int(points_by_student_id.get(student.id, 0)),
-			str(getattr(getattr(student, 'profile', None), 'name', '') or '').lower(),
-			student.id,
+	if timeframe == 'all_time':
+		total_students = queryset.count()
+		ordered_students = list(
+			queryset.select_related('profile', 'school__district__county')
+			.order_by('-points', 'profile__name', 'id')[:max(0, limit)]
 		)
-	)
-
-	ordered_students = all_students[:max(0, limit)]
-	total_students = len(all_students)
+		points_by_student_id = {
+			student.id: int(getattr(student, 'points', 0) or 0) for student in ordered_students
+		}
+	else:
+		all_students = list(
+			queryset.select_related('profile', 'school__district__county').order_by('profile__name', 'id')
+		)
+		points_by_student_id = _student_points_for_timeframe(all_students, timeframe)
+		all_students.sort(
+			key=lambda student: (
+				-int(points_by_student_id.get(student.id, 0)),
+				str(getattr(getattr(student, 'profile', None), 'name', '') or '').lower(),
+				student.id,
+			)
+		)
+		ordered_students = all_students[:max(0, limit)]
+		total_students = len(all_students)
 	leaderboard = []
 	last_points = None
 	current_rank = 0
@@ -618,13 +624,31 @@ def _get_cache_version(cache_key: str) -> int:
 
 
 def _bump_cache_version(cache_key: str) -> int:
-	new_version = _get_cache_version(cache_key) + 1
-	cache.set(cache_key, new_version, timeout=None)
-	return new_version
+	if cache.add(cache_key, 2, timeout=None):
+		return 2
+	try:
+		return int(cache.incr(cache_key))
+	except (ValueError, NotImplementedError):
+		new_version = _get_cache_version(cache_key) + 1
+		cache.set(cache_key, new_version, timeout=None)
+		return new_version
 
 
 def _invalidate_student_lesson_cache(student: Student) -> None:
 	_bump_cache_version(_student_lesson_progress_version_key(student.id))
+	cache.delete(f"dashboard:{student.profile_id}")
+
+
+def _sample_queryset_by_pk(queryset, limit: int = 10):
+	"""Sample without a full-table random sort."""
+	bounds = queryset.aggregate(min_id=models.Min('id'), max_id=models.Max('id'))
+	if bounds['min_id'] is None:
+		return []
+	start = secrets.randbelow(bounds['max_id'] - bounds['min_id'] + 1) + bounds['min_id']
+	first = list(queryset.filter(id__gte=start).order_by('id')[:limit])
+	if len(first) < limit:
+		first.extend(list(queryset.filter(id__lt=start).order_by('id')[:limit - len(first)]))
+	return first
 
 
 def _invalidate_grade_lesson_cache(grade: str | None) -> None:
@@ -647,7 +671,7 @@ def _student_lesson_cache_key(student: Student, request, suffix: str) -> str:
 
 def _paginate_payload(request, items, results_key: str, *, extra_payload: dict | None = None):
 	paginator = StandardResultsSetPagination()
-	page = paginator.paginate_queryset(list(items), request)
+	page = paginator.paginate_queryset(items, request)
 	payload = dict(extra_payload or {})
 	payload[results_key] = page
 	payload['pagination'] = {
@@ -657,6 +681,13 @@ def _paginate_payload(request, items, results_key: str, *, extra_payload: dict |
 		'page_size': paginator.get_page_size(request),
 	}
 	return payload
+
+
+def _paginated_serializer_response(request, queryset, serializer_class, *, context=None):
+	paginator = StandardResultsSetPagination()
+	page = paginator.paginate_queryset(queryset, request)
+	serializer = serializer_class(page, many=True, context=context or {'request': request})
+	return paginator.get_paginated_response(serializer.data)
 
 
 def _active_lesson_unlocks_for_student(student: Student, *, lesson_ids: list[int] | None = None) -> dict[int, LessonTemporaryUnlock]:
@@ -793,7 +824,11 @@ class CanCreateContent(permissions.BasePermission):
 	def has_permission(self, request, view):
 		if request.method in permissions.SAFE_METHODS:
 			return True
-		return _user_role_in(request.user, self.allowed_roles)
+		if not _user_role_in(request.user, self.allowed_roles):
+			return False
+		if request.user.role in {UserRole.TEACHER.value, UserRole.HEADTEACHER.value}:
+			return _has_approved_teacher_profile(request.user)
+		return True
 
 
 class CanModerateContent(permissions.BasePermission):
@@ -804,7 +839,11 @@ class CanModerateContent(permissions.BasePermission):
 	}
 
 	def has_permission(self, request, view):
-		return _user_role_in(request.user, self.allowed_roles)
+		if not _user_role_in(request.user, self.allowed_roles):
+			return False
+		if request.user.role in {UserRole.TEACHER.value, UserRole.HEADTEACHER.value}:
+			return _has_approved_teacher_profile(request.user)
+		return True
 
 
 class IsAdminRole(permissions.BasePermission):
@@ -848,11 +887,29 @@ class SubjectViewSet(viewsets.ModelViewSet):
 	search_fields = ['name', 'description']
 	ordering_fields = ['name', 'created_at']
 
-	# Cache list & retrieve for short periods (safe/public reads)
-	@method_decorator(cache_page(60 * 5), name='list')
-	@method_decorator(cache_page(60 * 10), name='retrieve')
-	def dispatch(self, *args, **kwargs):
-		return super().dispatch(*args, **kwargs)
+	def get_queryset(self):
+		qs = super().get_queryset()
+		user = getattr(self.request, 'user', None)
+		role = getattr(user, 'role', None) if getattr(user, 'is_authenticated', False) else None
+		if role in {UserRole.ADMIN.value, UserRole.CONTENTVALIDATOR.value}:
+			return qs
+		if role == UserRole.CONTENTCREATOR.value:
+			return qs.filter(Q(status=StatusEnum.APPROVED.value) | Q(created_by=user))
+		if role in {UserRole.TEACHER.value, UserRole.HEADTEACHER.value} and _has_approved_teacher_profile(user):
+			return qs.filter(
+				Q(status=StatusEnum.APPROVED.value) | Q(created_by=user) | Q(teachers=user.teacher)
+			).distinct()
+		return qs.filter(status=StatusEnum.APPROVED.value)
+
+	def get_serializer_class(self):
+		user = getattr(self.request, 'user', None)
+		role = getattr(user, 'role', None) if getattr(user, 'is_authenticated', False) else None
+		if self.request.method in permissions.SAFE_METHODS and role not in {
+			UserRole.ADMIN.value, UserRole.CONTENTVALIDATOR.value, UserRole.CONTENTCREATOR.value,
+			UserRole.TEACHER.value, UserRole.HEADTEACHER.value,
+		}:
+			return SubjectPublicSerializer
+		return SubjectSerializer
 
 	def retrieve(self, request, *args, **kwargs):
 		"""Return subject detail plus basic aggregated stats."""
@@ -965,6 +1022,10 @@ class TopicViewSet(viewsets.ModelViewSet):
 	def get_queryset(self):
 		"""Optionally filter topics by subject id via ?subject=<id>."""
 		qs = super().get_queryset()
+		user = getattr(self.request, 'user', None)
+		role = getattr(user, 'role', None) if getattr(user, 'is_authenticated', False) else None
+		if role not in {UserRole.ADMIN.value, UserRole.CONTENTVALIDATOR.value, UserRole.CONTENTCREATOR.value}:
+			qs = qs.filter(subject__status=StatusEnum.APPROVED.value)
 		subject_id = self.request.query_params.get('subject') if hasattr(self, 'request') else None
 		if subject_id:
 			try:
@@ -973,12 +1034,6 @@ class TopicViewSet(viewsets.ModelViewSet):
 				# Ignore invalid subject values and return the unfiltered queryset
 				pass
 		return qs
-
-	@method_decorator(cache_page(60 * 5), name='list')
-	@method_decorator(cache_page(60 * 10), name='retrieve')
-	def dispatch(self, *args, **kwargs):
-		return super().dispatch(*args, **kwargs)
-
 
 @method_decorator(cache_page(60 * 15), name='list')
 @method_decorator(cache_page(60 * 15), name='retrieve')
@@ -1019,6 +1074,18 @@ class LessonResourceViewSet(viewsets.ModelViewSet):
 
 	def get_queryset(self):
 		qs = super().get_queryset()
+		user = getattr(self.request, 'user', None)
+		role = getattr(user, 'role', None) if getattr(user, 'is_authenticated', False) else None
+		if role in {UserRole.ADMIN.value, UserRole.CONTENTVALIDATOR.value}:
+			pass
+		elif role == UserRole.CONTENTCREATOR.value:
+			qs = qs.filter(Q(status=StatusEnum.APPROVED.value) | Q(created_by=user))
+		elif role in {UserRole.TEACHER.value, UserRole.HEADTEACHER.value} and _has_approved_teacher_profile(user):
+			qs = qs.filter(
+				Q(status=StatusEnum.APPROVED.value) | Q(created_by=user, subject__teachers=user.teacher)
+			).distinct()
+		else:
+			qs = qs.filter(status=StatusEnum.APPROVED.value, subject__status=StatusEnum.APPROVED.value)
 		student = getattr(getattr(self, 'request', None), 'user', None)
 		student = getattr(student, 'student', None)
 		if not student:
@@ -1029,6 +1096,16 @@ class LessonResourceViewSet(viewsets.ModelViewSet):
 		if not allowed_lesson_ids:
 			return qs.none()
 		return qs.filter(id__in=allowed_lesson_ids)
+
+	def get_serializer_class(self):
+		user = getattr(self.request, 'user', None)
+		role = getattr(user, 'role', None) if getattr(user, 'is_authenticated', False) else None
+		if self.request.method in permissions.SAFE_METHODS and role not in {
+			UserRole.ADMIN.value, UserRole.CONTENTVALIDATOR.value, UserRole.CONTENTCREATOR.value,
+			UserRole.TEACHER.value, UserRole.HEADTEACHER.value,
+		}:
+			return LessonResourcePublicSerializer
+		return LessonResourceSerializer
 
 	def retrieve(self, request, *args, **kwargs):
 		student = getattr(request.user, 'student', None)
@@ -1837,10 +1914,18 @@ class ParentViewSet(viewsets.ViewSet):
 
 		students = list(parent.wards.select_related('profile'))
 		if not students:
-			return Response({"assessments": [], "summary": {"completed": 0, "pending": 0, "in_progress": 0}})
+			return Response(_paginate_payload(
+				request,
+				[],
+				'assessments',
+				extra_payload={"summary": {"completed": 0, "pending": 0, "in_progress": 0}},
+			))
 
 		student_ids = [s.id for s in students]
 		name_by_id = {s.id: getattr(s.profile, 'name', None) for s in students}
+		students_by_grade: Dict[str, list[Student]] = {}
+		for student in students:
+			students_by_grade.setdefault(student.grade, []).append(student)
 
 		items = []
 		completed = pending = in_progress = 0
@@ -1849,7 +1934,12 @@ class ParentViewSet(viewsets.ViewSet):
 		lesson_assessments = (
 			LessonAssessment.objects
 			.select_related('lesson__subject')
-			.filter(lesson__subject__grade__in=[s.grade for s in students])
+			.filter(
+				status=StatusEnum.APPROVED.value,
+				lesson__status=StatusEnum.APPROVED.value,
+				lesson__subject__status=StatusEnum.APPROVED.value,
+				lesson__subject__grade__in=students_by_grade,
+			)
 		)
 
 		# Preload grades for lesson assessments per (assessment_id, student_id)
@@ -1871,7 +1961,7 @@ class ParentViewSet(viewsets.ViewSet):
 
 		for la in lesson_assessments:
 			subject = getattr(getattr(la.lesson, 'subject', None), 'name', None)
-			for student in students:
+			for student in students_by_grade.get(la.lesson.subject.grade, []):
 				# Skip targeted lesson assessments that are meant for a different student
 				if getattr(la, 'is_targeted', False) and getattr(la, 'target_student_id', None) != student.id:
 					continue
@@ -1900,14 +1990,19 @@ class ParentViewSet(viewsets.ViewSet):
 				})
 
 		# General assessments: not subject-specific in the model; we keep subject as None
-		general_assessments = GeneralAssessment.objects.all()
+		general_assessments = (
+			GeneralAssessment.objects
+			.filter(status=StatusEnum.APPROVED.value)
+			.filter(Q(grade__isnull=True) | Q(grade__in=students_by_grade))
+		)
 		gag_qs = GeneralAssessmentGrade.objects.filter(student_id__in=student_ids)
 		gag_map: Dict[tuple, GeneralAssessmentGrade] = {}
 		for g in gag_qs.select_related('assessment'):
 			gag_map[(g.assessment_id, g.student_id)] = g
 
 		for ga in general_assessments:
-			for student in students:
+			candidate_students = students if not ga.grade else students_by_grade.get(ga.grade, [])
+			for student in candidate_students:
 				# Skip targeted assessments that are meant for a different student
 				if getattr(ga, 'is_targeted', False) and getattr(ga, 'target_student_id', None) != student.id:
 					continue
@@ -1935,14 +2030,16 @@ class ParentViewSet(viewsets.ViewSet):
 					"target_student_id": getattr(ga.target_student, 'id', None),
 				})
 
-		return Response({
-			"assessments": items,
-			"summary": {
+		return Response(_paginate_payload(
+			request,
+			items,
+			'assessments',
+			extra_payload={"summary": {
 				"completed": completed,
 				"pending": pending,
 				"in_progress": in_progress,
-			},
-		})
+			}},
+		))
 
 	@extend_schema(
 		operation_id="parent_submissions",
@@ -2075,8 +2172,8 @@ class ParentViewSet(viewsets.ViewSet):
 		responses={200: OpenApiResponse(description="Child linked successfully.")},
 		description=(
 			"Link an existing student to the authenticated parent. "
-			"Allows passing student id, email/phone for verification, and "
-			"optionally school id and grade to update the student profile."
+			"Requires the student id plus email or phone for identity verification. "
+			"This operation does not modify the student's school or grade."
 		),
 	)
 	@action(detail=False, methods=['post'], url_path='linkchild')
@@ -2087,8 +2184,6 @@ class ParentViewSet(viewsets.ViewSet):
 		- student_id (required)
 		- student_email (optional)
 		- student_phone (optional)
-		- school_id (optional)
-		- grade (optional)
 		"""
 		user: User = request.user
 		if user.role != UserRole.PARENT.value or not hasattr(user, 'parent'):
@@ -2097,9 +2192,6 @@ class ParentViewSet(viewsets.ViewSet):
 		student_id = request.data.get('student_id')
 		student_email = (request.data.get('student_email') or '').strip().lower()
 		student_phone = (request.data.get('student_phone') or '').strip()
-		school_id = request.data.get('school_id')
-		grade = request.data.get('grade')
-
 		if not student_id:
 			return Response({"detail": "student_id is required."}, status=status.HTTP_400_BAD_REQUEST)
 		if not (student_email or student_phone):
@@ -2113,22 +2205,6 @@ class ParentViewSet(viewsets.ViewSet):
 		student = qs.first()
 		if not student:
 			return Response({"detail": "Student not found with provided identifiers."}, status=status.HTTP_404_NOT_FOUND)
-
-		# Optionally update school and grade
-		update_fields = []
-		if grade:
-			student.grade = str(grade)
-			update_fields.append('grade')
-		if school_id:
-			from accounts.models import School as AccountSchool
-			school_obj = AccountSchool.objects.filter(id=school_id).first()
-			if not school_obj:
-				return Response({"detail": "School not found."}, status=status.HTTP_400_BAD_REQUEST)
-			student.school = school_obj
-			update_fields.append('school')
-		if update_fields:
-			update_fields.append('updated_at') if hasattr(student, 'updated_at') else None
-			student.save(update_fields=[f for f in update_fields if f])
 
 		user.parent.wards.add(student)
 		return Response({"detail": "Child linked."})
@@ -2299,7 +2375,7 @@ class GameViewSet(viewsets.ModelViewSet):
 	"""Manage games; students can read, managers/admins can write.
 	Game Types: MUSIC, WORD_PUZZLE, SHAPE, COLOR, NUMBER
 	"""
-	queryset = GameModel.objects.select_related('created_by').all()
+	queryset = GameModel.objects.select_related('created_by').all().order_by('id')
 	serializer_class = GameSerializer
 	filter_backends = [filters.SearchFilter, filters.OrderingFilter]
 	search_fields = ['name', 'description', 'instructions', 'hint']
@@ -2311,6 +2387,26 @@ class GameViewSet(viewsets.ModelViewSet):
 			return [permissions.IsAuthenticatedOrReadOnly()]
 		# Only roles that can create content (incl. admin) may write
 		return [permissions.IsAuthenticated(), CanCreateContent()]
+
+	def get_queryset(self):
+		qs = super().get_queryset()
+		user = getattr(self.request, 'user', None)
+		role = getattr(user, 'role', None) if getattr(user, 'is_authenticated', False) else None
+		if role in {UserRole.ADMIN.value, UserRole.CONTENTVALIDATOR.value}:
+			return qs
+		if role in {UserRole.CONTENTCREATOR.value, UserRole.TEACHER.value, UserRole.HEADTEACHER.value}:
+			return qs.filter(Q(status=StatusEnum.APPROVED.value) | Q(created_by=user))
+		return qs.filter(status=StatusEnum.APPROVED.value)
+
+	def get_serializer_class(self):
+		user = getattr(self.request, 'user', None)
+		role = getattr(user, 'role', None) if getattr(user, 'is_authenticated', False) else None
+		if self.request.method in permissions.SAFE_METHODS and role not in {
+			UserRole.ADMIN.value, UserRole.CONTENTVALIDATOR.value, UserRole.CONTENTCREATOR.value,
+			UserRole.TEACHER.value, UserRole.HEADTEACHER.value,
+		}:
+			return GamePublicSerializer
+		return GameSerializer
 
 	def perform_create(self, serializer):
 		game = serializer.save(created_by=self.request.user)
@@ -2333,11 +2429,14 @@ class GameViewSet(viewsets.ModelViewSet):
 		response = super().list(request, *args, **kwargs)
 		user: User = request.user
 		student = getattr(user, 'student', None)
-		if not student or not isinstance(response.data, list):
+		if not student:
+			return response
+		items = response.data.get('results', []) if isinstance(response.data, dict) else response.data
+		if not isinstance(items, list):
 			return response
 
 		# Collect game IDs from the paginated/filtered result set
-		game_ids = [item.get('id') for item in response.data if isinstance(item, dict) and 'id' in item]
+		game_ids = [item.get('id') for item in items if isinstance(item, dict) and 'id' in item]
 		if not game_ids:
 			return response
 
@@ -2347,11 +2446,17 @@ class GameViewSet(viewsets.ModelViewSet):
 			.values_list('game_id', flat=True)
 		)
 
-		for item in response.data:
+		for item in items:
 			if isinstance(item, dict) and 'id' in item:
 				item['status'] = 'played' if item['id'] in played_ids else 'new'
 
 		return response
+
+
+class ContentSchemaSerializer(serializers.Serializer):
+	"""Fallback schema for action-only content routes."""
+
+	detail = serializers.CharField(read_only=True)
 
 
 class ContentViewSet(viewsets.ViewSet):
@@ -2367,6 +2472,7 @@ class ContentViewSet(viewsets.ViewSet):
 	- can list AI-generated assessments alongside all other content.
 	"""
 	permission_classes = [permissions.IsAuthenticated]
+	serializer_class = ContentSchemaSerializer
 
 	def _require_creator(self, request):
 		if not IsContentCreator().has_permission(request, self):
@@ -2425,7 +2531,7 @@ class ContentViewSet(viewsets.ViewSet):
 		elif is_published in {'0', 'false', 'False'}:
 			qs = qs.filter(is_published=False)
 
-		return Response(StoryListSerializer(qs, many=True).data)
+		return _paginated_serializer_response(request, qs, StoryListSerializer)
 
 	@extend_schema(
 		operation_id="content_generate_stories",
@@ -2433,7 +2539,7 @@ class ContentViewSet(viewsets.ViewSet):
 		request=StoryGenerateRequestSerializer,
 		responses={202: OpenApiResponse(description="Story generation task queued.")},
 	)
-	@action(detail=False, methods=['post'], url_path='stories/generate')
+	@action(detail=False, methods=['post'], url_path='stories/generate', throttle_classes=[AIGenerationThrottle])
 	def generate_stories(self, request):
 		if not _user_role_in(request.user, {UserRole.ADMIN.value, UserRole.CONTENTCREATOR.value}):
 			return Response({"detail": "Admin or content creator role required."}, status=403)
@@ -2501,7 +2607,7 @@ class ContentViewSet(viewsets.ViewSet):
 			"validators/admins can update any story. Publication and ownership fields are not editable here."
 		),
 	)
-	@action(detail=False, methods=['patch'], url_path='stories/(?P<pk>[^/.]+)')
+	@action(detail=False, methods=['patch'], url_path='stories/(?P<pk>[0-9]+)')
 	def update_story(self, request, pk=None):
 		deny = self._require_creator(request)
 		if deny:
@@ -2596,7 +2702,7 @@ class ContentViewSet(viewsets.ViewSet):
 			user = request.user
 			if user and user.is_authenticated and IsContentCreator().has_permission(request, self) and not IsContentValidator().has_permission(request, self):
 				qs = qs.filter(created_by=user)
-			return Response(SubjectSerializer(qs, many=True, context={"request": request}).data)
+			return _paginated_serializer_response(request, qs, SubjectSerializer)
 
 		# POST - creation requires creator capability
 		deny = self._require_creator(request)
@@ -2608,8 +2714,9 @@ class ContentViewSet(viewsets.ViewSet):
 		return Response(SubjectSerializer(obj, context={"request": request}).data, status=status.HTTP_201_CREATED)
 
 	
+	@extend_schema(methods=['GET'], operation_id="content_list_lessons")
+	@extend_schema(methods=['POST'], operation_id="content_create_lesson")
 	@extend_schema(
-		operation_id="content_lessons",
 		request=LessonResourceSerializer,
 		responses={200: LessonResourceSerializer(many=True)},
 		description="List or create lessons (LessonResource) for content management.",
@@ -2622,7 +2729,7 @@ class ContentViewSet(viewsets.ViewSet):
 			user = request.user
 			if user and user.is_authenticated and IsContentCreator().has_permission(request, self) and not IsContentValidator().has_permission(request, self):
 				qs = qs.filter(created_by=user)
-			return Response(LessonResourceSerializer(qs, many=True, context={"request": request}).data)
+			return _paginated_serializer_response(request, qs, LessonResourceSerializer)
 
 		deny = self._require_creator(request)
 		if deny:
@@ -2632,8 +2739,9 @@ class ContentViewSet(viewsets.ViewSet):
 		obj = ser.save(created_by=request.user)
 		return Response(LessonResourceSerializer(obj, context={"request": request}).data, status=status.HTTP_201_CREATED)
 
+	@extend_schema(methods=['GET'], operation_id="content_list_general_assessments")
+	@extend_schema(methods=['POST'], operation_id="content_create_general_assessment")
 	@extend_schema(
-		operation_id="content_general_assessments",
 		request=GeneralAssessmentSerializer,
 		responses={200: GeneralAssessmentSerializer(many=True)},
 		description="List or create general assessments for content management.",
@@ -2691,15 +2799,16 @@ class ContentViewSet(viewsets.ViewSet):
 						qs = qs.filter(Q(given_by=teacher) | Q(ai_recommended=True))
 					else:
 						qs = qs.filter(ai_recommended=True)
-			return Response(GeneralAssessmentSerializer(qs, many=True).data)
+			return _paginated_serializer_response(request, qs, GeneralAssessmentSerializer)
 
 		ser = GeneralAssessmentSerializer(data=request.data)
 		ser.is_valid(raise_exception=True)
 		obj = ser.save()
 		return Response(GeneralAssessmentSerializer(obj).data, status=status.HTTP_201_CREATED)
 
+	@extend_schema(methods=['GET'], operation_id="content_list_lesson_assessments")
+	@extend_schema(methods=['POST'], operation_id="content_create_lesson_assessment")
 	@extend_schema(
-		operation_id="content_lesson_assessments",
 		request=LessonAssessmentSerializer,
 		responses={200: LessonAssessmentSerializer(many=True)},
 		description="List or create lesson assessments for content management.",
@@ -2756,7 +2865,7 @@ class ContentViewSet(viewsets.ViewSet):
 						qs = qs.filter(Q(given_by=teacher) | Q(ai_recommended=True))
 					else:
 						qs = qs.filter(ai_recommended=True)
-			return Response(LessonAssessmentSerializer(qs, many=True).data)
+			return _paginated_serializer_response(request, qs, LessonAssessmentSerializer)
 
 		ser = LessonAssessmentSerializer(data=request.data)
 		ser.is_valid(raise_exception=True)
@@ -2878,7 +2987,7 @@ class ContentViewSet(viewsets.ViewSet):
 			qs = qs.filter(lesson_assessment_id=la_id_int)
 
 		qs = qs.order_by('created_at')
-		return Response(QuestionSerializer(qs, many=True).data)
+		return _paginated_serializer_response(request, qs, QuestionSerializer)
 
 	@extend_schema(
 		operation_id="content_create_question",
@@ -2974,8 +3083,9 @@ class ContentViewSet(viewsets.ViewSet):
 		combined.sort(key=_sort_key, reverse=True)
 		return Response(combined)
 
+	@extend_schema(methods=['GET'], operation_id="content_list_games")
+	@extend_schema(methods=['POST'], operation_id="content_create_game")
 	@extend_schema(
-		operation_id="content_games",
 		request=GameSerializer,
 		responses={200: GameSerializer(many=True)},
 		description="List or create games for content management.",
@@ -2988,7 +3098,7 @@ class ContentViewSet(viewsets.ViewSet):
 			user = request.user
 			if user and user.is_authenticated and IsContentCreator().has_permission(request, self) and not IsContentValidator().has_permission(request, self):
 				qs = qs.filter(created_by=user)
-			return Response(GameSerializer(qs, many=True, context={"request": request}).data)
+			return _paginated_serializer_response(request, qs, GameSerializer)
 
 		deny = self._require_creator(request)
 		if deny:
@@ -2998,8 +3108,9 @@ class ContentViewSet(viewsets.ViewSet):
 		obj = ser.save(created_by=request.user)
 		return Response(GameSerializer(obj, context={"request": request}).data, status=status.HTTP_201_CREATED)
 
+	@extend_schema(methods=['GET'], operation_id="content_list_schools")
+	@extend_schema(methods=['POST'], operation_id="content_create_school")
 	@extend_schema(
-		operation_id="content_schools",
 		request=SchoolSerializer,
 		responses={200: SchoolSerializer(many=True)},
 		description="List or create schools for content management.",
@@ -3012,18 +3123,20 @@ class ContentViewSet(viewsets.ViewSet):
 			user = request.user
 			if user and user.is_authenticated and IsContentCreator().has_permission(request, self) and not IsContentValidator().has_permission(request, self):
 				qs = qs.filter(created_by=user)
-			return Response(SchoolSerializer(qs, many=True).data)
+			return _paginated_serializer_response(request, qs, SchoolSerializer)
 
 		deny = self._require_creator(request)
 		if deny:
 			return deny
-		ser = SchoolSerializer(data=request.data)
+		serializer_class = SchoolSerializer if IsContentValidator().has_permission(request, self) else SchoolCreatorSerializer
+		ser = serializer_class(data=request.data)
 		ser.is_valid(raise_exception=True)
-		obj = ser.save()
+		obj = ser.save(created_by=request.user)
 		return Response(SchoolSerializer(obj).data, status=status.HTTP_201_CREATED)
 
+	@extend_schema(methods=['GET'], operation_id="content_list_counties")
+	@extend_schema(methods=['POST'], operation_id="content_create_county")
 	@extend_schema(
-		operation_id="content_counties",
 		request=CountySerializer,
 		responses={200: CountySerializer(many=True)},
 		description="List or create counties for content management.",
@@ -3053,18 +3166,20 @@ class ContentViewSet(viewsets.ViewSet):
 			user = request.user
 			if user and user.is_authenticated and IsContentCreator().has_permission(request, self) and not IsContentValidator().has_permission(request, self):
 				qs = qs.filter(created_by=user)
-			return Response(CountySerializer(qs, many=True).data)
+			return _paginated_serializer_response(request, qs, CountySerializer)
 
 		deny = self._require_creator(request)
 		if deny:
 			return deny
-		ser = CountySerializer(data=request.data)
+		serializer_class = CountySerializer if IsContentValidator().has_permission(request, self) else CountyCreatorSerializer
+		ser = serializer_class(data=request.data)
 		ser.is_valid(raise_exception=True)
-		obj = ser.save()
+		obj = ser.save(created_by=request.user)
 		return Response(CountySerializer(obj).data, status=status.HTTP_201_CREATED)
 
+	@extend_schema(methods=['GET'], operation_id="content_list_districts")
+	@extend_schema(methods=['POST'], operation_id="content_create_district")
 	@extend_schema(
-		operation_id="content_districts",
 		request=DistrictSerializer,
 		responses={200: DistrictSerializer(many=True)},
 		description="List or create districts for content management.",
@@ -3077,14 +3192,15 @@ class ContentViewSet(viewsets.ViewSet):
 			user = request.user
 			if user and user.is_authenticated and IsContentCreator().has_permission(request, self) and not IsContentValidator().has_permission(request, self):
 				qs = qs.filter(created_by=user)
-			return Response(DistrictSerializer(qs, many=True).data)
+			return _paginated_serializer_response(request, qs, DistrictSerializer)
 
 		deny = self._require_creator(request)
 		if deny:
 			return deny
-		ser = DistrictSerializer(data=request.data)
+		serializer_class = DistrictSerializer if IsContentValidator().has_permission(request, self) else DistrictCreatorSerializer
+		ser = serializer_class(data=request.data)
 		ser.is_valid(raise_exception=True)
-		obj = ser.save()
+		obj = ser.save(created_by=request.user)
 		return Response(DistrictSerializer(obj).data, status=status.HTTP_201_CREATED)
 
 	@extend_schema(
@@ -3108,7 +3224,7 @@ class ContentViewSet(viewsets.ViewSet):
 				qs = qs.filter(school_id=teacher.school_id)
 			else:
 				qs = qs.none()
-		return Response(TeacherSerializer(qs, many=True).data)
+		return _paginated_serializer_response(request, qs, TeacherSerializer)
 
 	@extend_schema(
 		operation_id="content_create_teacher",
@@ -3145,11 +3261,6 @@ class ContentViewSet(viewsets.ViewSet):
 		except School.DoesNotExist:
 			return Response({"detail": "School not found."}, status=status.HTTP_400_BAD_REQUEST)
 
-		import secrets
-		import string
-		alphabet = string.ascii_letters + string.digits
-		temp_password = "password123"
-
 		with transaction.atomic():
 			user = User(
 				name=name,
@@ -3159,7 +3270,7 @@ class ContentViewSet(viewsets.ViewSet):
 				dob=dob,
 				gender=gender,
 			)
-			user.set_password(temp_password)
+			temp_password = assign_temporary_password(user)
 			user.save()
 
 			teacher = TeacherModel.objects.create(
@@ -3188,7 +3299,7 @@ class ContentViewSet(viewsets.ViewSet):
 		responses={200: TeacherSerializer},
 		description="Retrieve a single teacher by id for content management.",
 	)
-	@action(detail=False, methods=['get'], url_path='teachers/(?P<pk>[^/.]+)')
+	@action(detail=False, methods=['get'], url_path='teachers/(?P<pk>[0-9]+)')
 	def teacher_detail(self, request, pk=None):
 		"""Return a single teacher profile by id."""
 		try:
@@ -3226,28 +3337,21 @@ class ContentViewSet(viewsets.ViewSet):
 		upload_ser.is_valid(raise_exception=True)
 		file_obj = upload_ser.validated_data['file']
 
-		try:
-			decoded = file_obj.read().decode('utf-8-sig')
-		except Exception:
-			return Response({"detail": "Unable to read uploaded file as UTF-8 text."}, status=status.HTTP_400_BAD_REQUEST)
-
-		if not decoded.strip():
-			return Response({"detail": "Uploaded file is empty."}, status=status.HTTP_400_BAD_REQUEST)
-
-		reader = csv.DictReader(io.StringIO(decoded))
-		if not reader.fieldnames:
+		fieldnames, rows = parse_bounded_csv(file_obj)
+		if not fieldnames:
 			return Response({"detail": "CSV file has no header row."}, status=status.HTTP_400_BAD_REQUEST)
 
 		required_columns = ['name', 'phone', 'school_id']
-		missing = [c for c in required_columns if c not in reader.fieldnames]
+		missing = [c for c in required_columns if c not in fieldnames]
 		if missing:
 			return Response({"detail": f"Missing required columns: {', '.join(missing)}."}, status=status.HTTP_400_BAD_REQUEST)
 
 		results = []
 		created_count = 0
 		failed_count = 0
+		identity_index = build_bulk_identity_index(rows)
 
-		for row_index, row in enumerate(reader, start=2):
+		for row_index, row in enumerate(rows, start=2):
 			row_result = {"row": row_index}
 
 			mapped = {
@@ -3270,11 +3374,19 @@ class ContentViewSet(viewsets.ViewSet):
 				failed_count += 1
 				continue
 
-			ser = ContentCreateTeacherSerializer(data=mapped)
+			ser = ContentCreateTeacherSerializer(
+				data=mapped,
+				context={'skip_identity_uniqueness': True},
+			)
 			try:
 				ser.is_valid(raise_exception=True)
 			except ValidationError as exc:
 				results.append({**row_result, "status": "error", "errors": exc.detail})
+				failed_count += 1
+				continue
+			identity_errors = claim_bulk_identity(identity_index, mapped['phone'], mapped.get('email'))
+			if identity_errors:
+				results.append({**row_result, "status": "error", "errors": identity_errors})
 				failed_count += 1
 				continue
 
@@ -3293,11 +3405,6 @@ class ContentViewSet(viewsets.ViewSet):
 				failed_count += 1
 				continue
 
-			import secrets
-			import string
-			alphabet = string.ascii_letters + string.digits
-			temp_password = "password123"
-
 			try:
 				with transaction.atomic():
 					user = User(
@@ -3308,7 +3415,7 @@ class ContentViewSet(viewsets.ViewSet):
 						dob=dob,
 						gender=gender,
 					)
-					user.set_password(temp_password)
+					temp_password = assign_temporary_password(user)
 					user.save()
 
 					teacher = TeacherModel.objects.create(
@@ -3383,12 +3490,12 @@ class ContentViewSet(viewsets.ViewSet):
 
 		# Helper to count by status for a queryset with a 'status' field
 		def _counts_for(qs):
-			return {
-				"total": qs.count(),
-				"approved": qs.filter(status=status_values["APPROVED"]).count(),
-				"rejected": qs.filter(status=status_values["REJECTED"]).count(),
-				"review_requested": qs.filter(status=status_values["REVIEW_REQUESTED"]).count(),
-			}
+			return qs.aggregate(
+				total=Count('id'),
+				approved=Count('id', filter=Q(status=status_values["APPROVED"])),
+				rejected=Count('id', filter=Q(status=status_values["REJECTED"])),
+				review_requested=Count('id', filter=Q(status=status_values["REVIEW_REQUESTED"])),
+			)
 
 		# Collect counts for each model where status is available
 		lesson_counts = _counts_for(LessonResource.objects.all())
@@ -3512,11 +3619,6 @@ class ContentViewSet(viewsets.ViewSet):
 		except School.DoesNotExist:
 			return Response({"detail": "School not found."}, status=status.HTTP_400_BAD_REQUEST)
 
-		import secrets
-		import string
-		alphabet = string.ascii_letters + string.digits
-		temp_password = "password123"
-
 		with transaction.atomic():
 			user = User(
 				name=name,
@@ -3526,7 +3628,7 @@ class ContentViewSet(viewsets.ViewSet):
 				dob=dob,
 				gender=gender,
 			)
-			user.set_password(temp_password)
+			temp_password = assign_temporary_password(user)
 			user.save()
 
 			student_kwargs = {
@@ -3582,28 +3684,21 @@ class ContentViewSet(viewsets.ViewSet):
 		upload_ser.is_valid(raise_exception=True)
 		file_obj = upload_ser.validated_data['file']
 
-		try:
-			decoded = file_obj.read().decode('utf-8-sig')
-		except Exception:
-			return Response({"detail": "Unable to read uploaded file as UTF-8 text."}, status=status.HTTP_400_BAD_REQUEST)
-
-		if not decoded.strip():
-			return Response({"detail": "Uploaded file is empty."}, status=status.HTTP_400_BAD_REQUEST)
-
-		reader = csv.DictReader(io.StringIO(decoded))
-		if not reader.fieldnames:
+		fieldnames, rows = parse_bounded_csv(file_obj)
+		if not fieldnames:
 			return Response({"detail": "CSV file has no header row."}, status=status.HTTP_400_BAD_REQUEST)
 
 		required_columns = ['name', 'phone', 'school_id']
-		missing = [c for c in required_columns if c not in reader.fieldnames]
+		missing = [c for c in required_columns if c not in fieldnames]
 		if missing:
 			return Response({"detail": f"Missing required columns: {', '.join(missing)}."}, status=status.HTTP_400_BAD_REQUEST)
 
 		results = []
 		created_count = 0
 		failed_count = 0
+		identity_index = build_bulk_identity_index(rows)
 
-		for row_index, row in enumerate(reader, start=2):
+		for row_index, row in enumerate(rows, start=2):
 			row_result = {"row": row_index}
 
 			mapped = {
@@ -3627,11 +3722,19 @@ class ContentViewSet(viewsets.ViewSet):
 				failed_count += 1
 				continue
 
-			ser = TeacherCreateStudentSerializer(data=mapped)
+			ser = TeacherCreateStudentSerializer(
+				data=mapped,
+				context={'skip_identity_uniqueness': True},
+			)
 			try:
 				ser.is_valid(raise_exception=True)
 			except ValidationError as exc:
 				results.append({**row_result, "status": "error", "errors": exc.detail})
+				failed_count += 1
+				continue
+			identity_errors = claim_bulk_identity(identity_index, mapped['phone'], mapped.get('email'))
+			if identity_errors:
+				results.append({**row_result, "status": "error", "errors": identity_errors})
 				failed_count += 1
 				continue
 
@@ -3651,11 +3754,6 @@ class ContentViewSet(viewsets.ViewSet):
 				failed_count += 1
 				continue
 
-			import secrets
-			import string
-			alphabet = string.ascii_letters + string.digits
-			temp_password = "password123"
-
 			try:
 				with transaction.atomic():
 					user = User(
@@ -3666,7 +3764,7 @@ class ContentViewSet(viewsets.ViewSet):
 						dob=dob,
 						gender=gender,
 					)
-					user.set_password(temp_password)
+					temp_password = assign_temporary_password(user)
 					user.save()
 
 					student_kwargs = {
@@ -3884,7 +3982,7 @@ class ContentViewSet(viewsets.ViewSet):
 			"Creators may only update subjects they created; validators/admins can update any."
 		),
 	)
-	@action(detail=False, methods=['patch'], url_path='subjects/(?P<pk>[^/.]+)')
+	@action(detail=False, methods=['patch'], url_path='subjects/(?P<pk>[0-9]+)')
 	def update_subject(self, request, pk=None):
 		deny = self._require_creator(request)
 		if deny:
@@ -3910,7 +4008,7 @@ class ContentViewSet(viewsets.ViewSet):
 			"Creators may only update lessons they created; validators/admins can update any."
 		),
 	)
-	@action(detail=False, methods=['patch'], url_path='lessons/(?P<pk>[^/.]+)')
+	@action(detail=False, methods=['patch'], url_path='lessons/(?P<pk>[0-9]+)')
 	def update_lesson(self, request, pk=None):
 		deny = self._require_creator(request)
 		if deny:
@@ -3937,7 +4035,7 @@ class ContentViewSet(viewsets.ViewSet):
 			"validators/admins can update any."
 		),
 	)
-	@action(detail=False, methods=['patch'], url_path='general-assessments/(?P<pk>[^/.]+)')
+	@action(detail=False, methods=['patch'], url_path='general-assessments/(?P<pk>[0-9]+)')
 	def update_general_assessment(self, request, pk=None):
 		deny = self._require_creator(request)
 		if deny:
@@ -3977,7 +4075,7 @@ class ContentViewSet(viewsets.ViewSet):
 			"validators/admins can update any."
 		),
 	)
-	@action(detail=False, methods=['patch'], url_path='lesson-assessments/(?P<pk>[^/.]+)')
+	@action(detail=False, methods=['patch'], url_path='lesson-assessments/(?P<pk>[0-9]+)')
 	def update_lesson_assessment(self, request, pk=None):
 		deny = self._require_creator(request)
 		if deny:
@@ -4016,7 +4114,7 @@ class ContentViewSet(viewsets.ViewSet):
 			"Creators may only update games they created; validators/admins can update any."
 		),
 	)
-	@action(detail=False, methods=['patch'], url_path='games/(?P<pk>[^/.]+)')
+	@action(detail=False, methods=['patch'], url_path='games/(?P<pk>[0-9]+)')
 	def update_game(self, request, pk=None):
 		deny = self._require_creator(request)
 		if deny:
@@ -4039,7 +4137,7 @@ class ContentViewSet(viewsets.ViewSet):
 		responses={200: SchoolSerializer},
 		description="Partially update a school. Requires content creator or validator role.",
 	)
-	@action(detail=False, methods=['patch'], url_path='schools/(?P<pk>[^/.]+)')
+	@action(detail=False, methods=['patch'], url_path='schools/(?P<pk>[0-9]+)')
 	def update_school(self, request, pk=None):
 		deny = self._require_creator(request)
 		if deny:
@@ -4048,7 +4146,10 @@ class ContentViewSet(viewsets.ViewSet):
 			obj = School.objects.get(pk=pk)
 		except School.DoesNotExist:
 			return Response({"detail": "School not found."}, status=status.HTTP_404_NOT_FOUND)
-		ser = SchoolSerializer(obj, data=request.data, partial=True)
+		if not IsContentValidator().has_permission(request, self) and obj.created_by_id != request.user.pk:
+			return Response({"detail": "You can only update schools you created."}, status=status.HTTP_403_FORBIDDEN)
+		serializer_class = SchoolSerializer if IsContentValidator().has_permission(request, self) else SchoolCreatorSerializer
+		ser = serializer_class(obj, data=request.data, partial=True)
 		ser.is_valid(raise_exception=True)
 		updated = ser.save()
 		return Response(SchoolSerializer(updated).data)
@@ -4062,7 +4163,7 @@ class ContentViewSet(viewsets.ViewSet):
 			"Creators may only update counties they created; validators/admins can update any."
 		),
 	)
-	@action(detail=False, methods=['patch'], url_path='counties/(?P<pk>[^/.]+)')
+	@action(detail=False, methods=['patch'], url_path='counties/(?P<pk>[0-9]+)')
 	def update_county(self, request, pk=None):
 		deny = self._require_creator(request)
 		if deny:
@@ -4074,7 +4175,8 @@ class ContentViewSet(viewsets.ViewSet):
 		if not IsContentValidator().has_permission(request, self):
 			if obj.created_by_id != request.user.pk:
 				return Response({"detail": "You can only update counties you created."}, status=status.HTTP_403_FORBIDDEN)
-		ser = CountySerializer(obj, data=request.data, partial=True)
+		serializer_class = CountySerializer if IsContentValidator().has_permission(request, self) else CountyCreatorSerializer
+		ser = serializer_class(obj, data=request.data, partial=True)
 		ser.is_valid(raise_exception=True)
 		updated = ser.save()
 		return Response(CountySerializer(updated).data)
@@ -4085,7 +4187,7 @@ class ContentViewSet(viewsets.ViewSet):
 		responses={200: DistrictSerializer},
 		description="Partially update a district. Requires content creator or validator role.",
 	)
-	@action(detail=False, methods=['patch'], url_path='districts/(?P<pk>[^/.]+)')
+	@action(detail=False, methods=['patch'], url_path='districts/(?P<pk>[0-9]+)')
 	def update_district(self, request, pk=None):
 		deny = self._require_creator(request)
 		if deny:
@@ -4094,7 +4196,10 @@ class ContentViewSet(viewsets.ViewSet):
 			obj = District.objects.get(pk=pk)
 		except District.DoesNotExist:
 			return Response({"detail": "District not found."}, status=status.HTTP_404_NOT_FOUND)
-		ser = DistrictSerializer(obj, data=request.data, partial=True)
+		if not IsContentValidator().has_permission(request, self) and obj.created_by_id != request.user.pk:
+			return Response({"detail": "You can only update districts you created."}, status=status.HTTP_403_FORBIDDEN)
+		serializer_class = DistrictSerializer if IsContentValidator().has_permission(request, self) else DistrictCreatorSerializer
+		ser = serializer_class(obj, data=request.data, partial=True)
 		ser.is_valid(raise_exception=True)
 		updated = ser.save()
 		return Response(DistrictSerializer(updated).data)
@@ -4109,7 +4214,7 @@ class ContentViewSet(viewsets.ViewSet):
 			"Requires content creator or validator role."
 		),
 	)
-	@action(detail=False, methods=['patch'], url_path='questions/(?P<pk>[^/.]+)')
+	@action(detail=False, methods=['patch'], url_path='questions/(?P<pk>[0-9]+)')
 	def update_question(self, request, pk=None):
 		deny = self._require_creator(request)
 		if deny:
@@ -4196,12 +4301,14 @@ class OnboardingViewSet(viewsets.ViewSet):
 	@action(detail=False, methods=['post'], permission_classes=[permissions.IsAuthenticated])
 	def userrole(self, request):
 		role = (request.data.get('role') or '').strip().upper()
-		allowed = {UserRole.STUDENT.value, UserRole.TEACHER.value, UserRole.HEADTEACHER.value, UserRole.PARENT.value}
+		allowed = {UserRole.STUDENT.value, UserRole.TEACHER.value, UserRole.PARENT.value}
 		
 		if role not in allowed:
 			return Response({"detail": f"Invalid role. Allowed: {', '.join(sorted(allowed))}"}, status=400)
 		
 		user: User = request.user
+		if any(hasattr(user, attr) for attr in ('student', 'teacher', 'parent')) and user.role != role:
+			return Response({"detail": "Role has already been selected and cannot be changed through onboarding."}, status=400)
 		user.role = role
 		user.save(update_fields=['role', 'updated_at'])
 
@@ -4243,11 +4350,11 @@ class OnboardingViewSet(viewsets.ViewSet):
 			# Resolve school assignment
 			school_obj = None
 			if school_id:
-				school_obj = School.objects.filter(id=school_id).first()
+				school_obj = School.objects.filter(id=school_id, status=StatusEnum.APPROVED.value).first()
 				if not school_obj:
 					return Response({"detail": "Invalid school_id."}, status=400)
 			elif school_name:
-				qs = School.objects.all()
+				qs = School.objects.filter(status=StatusEnum.APPROVED.value)
 				if district_id:
 					qs = qs.filter(district_id=district_id)
 				qs = qs.filter(name__iexact=school_name)
@@ -4266,11 +4373,14 @@ class OnboardingViewSet(viewsets.ViewSet):
 			# Resolve school assignment
 			school_obj = None
 			if school_id:
-				school_obj = School.objects.filter(id=school_id).first()
+				school_obj = School.objects.filter(
+					id=school_id,
+					status=StatusEnum.APPROVED.value,
+				).first()
 				if not school_obj:
 					return Response({"detail": "Invalid school_id."}, status=400)
 			elif school_name:
-				qs = School.objects.all()
+				qs = School.objects.filter(status=StatusEnum.APPROVED.value)
 				if district_id:
 					qs = qs.filter(district_id=district_id)
 				qs = qs.filter(name__iexact=school_name)
@@ -4284,6 +4394,12 @@ class OnboardingViewSet(viewsets.ViewSet):
 			if school_obj:
 				t.school = school_obj
 			t.save(update_fields=['school', 'updated_at'])
+
+		if user.role == UserRole.TEACHER.value:
+			token = getattr(request, 'auth', None)
+			if token is not None:
+				token.delete()
+			return Response({"detail": "Saved. Your teacher account is pending approval; sign in after approval."})
 
 		return Response({"detail": "Saved"})
 
@@ -4420,6 +4536,11 @@ class LoginViewSet(viewsets.ViewSet):
 		allowed = {UserRole.CONTENTCREATOR.value, UserRole.CONTENTVALIDATOR.value, UserRole.TEACHER.value, UserRole.HEADTEACHER.value}
 		return self._login_with_role(request, allowed_roles=allowed)
 
+	@extend_schema(request=LoginSerializer, responses={200: OpenApiResponse(description="Token and sync service payload")})
+	@action(detail=False, methods=['post'], url_path='sync')
+	def synclogin(self, request):
+		return self._login_with_role(request, allowed_roles={UserRole.SYNC_SERVICE.value})
+
 	@extend_schema(request=LoginSerializer, responses={200: OpenApiResponse(description="Token and user payload")})
 	@action(detail=False, methods=['post'], url_path='admin')
 	def adminlogin(self, request):
@@ -4488,7 +4609,9 @@ class LoginViewSet(viewsets.ViewSet):
 		if new == current:
 			return Response({"detail": "New password must be different from current password."}, status=400)
 		user.set_password(new)
-		user.save(update_fields=['password', 'updated_at'])
+		user.must_change_password = False
+		user.temporary_password_expires_at = None
+		user.save(update_fields=['password', 'must_change_password', 'temporary_password_expires_at', 'updated_at'])
 		return Response({"detail": "Password changed successfully."})
 
 	def _login_with_role(self, request, allowed_roles: Set[str], stdprofile=False, forbidden_msg: str | None = None):
@@ -4509,6 +4632,8 @@ class LoginViewSet(viewsets.ViewSet):
 			return Response({"detail": "Account disabled."}, status=403)
 		if not user.check_password(password):
 			return Response({"detail": "Invalid credentials."}, status=400)
+		if user.must_change_password and user.temporary_password_expires_at and user.temporary_password_expires_at <= timezone.now():
+			return Response({"detail": "Temporary password has expired. Contact an administrator."}, status=403)
 		if user.role not in allowed_roles:
 			msg = forbidden_msg or "Insufficient role for this login."
 			return Response({"detail": msg}, status=403)
@@ -4521,8 +4646,8 @@ class LoginViewSet(viewsets.ViewSet):
 					status=403,
 				)
 		# For teacher/content logins, require that the teacher profile is approved
-		if user.role in {UserRole.TEACHER.value, UserRole.HEADTEACHER.value} and hasattr(user, 'teacher') and user.teacher:
-			if getattr(user.teacher, 'status', StatusEnum.PENDING.value) != StatusEnum.APPROVED.value:
+		if user.role in {UserRole.TEACHER.value, UserRole.HEADTEACHER.value}:
+			if not _has_approved_teacher_profile(user):
 				return Response(
 					{"detail": "Your teacher account is awaiting approval by a content validator or administrator."},
 					status=403,
@@ -5008,6 +5133,36 @@ class KidsPeerSolutionsResponseSerializer(serializers.Serializer):
 	solutions = KidsPeerSolutionItemSerializer(many=True)
 
 
+def _general_assessment_for_student(student: Student, assessment_id):
+	return (
+		GeneralAssessment.objects
+		.filter(pk=assessment_id, status=StatusEnum.APPROVED.value)
+		.filter(Q(grade__isnull=True) | Q(grade=student.grade))
+		.filter(Q(is_targeted=False) | Q(target_student=student))
+		.first()
+	)
+
+
+def _lesson_assessment_for_student(student: Student, assessment_id, *, require_unlocked=True):
+	assessment = (
+		LessonAssessment.objects
+		.select_related('lesson__subject')
+		.filter(
+			pk=assessment_id,
+			status=StatusEnum.APPROVED.value,
+			lesson__status=StatusEnum.APPROVED.value,
+			lesson__subject__status=StatusEnum.APPROVED.value,
+			lesson__subject__grade=student.grade,
+		)
+		.filter(Q(is_targeted=False) | Q(target_student=student))
+		.first()
+	)
+	if assessment is None or not require_unlocked:
+		return assessment
+	state = _build_student_lesson_progression(student)['states'].get(assessment.lesson_id)
+	return assessment if state and not state['is_locked'] else None
+
+
 class KidsViewSet(viewsets.ViewSet):
 	"""Endpoints tailored for younger students (grades 1–3)."""
 	permission_classes = [permissions.IsAuthenticated]
@@ -5042,7 +5197,7 @@ class KidsViewSet(viewsets.ViewSet):
 		if tag:
 			qs = qs.filter(tag__iexact=tag.strip())
 
-		return Response(StoryListSerializer(qs, many=True).data)
+		return _paginated_serializer_response(request, qs, StoryListSerializer)
 
 	@extend_schema(
 		description="Read-only detail for a single published story.",
@@ -5051,7 +5206,7 @@ class KidsViewSet(viewsets.ViewSet):
 		],
 		responses={200: StoryDetailSerializer},
 	)
-	@action(detail=False, methods=['get'], url_path='stories/(?P<pk>[^/.]+)')
+	@action(detail=False, methods=['get'], url_path='stories/(?P<pk>[0-9]+)')
 	def story_detail(self, request, pk=None):
 		user: User = request.user
 		student = getattr(user, 'student', None)
@@ -5649,6 +5804,7 @@ class KidsViewSet(viewsets.ViewSet):
 		# General assessments for grade or global
 		general_qs = (
 			GeneralAssessment.objects
+			.filter(status=StatusEnum.APPROVED.value)
 			.filter(
 				(models.Q(grade__isnull=True) | models.Q(grade=student.grade))
 				& (models.Q(is_targeted=False) | models.Q(target_student=student))
@@ -5660,6 +5816,9 @@ class KidsViewSet(viewsets.ViewSet):
 		lesson_qs = (
 			LessonAssessment.objects
 			.filter(
+				status=StatusEnum.APPROVED.value,
+				lesson__status=StatusEnum.APPROVED.value,
+				lesson__subject__status=StatusEnum.APPROVED.value,
 				lesson__subject__grade=student.grade,
 			).filter(models.Q(is_targeted=False) | models.Q(target_student=student))
 			.order_by('due_at', 'title')
@@ -5793,6 +5952,7 @@ class KidsViewSet(viewsets.ViewSet):
 		# General assessments for grade or global
 		general_qs = (
 			GeneralAssessment.objects
+			.filter(status=StatusEnum.APPROVED.value)
 			.filter(
 				(models.Q(grade__isnull=True) | models.Q(grade=student.grade))
 				& (models.Q(is_targeted=False) | models.Q(target_student=student))
@@ -5802,10 +5962,18 @@ class KidsViewSet(viewsets.ViewSet):
 		)
 
 		# Lesson assessments via lessons in student's grade
+		progression = _build_student_lesson_progression(student)
+		unlocked_lesson_ids = [
+			lesson_id for lesson_id, state in progression['states'].items() if not state['is_locked']
+		]
 		lesson_qs = (
 			LessonAssessment.objects
 			.filter(
+				status=StatusEnum.APPROVED.value,
+				lesson__status=StatusEnum.APPROVED.value,
+				lesson__subject__status=StatusEnum.APPROVED.value,
 				lesson__subject__grade=student.grade,
+				lesson_id__in=unlocked_lesson_ids,
 			).filter(models.Q(is_targeted=False) | models.Q(target_student=student))
 			.values('id', 'title', 'lesson_id', 'due_at')
 			.order_by('due_at', 'title')
@@ -6020,6 +6188,7 @@ class KidsViewSet(viewsets.ViewSet):
 
 		general_qs = (
 			GeneralAssessment.objects
+			.filter(status=StatusEnum.APPROVED.value)
 			.filter(
 				(models.Q(grade__isnull=True) | models.Q(grade=student.grade))
 				& (models.Q(is_targeted=False) | models.Q(target_student=student))
@@ -6030,7 +6199,15 @@ class KidsViewSet(viewsets.ViewSet):
 		lesson_qs = (
 			LessonAssessment.objects
 			.filter(
+				status=StatusEnum.APPROVED.value,
+				lesson__status=StatusEnum.APPROVED.value,
+				lesson__subject__status=StatusEnum.APPROVED.value,
 				lesson__subject__grade=student.grade,
+				lesson_id__in=[
+					lesson_id
+					for lesson_id, state in _build_student_lesson_progression(student)['states'].items()
+					if not state['is_locked']
+				],
 			).filter(models.Q(is_targeted=False) | models.Q(target_student=student))
 			.values('id', 'title', 'lesson_id', 'marks', 'is_targeted', 'target_student')
 			.order_by('title')
@@ -6135,15 +6312,15 @@ class KidsViewSet(viewsets.ViewSet):
 		questions_qs = None
 
 		if general_id:
-			ga = GeneralAssessment.objects.filter(id=general_id).first()
+			ga = _general_assessment_for_student(student, general_id)
 			if not ga:
-				return Response({"detail": "General assessment not found."}, status=404)
+				return Response({"detail": "Assessment not found or not available for you."}, status=404)
 			assessment_info = {"id": ga.id, "title": ga.title, "type": "general"}
 			questions_qs = ga.questions.all().prefetch_related('options')
 		else:
-			la = LessonAssessment.objects.filter(id=lesson_id).first()
+			la = _lesson_assessment_for_student(student, lesson_id)
 			if not la:
-				return Response({"detail": "Lesson assessment not found."}, status=404)
+				return Response({"detail": "Assessment not found, unavailable, or locked."}, status=404)
 			assessment_info = {"id": la.id, "title": la.title, "type": "lesson"}
 			questions_qs = la.questions.all().prefetch_related('options')
 
@@ -6209,15 +6386,7 @@ class KidsViewSet(viewsets.ViewSet):
 		solutions_payload = []
 
 		if general_id:
-			assessment = (
-				GeneralAssessment.objects
-				.filter(id=general_id)
-				.filter(
-					(models.Q(grade__isnull=True) | models.Q(grade=student.grade))
-					& (models.Q(is_targeted=False) | models.Q(target_student=student))
-				)
-				.first()
-			)
+			assessment = _general_assessment_for_student(student, general_id)
 			if not assessment:
 				return Response({"detail": "Assessment not found or not available for you."}, status=403)
 
@@ -6225,11 +6394,10 @@ class KidsViewSet(viewsets.ViewSet):
 			if not has_own_solution:
 				return Response({"detail": "Submit your own solution first to view peer solutions."}, status=403)
 
-			peer_qs = (
+			peer_qs = _sample_queryset_by_pk(
 				AssessmentSolution.objects
 				.filter(assessment=assessment)
 				.exclude(student=student)
-				.order_by('?')[:10]
 			)
 
 			assessment_info = {"id": assessment.id, "title": assessment.title, "type": "general"}
@@ -6247,13 +6415,7 @@ class KidsViewSet(viewsets.ViewSet):
 					"submitted_at": getattr(peer_sol, 'submitted_at', None),
 				})
 		else:
-			assessment = (
-				LessonAssessment.objects
-				.filter(id=lesson_id)
-				.filter(lesson__subject__grade=student.grade)
-				.filter(models.Q(is_targeted=False) | models.Q(target_student=student))
-				.first()
-			)
+			assessment = _lesson_assessment_for_student(student, lesson_id)
 			if not assessment:
 				return Response({"detail": "Assessment not found or not available for you."}, status=403)
 
@@ -6261,11 +6423,10 @@ class KidsViewSet(viewsets.ViewSet):
 			if not has_own_solution:
 				return Response({"detail": "Submit your own solution first to view peer solutions."}, status=403)
 
-			peer_qs = (
+			peer_qs = _sample_queryset_by_pk(
 				LessonAssessmentSolution.objects
 				.filter(lesson_assessment=assessment)
 				.exclude(student=student)
-				.order_by('?')[:10]
 			)
 
 			assessment_info = {"id": assessment.id, "title": assessment.title, "type": "lesson"}
@@ -6404,11 +6565,13 @@ class KidsViewSet(viewsets.ViewSet):
 
 		text_solution = request.data.get('solution', '')
 		attachment = request.FILES.get('attachment')
+		if attachment is not None:
+			validate_solution_upload(attachment)
 
 		if general_id:
-			assessment = GeneralAssessment.objects.filter(id=general_id).first()
+			assessment = _general_assessment_for_student(student, general_id)
 			if not assessment:
-				return Response({"detail": "General assessment not found."}, status=404)
+				return Response({"detail": "Assessment not found or not available for you."}, status=404)
 
 			# Create or update AssessmentSolution for this student/assessment
 			solution_obj, created = AssessmentSolution.objects.get_or_create(
@@ -6450,9 +6613,9 @@ class KidsViewSet(viewsets.ViewSet):
 				"total_points": total_points,
 			})
 
-		lesson_assessment = LessonAssessment.objects.filter(id=lesson_id).first()
+		lesson_assessment = _lesson_assessment_for_student(student, lesson_id)
 		if not lesson_assessment:
-			return Response({"detail": "Lesson assessment not found."}, status=404)
+			return Response({"detail": "Assessment not found, unavailable, or locked."}, status=404)
 
 		solution_obj, created = LessonAssessmentSolution.objects.get_or_create(
 			lesson_assessment=lesson_assessment,
@@ -6494,6 +6657,20 @@ class KidsViewSet(viewsets.ViewSet):
 		})
 
 
+def _subjects_available_to_teacher_user(user):
+	teacher = getattr(user, 'teacher', None)
+	if teacher is None:
+		return Subject.objects.none()
+	if user.role == UserRole.ADMIN.value:
+		return Subject.objects.all()
+	if user.role == UserRole.HEADTEACHER.value:
+		return Subject.objects.filter(
+			teachers__school_id=teacher.school_id,
+			teachers__status=StatusEnum.APPROVED.value,
+		).distinct()
+	return Subject.objects.filter(teachers=teacher)
+
+
 class TeacherViewSet(viewsets.ViewSet):
 	"""Endpoints specifically for teachers to manage their classroom.
 
@@ -6516,6 +6693,8 @@ class TeacherViewSet(viewsets.ViewSet):
 			return Response({"detail": "Teacher role required."}, status=403)
 		if not hasattr(user, 'teacher'):
 			return Response({"detail": "Teacher profile required."}, status=403)
+		if user.teacher.status != StatusEnum.APPROVED.value:
+			return Response({"detail": "Teacher account approval required."}, status=403)
 		return None
 
 	def _grade_for_score(self, score: float):
@@ -6633,7 +6812,7 @@ class TeacherViewSet(viewsets.ViewSet):
 		teacher = request.user.teacher
 		teacher_grades = self._teacher_leaderboard_grades(teacher)
 		if not teacher_grades:
-			return Response([])
+			return _paginated_serializer_response(request, Story.objects.none(), StoryListSerializer)
 
 		qs = _published_stories_for_school(getattr(teacher, 'school_id', None),
 									 creator=request.user
@@ -6649,7 +6828,7 @@ class TeacherViewSet(viewsets.ViewSet):
 		if tag:
 			qs = qs.filter(tag__iexact=tag)
 
-		return Response(StoryListSerializer(qs.order_by('-created_at'), many=True).data)
+		return _paginated_serializer_response(request, qs.order_by('-created_at'), StoryListSerializer)
 
 	@extend_schema(
 		description="Read story detail for a teacher within the teacher's published visibility scope.",
@@ -6658,7 +6837,7 @@ class TeacherViewSet(viewsets.ViewSet):
 		],
 		responses={200: StoryDetailSerializer},
 	)
-	@action(detail=False, methods=['get'], url_path='stories/(?P<pk>[^/.]+)')
+	@action(detail=False, methods=['get'], url_path='stories/(?P<pk>[0-9]+)')
 	def story_detail(self, request, pk=None):
 		deny = self._require_teacher(request)
 		if deny:
@@ -6689,7 +6868,7 @@ class TeacherViewSet(viewsets.ViewSet):
 		request=StoryUpdateSerializer,
 		responses={200: StoryDetailSerializer},
 	)
-	@action(detail=False, methods=['patch'], url_path='stories/(?P<pk>[^/.]+)/update')
+	@action(detail=False, methods=['patch'], url_path='stories/(?P<pk>[0-9]+)/update')
 	def update_story(self, request, pk=None):
 		deny = self._require_teacher(request)
 		if deny:
@@ -6714,7 +6893,7 @@ class TeacherViewSet(viewsets.ViewSet):
 		request=StoryGenerateRequestSerializer,
 		responses={202: OpenApiResponse(description="Story generation task queued.")},
 	)
-	@action(detail=False, methods=['post'], url_path='stories/generate')
+	@action(detail=False, methods=['post'], url_path='stories/generate', throttle_classes=[AIGenerationThrottle])
 	def generate_stories(self, request):
 		deny = self._require_teacher(request)
 		if deny:
@@ -7222,7 +7401,7 @@ class TeacherViewSet(viewsets.ViewSet):
 		teacher = request.user.teacher
 		# For now, return all subjects linked to this teacher profile.
 		qs = Subject.objects.filter(teachers=teacher).order_by('name')
-		return Response(SubjectSerializer(qs, many=True, context={"request": request}).data)
+		return _paginated_serializer_response(request, qs, SubjectSerializer)
 
 	@extend_schema(
 		description=(
@@ -7244,7 +7423,7 @@ class TeacherViewSet(viewsets.ViewSet):
 			.select_related('subject')
 			.order_by('subject__name', 'name')
 		)
-		return Response(TopicSerializer(qs, many=True).data)
+		return _paginated_serializer_response(request, qs, TopicSerializer)
 
 	@extend_schema(
 		description="List lessons created by this teacher or for their subjects.",
@@ -7262,7 +7441,7 @@ class TeacherViewSet(viewsets.ViewSet):
 			.select_related('subject')
 			.order_by('-created_at')
 		)
-		return Response(LessonResourceSerializer(qs, many=True, context={"request": request}).data)
+		return _paginated_serializer_response(request, qs, LessonResourceSerializer)
 
 	@extend_schema(
 		description="Create a new lesson resource for one of the teacher's subjects.",
@@ -7276,6 +7455,9 @@ class TeacherViewSet(viewsets.ViewSet):
 			return deny
 		ser = LessonResourceSerializer(data=request.data)
 		ser.is_valid(raise_exception=True)
+		subject = ser.validated_data['subject']
+		if not _subjects_available_to_teacher_user(request.user).filter(pk=subject.pk).exists():
+			return Response({"detail": "You can only create lessons for subjects assigned to you."}, status=403)
 		lesson = ser.save(created_by=request.user, status=StatusEnum.DRAFT.value)
 		return Response(LessonResourceSerializer(lesson, context={"request": request}).data, status=201)
 
@@ -7325,7 +7507,7 @@ class TeacherViewSet(viewsets.ViewSet):
 				qs = qs.filter(target_student_id=int(student_id))
 			except ValueError:
 				qs = qs.none()
-		return Response(GeneralAssessmentSerializer(qs, many=True).data)
+		return _paginated_serializer_response(request, qs, GeneralAssessmentSerializer)
 
 	@extend_schema(
 		description="Create a general assessment scoped to the teacher's grade (optional).",
@@ -7340,6 +7522,15 @@ class TeacherViewSet(viewsets.ViewSet):
 		teacher = request.user.teacher
 		ser = GeneralAssessmentSerializer(data=request.data)
 		ser.is_valid(raise_exception=True)
+		allowed_grades = set(_subjects_available_to_teacher_user(request.user).values_list('grade', flat=True))
+		grade = ser.validated_data.get('grade')
+		if not grade or grade not in allowed_grades:
+			return Response({"detail": "You can only create assessments for grades you teach."}, status=403)
+		target_student = ser.validated_data.get('target_student')
+		if target_student and target_student.school_id != teacher.school_id:
+			return Response({"detail": "Target student must belong to your school."}, status=403)
+		if target_student and target_student.grade != grade:
+			return Response({"detail": "Target student must belong to the assessment grade."}, status=403)
 		ga = ser.save(given_by=teacher)
 		return Response(GeneralAssessmentSerializer(ga).data, status=201)
 
@@ -7351,7 +7542,7 @@ class TeacherViewSet(viewsets.ViewSet):
 		request=GeneralAssessmentTeacherUpdateSerializer,
 		responses={200: GeneralAssessmentSerializer},
 	)
-	@action(detail=False, methods=['patch'], url_path='general-assessments/(?P<pk>[^/.]+)')
+	@action(detail=False, methods=['patch'], url_path='general-assessments/(?P<pk>[0-9]+)')
 	def update_general_assessment(self, request, pk=None):
 		deny = self._require_teacher(request)
 		if deny:
@@ -7414,7 +7605,7 @@ class TeacherViewSet(viewsets.ViewSet):
 				qs = qs.filter(target_student_id=int(student_id))
 			except ValueError:
 				qs = qs.none()
-		return Response(LessonAssessmentSerializer(qs, many=True).data)
+		return _paginated_serializer_response(request, qs, LessonAssessmentSerializer)
 
 	@extend_schema(
 		description="Create a lesson assessment for one of the teacher's lessons.",
@@ -7429,6 +7620,14 @@ class TeacherViewSet(viewsets.ViewSet):
 		teacher = request.user.teacher
 		ser = LessonAssessmentSerializer(data=request.data)
 		ser.is_valid(raise_exception=True)
+		lesson = ser.validated_data['lesson']
+		if not _subjects_available_to_teacher_user(request.user).filter(pk=lesson.subject_id).exists():
+			return Response({"detail": "You can only assess lessons for subjects assigned to you."}, status=403)
+		target_student = ser.validated_data.get('target_student')
+		if target_student and target_student.school_id != teacher.school_id:
+			return Response({"detail": "Target student must belong to your school."}, status=403)
+		if target_student and target_student.grade != lesson.subject.grade:
+			return Response({"detail": "Target student must match the lesson grade."}, status=403)
 		la = ser.save(given_by=teacher)
 		return Response(LessonAssessmentSerializer(la).data, status=201)
 
@@ -7440,7 +7639,7 @@ class TeacherViewSet(viewsets.ViewSet):
 		request=LessonAssessmentTeacherUpdateSerializer,
 		responses={200: LessonAssessmentSerializer},
 	)
-	@action(detail=False, methods=['patch'], url_path='lesson-assessments/(?P<pk>[^/.]+)')
+	@action(detail=False, methods=['patch'], url_path='lesson-assessments/(?P<pk>[0-9]+)')
 	def update_lesson_assessment(self, request, pk=None):
 		deny = self._require_teacher(request)
 		if deny:
@@ -7453,7 +7652,7 @@ class TeacherViewSet(viewsets.ViewSet):
 		ser = LessonAssessmentTeacherUpdateSerializer(la, data=request.data, partial=True)
 		ser.is_valid(raise_exception=True)
 		next_lesson = ser.validated_data.get('lesson', la.lesson)
-		if not Subject.objects.filter(id=next_lesson.subject_id, teachers=teacher).exists():
+		if not _subjects_available_to_teacher_user(request.user).filter(id=next_lesson.subject_id).exists():
 			return Response({"detail": "You can only use lessons for subjects you teach."}, status=403)
 		updated = ser.save()
 		return Response(LessonAssessmentSerializer(updated).data)
@@ -7501,7 +7700,7 @@ class TeacherViewSet(viewsets.ViewSet):
 		request=QuestionUpdateSerializer,
 		responses={200: QuestionSerializer},
 	)
-	@action(detail=False, methods=['patch'], url_path='questions/(?P<pk>[^/.]+)')
+	@action(detail=False, methods=['patch'], url_path='questions/(?P<pk>[0-9]+)')
 	def update_question(self, request, pk=None):
 		deny = self._require_teacher(request)
 		if deny:
@@ -7579,7 +7778,7 @@ class TeacherViewSet(viewsets.ViewSet):
 			qs = qs.filter(lesson_assessment_id=la_id_int, lesson_assessment__given_by=teacher)
 
 		qs = qs.order_by('created_at')
-		return Response(QuestionSerializer(qs, many=True).data)
+		return _paginated_serializer_response(request, qs, QuestionSerializer)
 
 	@extend_schema(
 		description="List students in the teacher's school, including their status.",
@@ -7592,12 +7791,15 @@ class TeacherViewSet(viewsets.ViewSet):
 			return deny
 		teacher = request.user.teacher
 		if not getattr(teacher, 'school_id', None):
-			return Response([], status=200)
+			return _paginated_serializer_response(request, Student.objects.none(), StudentSerializer)
 		qs = Student.objects.filter(school_id=teacher.school_id).select_related('profile', 'school').order_by('profile__name')
-		return Response(StudentSerializer(qs, many=True).data)
+		return _paginated_serializer_response(request, qs, StudentSerializer)
 
 	@extend_schema(
 		description="Approve a pending student in the teacher's school.",
+		parameters=[
+			OpenApiParameter(name='id', required=True, location=OpenApiParameter.PATH, type=int),
+		],
 		request=None,
 		responses={200: StudentSerializer},
 	)
@@ -7638,7 +7840,7 @@ class TeacherViewSet(viewsets.ViewSet):
 		),
 		parameters=[
 			OpenApiParameter(
-				name='pk',
+				name='id',
 				required=True,
 				location=OpenApiParameter.PATH,
 				type=int,
@@ -7706,6 +7908,9 @@ class TeacherViewSet(viewsets.ViewSet):
 
 	@extend_schema(
 		description="Reject a pending student in the teacher's school.",
+		parameters=[
+			OpenApiParameter(name='id', required=True, location=OpenApiParameter.PATH, type=int),
+		],
 		request=None,
 		responses={200: StudentSerializer},
 	)
@@ -8122,11 +8327,6 @@ class TeacherViewSet(viewsets.ViewSet):
 		if school is None:
 			return Response({"detail": "No school context available to assign to the student."}, status=status.HTTP_400_BAD_REQUEST)
 
-		import secrets
-		import string
-		alphabet = string.ascii_letters + string.digits
-		temp_password = "password123"
-
 		with transaction.atomic():
 			user = User(
 				name=name,
@@ -8134,7 +8334,7 @@ class TeacherViewSet(viewsets.ViewSet):
 				email=email,
 				role=UserRole.STUDENT.value,
 			)
-			user.set_password(temp_password)
+			temp_password = assign_temporary_password(user)
 			user.save()
 
 			student_kwargs = {"profile": user, "school": school}
@@ -8201,28 +8401,21 @@ class TeacherViewSet(viewsets.ViewSet):
 		upload_ser.is_valid(raise_exception=True)
 		file_obj = upload_ser.validated_data['file']
 
-		try:
-			decoded = file_obj.read().decode('utf-8-sig')
-		except Exception:
-			return Response({"detail": "Unable to read uploaded file as UTF-8 text."}, status=status.HTTP_400_BAD_REQUEST)
-
-		if not decoded.strip():
-			return Response({"detail": "Uploaded file is empty."}, status=status.HTTP_400_BAD_REQUEST)
-
-		reader = csv.DictReader(io.StringIO(decoded))
-		if not reader.fieldnames:
+		fieldnames, rows = parse_bounded_csv(file_obj)
+		if not fieldnames:
 			return Response({"detail": "CSV file has no header row."}, status=status.HTTP_400_BAD_REQUEST)
 
 		required_columns = ['name', 'phone']
-		missing = [c for c in required_columns if c not in reader.fieldnames]
+		missing = [c for c in required_columns if c not in fieldnames]
 		if missing:
 			return Response({"detail": f"Missing required columns: {', '.join(missing)}."}, status=status.HTTP_400_BAD_REQUEST)
 
 		results = []
 		created_count = 0
 		failed_count = 0
+		identity_index = build_bulk_identity_index(rows)
 
-		for row_index, row in enumerate(reader, start=2):  # data rows start at line 2
+		for row_index, row in enumerate(rows, start=2):  # data rows start at line 2
 			row_result = {"row": row_index}
 
 			# Map CSV row to the single-create serializer fields
@@ -8243,11 +8436,19 @@ class TeacherViewSet(viewsets.ViewSet):
 					failed_count += 1
 					continue
 
-			ser = TeacherCreateStudentSerializer(data=mapped)
+			ser = TeacherCreateStudentSerializer(
+				data=mapped,
+				context={'skip_identity_uniqueness': True},
+			)
 			try:
 				ser.is_valid(raise_exception=True)
 			except ValidationError as exc:
 				results.append({**row_result, "status": "error", "errors": exc.detail})
+				failed_count += 1
+				continue
+			identity_errors = claim_bulk_identity(identity_index, mapped['phone'], mapped.get('email'))
+			if identity_errors:
+				results.append({**row_result, "status": "error", "errors": identity_errors})
 				failed_count += 1
 				continue
 
@@ -8281,11 +8482,6 @@ class TeacherViewSet(viewsets.ViewSet):
 				failed_count += 1
 				continue
 
-			import secrets
-			import string
-			alphabet = string.ascii_letters + string.digits
-			temp_password = "password123"
-
 			try:
 				with transaction.atomic():
 					user = User(
@@ -8296,7 +8492,7 @@ class TeacherViewSet(viewsets.ViewSet):
 						dob=dob,
 						gender=gender,
 					)
-					user.set_password(temp_password)
+					temp_password = assign_temporary_password(user)
 					user.save()
 
 					student_kwargs = {
@@ -8457,9 +8653,15 @@ class TeacherViewSet(viewsets.ViewSet):
 		except GeneralAssessment.DoesNotExist:
 			return Response({"detail": "Assessment not found or not owned by you."}, status=404)
 		try:
-			student = Student.objects.get(pk=student_id)
+			student = Student.objects.get(pk=student_id, school_id=teacher.school_id)
 		except Student.DoesNotExist:
-			return Response({"detail": "Student not found."}, status=404)
+			return Response({"detail": "Student not found in your school."}, status=404)
+		if student.grade not in self._teacher_leaderboard_grades(teacher):
+			return Response({"detail": "Student is outside the grades you teach."}, status=403)
+		if assessment.grade and assessment.grade != student.grade:
+			return Response({"detail": "Student is outside the assessment grade."}, status=403)
+		if assessment.is_targeted and assessment.target_student_id != student.id:
+			return Response({"detail": "Assessment targets a different student."}, status=403)
 		try:
 			score_value = float(score)
 		except (TypeError, ValueError):
@@ -8528,9 +8730,13 @@ class TeacherViewSet(viewsets.ViewSet):
 		except LessonAssessment.DoesNotExist:
 			return Response({"detail": "Assessment not found or not owned by you."}, status=404)
 		try:
-			student = Student.objects.get(pk=student_id)
+			student = Student.objects.get(pk=student_id, school_id=teacher.school_id)
 		except Student.DoesNotExist:
-			return Response({"detail": "Student not found."}, status=404)
+			return Response({"detail": "Student not found in your school."}, status=404)
+		if student.grade != assessment.lesson.subject.grade:
+			return Response({"detail": "Student is outside the lesson grade."}, status=403)
+		if assessment.is_targeted and assessment.target_student_id != student.id:
+			return Response({"detail": "Assessment targets a different student."}, status=403)
 		try:
 			score_value = float(score)
 		except (TypeError, ValueError):
@@ -8864,7 +9070,11 @@ class LookupPagination(StandardResultsSetPagination):
 
 
 class SchoolLookupViewSet(viewsets.ReadOnlyModelViewSet):
-	queryset = School.objects.select_related('district__county').all()
+	queryset = School.objects.select_related('district__county').filter(
+		status=StatusEnum.APPROVED.value,
+		district__status=StatusEnum.APPROVED.value,
+		district__county__status=StatusEnum.APPROVED.value,
+	)
 	serializer_class = SchoolLookupSerializer
 	permission_classes = [permissions.AllowAny]
 	filter_backends = [filters.SearchFilter, filters.OrderingFilter]
@@ -8891,7 +9101,7 @@ class SchoolLookupViewSet(viewsets.ReadOnlyModelViewSet):
 
 
 class CountyLookupViewSet(viewsets.ReadOnlyModelViewSet):
-	queryset = County.objects.all()
+	queryset = County.objects.filter(status=StatusEnum.APPROVED.value)
 	serializer_class = CountyLookupSerializer
 	permission_classes = [permissions.AllowAny]
 	filter_backends = [filters.SearchFilter, filters.OrderingFilter]
@@ -8912,7 +9122,10 @@ class CountyLookupViewSet(viewsets.ReadOnlyModelViewSet):
 
 
 class DistrictLookupViewSet(viewsets.ReadOnlyModelViewSet):
-	queryset = District.objects.select_related('county').all()
+	queryset = District.objects.select_related('county').filter(
+		status=StatusEnum.APPROVED.value,
+		county__status=StatusEnum.APPROVED.value,
+	)
 	serializer_class = DistrictLookupSerializer
 	permission_classes = [permissions.AllowAny]
 	filter_backends = [filters.SearchFilter, filters.OrderingFilter]
@@ -8976,20 +9189,12 @@ class AdminCountyViewSet(viewsets.ModelViewSet):
 		upload_ser.is_valid(raise_exception=True)
 		file_obj = upload_ser.validated_data['file']
 
-		try:
-			decoded = file_obj.read().decode('utf-8-sig')
-		except Exception:
-			return Response({"detail": "Unable to read uploaded file as UTF-8 text."}, status=status.HTTP_400_BAD_REQUEST)
-
-		if not decoded.strip():
-			return Response({"detail": "Uploaded file is empty."}, status=status.HTTP_400_BAD_REQUEST)
-
-		reader = csv.DictReader(io.StringIO(decoded))
-		if not reader.fieldnames:
+		fieldnames, rows = parse_bounded_csv(file_obj)
+		if not fieldnames:
 			return Response({"detail": "CSV file has no header row."}, status=status.HTTP_400_BAD_REQUEST)
 
 		required_columns = ['name']
-		missing = [c for c in required_columns if c not in reader.fieldnames]
+		missing = [c for c in required_columns if c not in fieldnames]
 		if missing:
 			return Response({"detail": f"Missing required columns: {', '.join(missing)}."}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -8998,7 +9203,7 @@ class AdminCountyViewSet(viewsets.ModelViewSet):
 		created_count = 0
 		failed_count = 0
 
-		for row_index, row in enumerate(reader, start=2):
+		for row_index, row in enumerate(rows, start=2):
 			row_result = {"row": row_index}
 			name = (row.get('name') or '').strip()
 			status_raw = (row.get('status') or '').strip()
@@ -9108,20 +9313,12 @@ class AdminDistrictViewSet(viewsets.ModelViewSet):
 		upload_ser.is_valid(raise_exception=True)
 		file_obj = upload_ser.validated_data['file']
 
-		try:
-			decoded = file_obj.read().decode('utf-8-sig')
-		except Exception:
-			return Response({"detail": "Unable to read uploaded file as UTF-8 text."}, status=status.HTTP_400_BAD_REQUEST)
-
-		if not decoded.strip():
-			return Response({"detail": "Uploaded file is empty."}, status=status.HTTP_400_BAD_REQUEST)
-
-		reader = csv.DictReader(io.StringIO(decoded))
-		if not reader.fieldnames:
+		fieldnames, rows = parse_bounded_csv(file_obj)
+		if not fieldnames:
 			return Response({"detail": "CSV file has no header row."}, status=status.HTTP_400_BAD_REQUEST)
 
 		required_columns = ['name']
-		missing = [c for c in required_columns if c not in reader.fieldnames]
+		missing = [c for c in required_columns if c not in fieldnames]
 		if missing:
 			return Response({"detail": f"Missing required columns: {', '.join(missing)}."}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -9130,7 +9327,7 @@ class AdminDistrictViewSet(viewsets.ModelViewSet):
 		created_count = 0
 		failed_count = 0
 
-		for row_index, row in enumerate(reader, start=2):
+		for row_index, row in enumerate(rows, start=2):
 			row_result = {"row": row_index}
 			name = (row.get('name') or '').strip()
 			county_id_raw = (row.get('county_id') or '').strip()
@@ -9269,20 +9466,12 @@ class AdminSchoolViewSet(viewsets.ModelViewSet):
 		upload_ser.is_valid(raise_exception=True)
 		file_obj = upload_ser.validated_data['file']
 
-		try:
-			decoded = file_obj.read().decode('utf-8-sig')
-		except Exception:
-			return Response({"detail": "Unable to read uploaded file as UTF-8 text."}, status=status.HTTP_400_BAD_REQUEST)
-
-		if not decoded.strip():
-			return Response({"detail": "Uploaded file is empty."}, status=status.HTTP_400_BAD_REQUEST)
-
-		reader = csv.DictReader(io.StringIO(decoded))
-		if not reader.fieldnames:
+		fieldnames, rows = parse_bounded_csv(file_obj)
+		if not fieldnames:
 			return Response({"detail": "CSV file has no header row."}, status=status.HTTP_400_BAD_REQUEST)
 
 		required_columns = ['name']
-		missing = [c for c in required_columns if c not in reader.fieldnames]
+		missing = [c for c in required_columns if c not in fieldnames]
 		if missing:
 			return Response({"detail": f"Missing required columns: {', '.join(missing)}."}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -9291,7 +9480,7 @@ class AdminSchoolViewSet(viewsets.ModelViewSet):
 		created_count = 0
 		failed_count = 0
 
-		for row_index, row in enumerate(reader, start=2):
+		for row_index, row in enumerate(rows, start=2):
 			row_result = {"row": row_index}
 			name = (row.get('name') or '').strip()
 			district_id_raw = (row.get('district_id') or '').strip()
@@ -10243,11 +10432,6 @@ class AdminContentManagerViewSet(viewsets.ViewSet):
 		else:
 			user_role = UserRole.CONTENTVALIDATOR.value
 
-		import secrets
-		import string
-		alphabet = string.ascii_letters + string.digits
-		temp_password = "password123"
-
 		with transaction.atomic():
 			user = User(
 				name=name,
@@ -10257,7 +10441,7 @@ class AdminContentManagerViewSet(viewsets.ViewSet):
 				dob=dob,
 				gender=gender,
 			)
-			user.set_password(temp_password)
+			temp_password = assign_temporary_password(user)
 			user.save()
 
 		message = (
@@ -10340,28 +10524,21 @@ class AdminContentManagerViewSet(viewsets.ViewSet):
 		upload_ser.is_valid(raise_exception=True)
 		file_obj = upload_ser.validated_data['file']
 
-		try:
-			decoded = file_obj.read().decode('utf-8-sig')
-		except Exception:
-			return Response({"detail": "Unable to read uploaded file as UTF-8 text."}, status=status.HTTP_400_BAD_REQUEST)
-
-		if not decoded.strip():
-			return Response({"detail": "Uploaded file is empty."}, status=status.HTTP_400_BAD_REQUEST)
-
-		reader = csv.DictReader(io.StringIO(decoded))
-		if not reader.fieldnames:
+		fieldnames, rows = parse_bounded_csv(file_obj)
+		if not fieldnames:
 			return Response({"detail": "CSV file has no header row."}, status=status.HTTP_400_BAD_REQUEST)
 
 		required_columns = ['name', 'phone', 'role']
-		missing = [c for c in required_columns if c not in reader.fieldnames]
+		missing = [c for c in required_columns if c not in fieldnames]
 		if missing:
 			return Response({"detail": f"Missing required columns: {', '.join(missing)}."}, status=status.HTTP_400_BAD_REQUEST)
 
 		results = []
 		created_count = 0
 		failed_count = 0
+		identity_index = build_bulk_identity_index(rows)
 
-		for row_index, row in enumerate(reader, start=2):
+		for row_index, row in enumerate(rows, start=2):
 			row_result = {"row": row_index}
 
 			mapped = {
@@ -10373,11 +10550,19 @@ class AdminContentManagerViewSet(viewsets.ViewSet):
 				"role": (row.get("role") or "").strip().lower(),
 			}
 
-			ser = AdminCreateContentManagerSerializer(data=mapped)
+			ser = AdminCreateContentManagerSerializer(
+				data=mapped,
+				context={'skip_identity_uniqueness': True},
+			)
 			try:
 				ser.is_valid(raise_exception=True)
 			except ValidationError as exc:
 				results.append({**row_result, "status": "error", "errors": exc.detail})
+				failed_count += 1
+				continue
+			identity_errors = claim_bulk_identity(identity_index, mapped['phone'], mapped.get('email'))
+			if identity_errors:
+				results.append({**row_result, "status": "error", "errors": identity_errors})
 				failed_count += 1
 				continue
 
@@ -10394,11 +10579,6 @@ class AdminContentManagerViewSet(viewsets.ViewSet):
 			else:
 				user_role = UserRole.CONTENTVALIDATOR.value
 
-			import secrets
-			import string
-			alphabet = string.ascii_letters + string.digits
-			temp_password = "password123"
-
 			try:
 				with transaction.atomic():
 					user = User(
@@ -10409,7 +10589,7 @@ class AdminContentManagerViewSet(viewsets.ViewSet):
 						dob=dob,
 						gender=gender,
 					)
-					user.set_password(temp_password)
+					temp_password = assign_temporary_password(user)
 					user.save()
 			except Exception as exc:
 				results.append({**row_result, "status": "error", "errors": {"non_field_errors": [str(exc)]}})

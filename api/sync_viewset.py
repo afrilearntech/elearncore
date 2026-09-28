@@ -8,7 +8,7 @@ from typing import Any, Type
 from django.db.models import Model, Q
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
-from rest_framework import permissions, status, viewsets
+from rest_framework import serializers, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
 
@@ -42,21 +42,19 @@ from .sync_serializers import (
     SyncDistrictSerializer,
     SyncSchoolSerializer,
 )
-
-
-_ALLOWED_ACCOUNT_SYNC_ROLES = {
-    UserRole.ADMIN.value,
-    UserRole.CONTENTCREATOR.value,
-    UserRole.CONTENTVALIDATOR.value,
-    UserRole.TEACHER.value,
-    UserRole.HEADTEACHER.value,
-}
+from .sync_permissions import IsScopedSyncService
 
 
 @dataclass(frozen=True)
 class _Cursor:
     updated_at: str
     id: int
+
+
+class SyncSchemaSerializer(serializers.Serializer):
+    """Fallback schema for action-only sync routes."""
+
+    resource = serializers.CharField(read_only=True)
 
 
 def _encode_cursor(cursor: _Cursor) -> str:
@@ -136,11 +134,12 @@ class SyncViewSet(viewsets.ViewSet):
     }
     """
 
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [IsScopedSyncService]
+    serializer_class = SyncSchemaSerializer
 
     def _require_account_sync_role(self, request):
         user = getattr(request, "user", None)
-        if not user or getattr(user, "role", None) not in _ALLOWED_ACCOUNT_SYNC_ROLES:
+        if not IsScopedSyncService().has_permission(request, self):
             return Response({"detail": "Not authorized for account sync."}, status=403)
         return None
 
@@ -264,7 +263,10 @@ class SyncViewSet(viewsets.ViewSet):
             model=User,
             serializer_class=SyncStudentUserSerializer,
             has_status=False,
-            base_queryset=User.objects.filter(role=UserRole.STUDENT.value),
+            base_queryset=User.objects.filter(
+                role=UserRole.STUDENT.value,
+                student__school_id=request.user.sync_school_id,
+            ),
         )
 
     @action(detail=False, methods=["get"], url_path="students")
@@ -280,7 +282,8 @@ class SyncViewSet(viewsets.ViewSet):
             serializer_class=SyncStudentSerializer,
             has_status=False,
             base_queryset=Student.objects.select_related("profile", "school").filter(
-                profile__role=UserRole.STUDENT.value
+                profile__role=UserRole.STUDENT.value,
+                school_id=request.user.sync_school_id,
             ),
         )
 

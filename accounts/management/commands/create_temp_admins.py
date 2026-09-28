@@ -1,5 +1,10 @@
+from datetime import timedelta
+
+from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError
 from django.contrib.auth import get_user_model
+from django.contrib.auth.password_validation import validate_password
+from django.utils import timezone
 
 from elearncore.sysutils.constants import UserRole
 
@@ -28,10 +33,9 @@ class Command(BaseCommand):
         parser.add_argument(
             "--password",
             type=str,
-            default="TempAdmin123!",
+            required=True,
             help=(
-                "Password to set for all created temp admin accounts. "
-                "Defaults to 'TempAdmin123!'."
+                "A securely generated temporary password. No default is provided."
             ),
         )
 
@@ -42,6 +46,8 @@ class Command(BaseCommand):
 
         if count <= 0:
             raise CommandError("Count must be a positive integer.")
+
+        validate_password(password)
 
         User = get_user_model()
 
@@ -71,6 +77,10 @@ class Command(BaseCommand):
                 name=name,
                 phone=phone,
                 role=UserRole.ADMIN.value,
+                must_change_password=True,
+                temporary_password_expires_at=timezone.now() + timedelta(
+                    hours=settings.TEMPORARY_PASSWORD_TTL_HOURS
+                ),
             )
 
             created += 1

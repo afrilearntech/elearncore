@@ -1,4 +1,5 @@
 from rest_framework import serializers
+from api.uploads import validate_document_upload, validate_image_upload, validate_solution_upload
 
 from elearncore.sysutils.constants import QType as QTypeEnum, StudentLevel
 
@@ -103,7 +104,7 @@ class SubjectSerializer(serializers.ModelSerializer):
 			'id', 'name', 'grade', 'status', 'description', 'thumbnail', 'teachers', 'moderation_comment',
 			'objectives', 'created_at', 'updated_at', 'created_by', 'teacher_count',
 		]
-		read_only_fields = ['created_at', 'teachers', 'updated_at', 'created_by']
+		read_only_fields = ['status', 'moderation_comment', 'created_at', 'teachers', 'updated_at', 'created_by']
 
 	def to_representation(self, instance):
 		data = super().to_representation(instance)
@@ -112,6 +113,15 @@ class SubjectSerializer(serializers.ModelSerializer):
 		items = [part.strip() for part in raw.split(',') if part.strip()]
 		data['objectives'] = items
 		return data
+
+	def validate_thumbnail(self, value):
+		return validate_image_upload(value)
+
+
+class SubjectPublicSerializer(SubjectSerializer):
+	class Meta(SubjectSerializer.Meta):
+		fields = ['id', 'name', 'grade', 'description', 'thumbnail', 'objectives', 'teacher_count']
+		read_only_fields = fields
 
 
 class SubjectWriteSerializer(serializers.ModelSerializer):
@@ -134,7 +144,7 @@ class SubjectWriteSerializer(serializers.ModelSerializer):
 			'id', 'name', 'grade', 'status', 'description', 'thumbnail', 'teachers', 'moderation_comment',
 			'objectives', 'created_at', 'updated_at', 'created_by',
 		]
-		read_only_fields = ['created_at', 'teachers', 'updated_at', 'created_by']
+		read_only_fields = ['status', 'moderation_comment', 'created_at', 'teachers', 'updated_at', 'created_by']
 
 	def create(self, validated_data):
 		raw = validated_data.get('objectives') or ""
@@ -150,6 +160,9 @@ class SubjectWriteSerializer(serializers.ModelSerializer):
 	def _normalize_objectives(self, raw: str) -> str:
 		parts = [part.strip() for part in str(raw).split(',') if part.strip()]
 		return ", ".join(parts)
+
+	def validate_thumbnail(self, value):
+		return validate_image_upload(value)
 
 
 class TopicSerializer(serializers.ModelSerializer):
@@ -169,13 +182,30 @@ class PeriodSerializer(serializers.ModelSerializer):
 
 class LessonResourceSerializer(serializers.ModelSerializer):
 	created_by = serializers.PrimaryKeyRelatedField(read_only=True)
+
 	class Meta:
 		model = LessonResource
 		fields = [
-			'id', 'subject', 'topic', 'period', 'title', 'description', 'type', 'status', 'resource', 'thumbnail', 'created_by', 'moderation_comment',
-			'duration_minutes', 'created_at', 'updated_at'
+			'id', 'subject', 'topic', 'period', 'title', 'description', 'type', 'status',
+			'resource', 'thumbnail', 'created_by', 'moderation_comment', 'duration_minutes',
+			'created_at', 'updated_at',
 		]
-		read_only_fields = ['created_at', 'updated_at']
+		read_only_fields = ['status', 'moderation_comment', 'created_at', 'updated_at']
+
+	def validate_resource(self, value):
+		return validate_document_upload(value)
+
+	def validate_thumbnail(self, value):
+		return validate_image_upload(value)
+
+
+class LessonResourcePublicSerializer(LessonResourceSerializer):
+	class Meta(LessonResourceSerializer.Meta):
+		fields = [
+			'id', 'subject', 'topic', 'period', 'title', 'description', 'type',
+			'resource', 'thumbnail', 'duration_minutes', 'created_at', 'updated_at',
+		]
+		read_only_fields = fields
 
 
 class TakeLessonSerializer(serializers.ModelSerializer):
@@ -190,19 +220,16 @@ class GeneralAssessmentSerializer(serializers.ModelSerializer):
 		model = GeneralAssessment
 		fields = [
 			'id', 'title', 'type', 'given_by', 'instructions', 'marks', 'due_at', 'grade',
-			'ai_recommended', 'is_targeted', 'target_student',
-			'status', 'moderation_comment', 'created_at', 'updated_at',
+			'ai_recommended', 'is_targeted', 'target_student', 'status', 'moderation_comment',
+			'created_at', 'updated_at',
 		]
-		read_only_fields = ['created_at', 'updated_at']
+		read_only_fields = ['status', 'moderation_comment', 'created_at', 'updated_at']
 
 
 class GeneralAssessmentUpdateSerializer(serializers.ModelSerializer):
 	class Meta:
 		model = GeneralAssessment
-		fields = [
-			'title', 'type', 'instructions', 'marks', 'due_at', 'grade',
-			'status', 'moderation_comment',
-		]
+		fields = ['title', 'type', 'instructions', 'marks', 'due_at', 'grade']
 
 
 class GeneralAssessmentTeacherUpdateSerializer(serializers.ModelSerializer):
@@ -219,12 +246,18 @@ class AssessmentSolutionSerializer(serializers.ModelSerializer):
 		fields = ['id', 'assessment', 'student', 'solution', 'attachment', 'submitted_at', 'created_at', 'updated_at']
 		read_only_fields = ['submitted_at', 'created_at', 'updated_at']
 
+	def validate_attachment(self, value):
+		return validate_solution_upload(value)
+
 
 class LessonAssessmentSolutionSerializer(serializers.ModelSerializer):
 	class Meta:
 		model = LessonAssessmentSolution
 		fields = ['id', 'lesson_assessment', 'student', 'solution', 'attachment', 'submitted_at', 'created_at', 'updated_at']
 		read_only_fields = ['submitted_at', 'created_at', 'updated_at']
+
+	def validate_attachment(self, value):
+		return validate_solution_upload(value)
 
 
 class GeneralAssessmentGradeSerializer(serializers.ModelSerializer):
@@ -245,16 +278,13 @@ class LessonAssessmentSerializer(serializers.ModelSerializer):
 			'ai_recommended', 'is_targeted', 'target_student',
 			'status', 'moderation_comment', 'created_at', 'updated_at',
 		]
-		read_only_fields = ['created_at', 'updated_at']
+		read_only_fields = ['status', 'moderation_comment', 'created_at', 'updated_at']
 
 
 class LessonAssessmentUpdateSerializer(serializers.ModelSerializer):
 	class Meta:
 		model = LessonAssessment
-		fields = [
-			'lesson', 'type', 'title', 'instructions', 'marks', 'due_at',
-			'status', 'moderation_comment',
-		]
+		fields = ['lesson', 'type', 'title', 'instructions', 'marks', 'due_at']
 
 
 class LessonAssessmentTeacherUpdateSerializer(serializers.ModelSerializer):
@@ -288,6 +318,15 @@ class QuestionSerializer(serializers.ModelSerializer):
 			'id', 'general_assessment', 'lesson_assessment', 'type', 'question', 'answer', 'options', 'created_at', 'updated_at'
 		]
 		read_only_fields = ['created_at', 'updated_at']
+
+
+class StudentQuestionSerializer(serializers.ModelSerializer):
+	options = OptionSerializer(many=True, read_only=True)
+
+	class Meta:
+		model = Question
+		fields = ['id', 'type', 'question', 'options']
+		read_only_fields = fields
 
 
 class QuestionCreateSerializer(serializers.Serializer):
@@ -431,4 +470,13 @@ class GameSerializer(serializers.ModelSerializer):
 			'id', 'name', 'instructions', 'description', 'hint', 'correct_answer',
 			'type', 'image', 'status', 'created_by', 'created_at', 'updated_at',
 		]
-		read_only_fields = ['created_at', 'updated_at', 'created_by']
+		read_only_fields = ['status', 'created_at', 'updated_at', 'created_by']
+
+	def validate_image(self, value):
+		return validate_image_upload(value)
+
+
+class GamePublicSerializer(GameSerializer):
+	class Meta(GameSerializer.Meta):
+		fields = ['id', 'name', 'instructions', 'description', 'hint', 'type', 'image', 'grade']
+		read_only_fields = fields
