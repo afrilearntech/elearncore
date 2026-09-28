@@ -2,7 +2,7 @@ import os
 from datetime import timedelta
 from typing import List, Dict, Optional
 
-from django.db.models import Count, Avg
+from django.db.models import Count, Avg, Q
 from django.utils import timezone
 
 from accounts.models import Student
@@ -10,8 +10,7 @@ from content.models import (
     TakeLesson, LessonResource,
     GeneralAssessment, GeneralAssessmentGrade,
     LessonAssessment, LessonAssessmentGrade,
-    Question, Option,
-    Subject, Topic, Activity,
+    Question, Option, Activity,
 )
 from forum.models import Chat
 from .models import AIRecommendation, AIAbuseReport
@@ -223,7 +222,28 @@ def _parse_recommendations_json(text: str) -> List[Dict]:
     return []
 
 
-def _match_lesson(subject_name: Optional[str], topic_name: Optional[str], lesson_title: Optional[str] = None) -> Optional[LessonResource]:
+def _match_lesson(
+    subject_name: Optional[str],
+    topic_name: Optional[str],
+    lesson_title: Optional[str] = None,
+    *,
+    candidates: Optional[List[LessonResource]] = None,
+) -> Optional[LessonResource]:
+    if candidates is not None:
+        subject_key = (subject_name or '').strip().casefold()
+        topic_key = (topic_name or '').strip().casefold()
+        lesson_key = (lesson_title or '').strip().casefold()
+        for lesson in candidates:
+            if subject_key and (lesson.subject.name or '').strip().casefold() != subject_key:
+                continue
+            topic = getattr(lesson, 'topic', None)
+            if topic_key and (getattr(topic, 'name', '') or '').strip().casefold() != topic_key:
+                continue
+            if lesson_key and lesson_key not in (lesson.title or '').casefold():
+                continue
+            return lesson
+        return None
+
     qs = LessonResource.objects.select_related('subject', 'topic').all()
     if subject_name:
         qs = qs.filter(subject__name__iexact=subject_name)
@@ -232,6 +252,41 @@ def _match_lesson(subject_name: Optional[str], topic_name: Optional[str], lesson
     if lesson_title:
         qs = qs.filter(title__icontains=lesson_title)
     return qs.first()
+
+
+def _load_lesson_candidates(items: List[Dict]) -> List[LessonResource]:
+    """Load lessons matching a generated batch in one ordered query."""
+    filters = Q(pk__in=[])
+    has_filter = False
+    needs_unrestricted_fallback = False
+    for item in items:
+        subject_name = (item.get('subject') or '').strip()
+        topic_name = (item.get('topic') or '').strip()
+        lesson_title = (item.get('lesson_title') or '').strip()
+        item_filter = Q()
+        if subject_name:
+            item_filter &= Q(subject__name__iexact=subject_name)
+        if topic_name:
+            item_filter &= Q(topic__name__iexact=topic_name)
+        if lesson_title:
+            item_filter &= Q(title__icontains=lesson_title)
+        if subject_name or topic_name or lesson_title:
+            filters |= item_filter
+            if subject_name:
+                # Recommendation generation falls back to any lesson in the
+                # requested subject when the precise topic/title is absent.
+                filters |= Q(subject__name__iexact=subject_name)
+            has_filter = True
+        else:
+            needs_unrestricted_fallback = True
+
+    queryset = LessonResource.objects.select_related('subject', 'topic').order_by('id')
+    candidates = list(queryset.filter(filters)) if has_filter else []
+    if needs_unrestricted_fallback:
+        first_lesson = queryset.first()
+        if first_lesson is not None and all(item.pk != first_lesson.pk for item in candidates):
+            candidates.insert(0, first_lesson)
+    return candidates
 
 
 def generate_recommendations_for_student(student: Student, max_recs: int = 5) -> List[AIRecommendation]:
@@ -295,29 +350,35 @@ def generate_recommendations_for_student(student: Student, max_recs: int = 5) ->
 
     text = resp.output_text
     recs = _parse_recommendations_json(text)
-    created: List[AIRecommendation] = []
-    for r in recs[:max_recs]:
+    selected_recs = recs[:max_recs]
+    lesson_candidates = _load_lesson_candidates(selected_recs)
+    recommendations_to_create: List[AIRecommendation] = []
+    for r in selected_recs:
         subject_name = r.get('subject')
         topic_name = r.get('topic')
         lesson_title = r.get('lesson_title')
         reason = r.get('reason')
 
-        lesson = _match_lesson(subject_name, topic_name, lesson_title)
+        lesson = _match_lesson(
+            subject_name,
+            topic_name,
+            lesson_title,
+            candidates=lesson_candidates,
+        )
         if not lesson and subject_name:
-            # Try find any lesson by subject name
-            subj = Subject.objects.filter(name__iexact=subject_name).first()
-            if subj:
-                lesson = LessonResource.objects.filter(subject=subj).first()
+            lesson = _match_lesson(subject_name, None, None, candidates=lesson_candidates)
 
         if lesson:
-            created.append(
-                AIRecommendation.objects.create(
+            recommendations_to_create.append(
+                AIRecommendation(
                     student=student,
                     lesson=lesson,
                     message=reason or f"Recommended: {subject_name} - {topic_name or ''}".strip(),
                 )
             )
-    return created
+    if not recommendations_to_create:
+        return []
+    return list(AIRecommendation.objects.bulk_create(recommendations_to_create))
 
 
 def scan_chats_for_abuse(hours: int = 12) -> List[AIAbuseReport]:
@@ -495,8 +556,15 @@ def generate_targeted_assessments_for_student(
 
     created_general: List[GeneralAssessment] = []
     created_lesson: List[LessonAssessment] = []
+    selected_items = items[:max_items]
+    lesson_candidates = _load_lesson_candidates([
+        item for item in selected_items if (item.get('scope') or '').upper() == 'LESSON'
+    ])
+    teacher_subject_ids = None
+    if triggered_by_teacher is not None:
+        teacher_subject_ids = set(triggered_by_teacher.subjects.values_list('id', flat=True))
 
-    for item in items[:max_items]:
+    for item in selected_items:
         kind = (item.get('kind') or '').upper()
         scope = (item.get('scope') or '').upper()
         subject_name = item.get('subject') or None
@@ -519,14 +587,18 @@ def generate_targeted_assessments_for_student(
         teacher = triggered_by_teacher
 
         if scope == 'LESSON':
-            lesson = _match_lesson(subject_name, topic_name, lesson_title)
+            lesson = _match_lesson(
+                subject_name,
+                topic_name,
+                lesson_title,
+                candidates=lesson_candidates,
+            )
             if not lesson:
                 continue
             if getattr(getattr(lesson, "subject", None), "grade", None) != student.grade:
                 continue
-            if teacher is not None:
-                teaches_subject = Subject.objects.filter(id=lesson.subject_id, teachers=teacher).exists()
-                if not teaches_subject:
+            if teacher_subject_ids is not None:
+                if lesson.subject_id not in teacher_subject_ids:
                     continue
             la = LessonAssessment.objects.create(
                 lesson=lesson,
@@ -609,10 +681,13 @@ def _create_question_from_ai(data: Dict, *, lesson_assessment: Optional[LessonAs
     if qtype_raw == QTypeEnum.TRUE_FALSE.value:
         options_raw = ["True", "False"]
 
-    for opt in options_raw:
-        text = str(opt).strip()
-        if text:
-            Option.objects.create(question=question, value=text)
+    options = [
+        Option(question=question, value=text)
+        for option in options_raw
+        if (text := str(option).strip())
+    ]
+    if options:
+        Option.objects.bulk_create(options)
 
     return question
 
