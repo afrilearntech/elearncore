@@ -408,10 +408,13 @@ class QuestionCreateSerializer(serializers.Serializer):
 			lesson_assessment=lesson_assessment,
 			**validated_data,
 		)
-		for val in options:
-			text = str(val).strip()
-			if text:
-				Option.objects.create(question=question, value=text)
+		option_objects = [
+			Option(question=question, value=text)
+			for val in options
+			if (text := str(val).strip())
+		]
+		if option_objects:
+			Option.objects.bulk_create(option_objects)
 		return question
 
 
@@ -454,10 +457,13 @@ class QuestionUpdateSerializer(serializers.Serializer):
 			instance.save(update_fields=update_fields)
 		if options is not None:
 			instance.options.all().delete()
-			for val in options:
-				text = str(val).strip()
-				if text:
-					Option.objects.create(question=instance, value=text)
+			option_objects = [
+				Option(question=instance, value=text)
+				for val in options
+				if (text := str(val).strip())
+			]
+			if option_objects:
+				Option.objects.bulk_create(option_objects)
 		return instance
 
 

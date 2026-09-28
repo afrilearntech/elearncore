@@ -122,6 +122,20 @@ def claim_bulk_identity(index, phone, email):
     return None
 
 
+def build_integer_fk_index(rows, field_name, queryset):
+    """Load integer foreign keys referenced by a bounded CSV in one query."""
+    object_ids = set()
+    for row in rows:
+        raw_value = (row.get(field_name) or '').strip()
+        if not raw_value:
+            continue
+        try:
+            object_ids.add(int(raw_value))
+        except (TypeError, ValueError):
+            continue
+    return queryset.in_bulk(object_ids)
+
+
 def validate_image_upload(upload):
     return validate_uploaded_file(
         upload,

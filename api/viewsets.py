@@ -22,8 +22,8 @@ from django.utils.dateparse import parse_date
 from django.utils import timezone
 from datetime import timedelta, datetime
 from django.db import models, transaction
-from django.db.models import Q, Count, Window, F
-from django.db.models.functions import TruncDate, DenseRank
+from django.db.models import Q, Count, Window, F, Prefetch
+from django.db.models.functions import TruncDate, TruncMonth, DenseRank, Lower
 
 from elearncore.sysutils.constants import (
 	UserRole,
@@ -121,6 +121,7 @@ from .serializers import (
 )
 from .pagination import StandardResultsSetPagination
 from .uploads import (
+	build_integer_fk_index,
 	build_bulk_identity_index,
 	claim_bulk_identity,
 	parse_bounded_csv,
@@ -161,6 +162,58 @@ def _parse_bulk_date(value: str):
 		except ValueError:
 			continue
 	return value
+
+
+def _bulk_geography_indexes(rows):
+	"""Resolve county and district CSV references with a fixed query count."""
+	county_ids = set()
+	county_names = set()
+	district_ids = set()
+	district_names = set()
+	for row in rows:
+		county_id_raw = (row.get('county_id') or '').strip()
+		if county_id_raw:
+			try:
+				county_ids.add(int(county_id_raw))
+			except ValueError:
+				pass
+		county_name = (row.get('county_name') or '').strip().lower()
+		if county_name:
+			county_names.add(county_name)
+		district_id_raw = (row.get('district_id') or '').strip()
+		if district_id_raw:
+			try:
+				district_ids.add(int(district_id_raw))
+			except ValueError:
+				pass
+		district_name = (row.get('district_name') or '').strip().lower()
+		if district_name:
+			district_names.add(district_name)
+
+	counties = list(
+		County.objects
+		.annotate(name_key=Lower('name'))
+		.filter(Q(id__in=county_ids) | Q(name_key__in=county_names))
+	)
+	counties_by_id = {county.id: county for county in counties}
+	counties_by_name = {county.name.lower(): county for county in counties}
+	resolved_county_ids = set(counties_by_id) | {county.id for county in counties_by_name.values()}
+
+	districts = list(
+		District.objects
+		.select_related('county')
+		.annotate(name_key=Lower('name'))
+		.filter(
+			Q(id__in=district_ids)
+			| Q(county_id__in=resolved_county_ids, name_key__in=district_names)
+		)
+	)
+	districts_by_id = {district.id: district for district in districts}
+	districts_by_county_and_name = {
+		(district.county_id, district.name.lower()): district
+		for district in districts
+	}
+	return counties_by_id, counties_by_name, districts_by_id, districts_by_county_and_name
 
 
 def _send_account_notifications(message: str, phone: str | None, email: str | None, email_subject: str) -> None:
@@ -919,14 +972,17 @@ class SubjectViewSet(viewsets.ModelViewSet):
 		data = self.get_serializer(instance).data
 
 		# Attach topics for this subject
-		topics_qs = Topic.objects.filter(subject=instance).order_by('name')
+		topics_qs = Topic.objects.filter(subject=instance).select_related('subject').order_by('name')
 		data['topics'] = TopicSerializer(topics_qs, many=True).data
 
 		# Total instructors linked to this subject
 		total_instructors = instance.teachers.count()
 
-		# Total lessons under this subject
-		total_lessons = LessonResource.objects.filter(subject=instance).count()
+		lesson_stats = LessonResource.objects.filter(subject=instance).aggregate(
+			total=Count('id'),
+			total_minutes=models.Sum('duration_minutes'),
+		)
+		total_lessons = lesson_stats['total'] or 0
 
 		# Total distinct students who have taken at least one lesson in this course
 		total_students = (
@@ -938,11 +994,7 @@ class SubjectViewSet(viewsets.ModelViewSet):
 		)
 
 		# Estimated duration for the subject in hours, based on lesson durations
-		total_minutes = (
-			LessonResource.objects
-			.filter(subject=instance)
-			.aggregate(total=models.Sum('duration_minutes'))['total'] or 0
-		)
+		total_minutes = lesson_stats['total_minutes'] or 0
 		estimated_duration_hours = round(total_minutes / 60.0, 2)
 
 		data['stats'] = {
@@ -988,7 +1040,9 @@ class SubjectViewSet(viewsets.ModelViewSet):
 		total_by_subject = {row['subject_id']: row['total'] for row in total_counts_qs}
 		taken_by_subject = {row['lesson__subject_id']: row['taken'] for row in taken_counts}
 
-		subjects = Subject.objects.filter(id__in=subject_ids).only('id', 'name', 'grade')
+		subjects = Subject.objects.filter(id__in=subject_ids).select_related('created_by').only(
+			'id', 'name', 'grade', 'created_by__name'
+		)
 		payload = []
 		for subj in subjects:
 			total = int(total_by_subject.get(subj.id, 0))
@@ -2698,7 +2752,7 @@ class ContentViewSet(viewsets.ViewSet):
 		- Creators/validators can create/edit; others read-only.
 		"""
 		if request.method == 'GET':
-			qs = Subject.objects.all().order_by('name')
+			qs = Subject.objects.prefetch_related('teachers').all().order_by('name')
 			# Content creators should only see subjects they created;
 			# validators/admins can still see all subjects.
 			user = request.user
@@ -2846,7 +2900,7 @@ class ContentViewSet(viewsets.ViewSet):
 			return deny
 
 		if request.method == 'GET':
-			qs = LessonAssessment.objects.select_related('lesson').all().order_by('-created_at')
+			qs = LessonAssessment.objects.select_related('lesson__subject').all().order_by('-created_at')
 			ai_only = request.query_params.get('ai_only')
 			if ai_only in {'1', 'true', 'True'}:
 				qs = qs.filter(ai_recommended=True)
@@ -3341,6 +3395,7 @@ class ContentViewSet(viewsets.ViewSet):
 		created_count = 0
 		failed_count = 0
 		identity_index = build_bulk_identity_index(rows)
+		schools_by_id = build_integer_fk_index(rows, 'school_id', School.objects.all())
 
 		for row_index, row in enumerate(rows, start=2):
 			row_result = {"row": row_index}
@@ -3389,9 +3444,8 @@ class ContentViewSet(viewsets.ViewSet):
 			dob = data.get("dob")
 			school_id = data.get("school_id")
 
-			try:
-				school = School.objects.get(id=school_id)
-			except School.DoesNotExist:
+			school = schools_by_id.get(school_id)
+			if school is None:
 				results.append({**row_result, "status": "error", "errors": {"school_id": ["School not found."]}})
 				failed_count += 1
 				continue
@@ -3666,6 +3720,7 @@ class ContentViewSet(viewsets.ViewSet):
 		created_count = 0
 		failed_count = 0
 		identity_index = build_bulk_identity_index(rows)
+		schools_by_id = build_integer_fk_index(rows, 'school_id', School.objects.all())
 
 		for row_index, row in enumerate(rows, start=2):
 			row_result = {"row": row_index}
@@ -3716,9 +3771,8 @@ class ContentViewSet(viewsets.ViewSet):
 			dob = data.get("dob")
 			school_id = data.get("school_id")
 
-			try:
-				school = School.objects.get(id=school_id)
-			except School.DoesNotExist:
+			school = schools_by_id.get(school_id)
+			if school is None:
 				results.append({**row_result, "status": "error", "errors": {"school_id": ["School not found."]}})
 				failed_count += 1
 				continue
@@ -7363,7 +7417,7 @@ class TeacherViewSet(viewsets.ViewSet):
 			return deny
 		teacher = request.user.teacher
 		# For now, return all subjects linked to this teacher profile.
-		qs = Subject.objects.filter(teachers=teacher).order_by('name')
+		qs = Subject.objects.filter(teachers=teacher).prefetch_related('teachers').order_by('name')
 		return _paginated_serializer_response(request, qs, SubjectSerializer)
 
 	@extend_schema(
@@ -7555,7 +7609,7 @@ class TeacherViewSet(viewsets.ViewSet):
 		if deny:
 			return deny
 		teacher = request.user.teacher
-		qs = LessonAssessment.objects.filter(given_by=teacher).select_related('lesson').order_by('-created_at')
+		qs = LessonAssessment.objects.filter(given_by=teacher).select_related('lesson__subject').order_by('-created_at')
 		ai_only = request.query_params.get('ai_only')
 		if ai_only in {'1', 'true', 'True'}:
 			qs = qs.filter(ai_recommended=True)
@@ -7755,7 +7809,9 @@ class TeacherViewSet(viewsets.ViewSet):
 		teacher = request.user.teacher
 		if not getattr(teacher, 'school_id', None):
 			return _paginated_serializer_response(request, Student.objects.none(), StudentSerializer)
-		qs = Student.objects.filter(school_id=teacher.school_id).select_related('profile', 'school').order_by('profile__name')
+		qs = Student.objects.filter(school_id=teacher.school_id).select_related(
+			'profile', 'school__district__county'
+		).order_by('profile__name')
 		return _paginated_serializer_response(request, qs, StudentSerializer)
 
 	@extend_schema(
@@ -8365,6 +8421,7 @@ class TeacherViewSet(viewsets.ViewSet):
 		created_count = 0
 		failed_count = 0
 		identity_index = build_bulk_identity_index(rows)
+		schools_by_id = build_integer_fk_index(rows, 'school_id', School.objects.all())
 
 		for row_index, row in enumerate(rows, start=2):  # data rows start at line 2
 			row_result = {"row": row_index}
@@ -8415,9 +8472,8 @@ class TeacherViewSet(viewsets.ViewSet):
 			# Resolve school similar to the single create endpoint
 			school = None
 			if school_id is not None:
-				try:
-					school = School.objects.get(id=school_id)
-				except School.DoesNotExist:
+				school = schools_by_id.get(school_id)
+				if school is None:
 					results.append({**row_result, "status": "error", "errors": {"school_id": ["School not found."]}})
 					failed_count += 1
 					continue
@@ -9265,6 +9321,7 @@ class AdminDistrictViewSet(viewsets.ModelViewSet):
 		results = []
 		created_count = 0
 		failed_count = 0
+		counties_by_id, counties_by_name, _, _ = _bulk_geography_indexes(rows)
 
 		for row_index, row in enumerate(rows, start=2):
 			row_result = {"row": row_index}
@@ -9287,9 +9344,9 @@ class AdminDistrictViewSet(viewsets.ModelViewSet):
 					results.append({**row_result, "status": "error", "errors": {"county_id": ["Invalid integer."]}})
 					failed_count += 1
 					continue
-				county = County.objects.filter(id=county_id).first()
+				county = counties_by_id.get(county_id)
 			elif county_name:
-				county = County.objects.filter(name__iexact=county_name).first()
+				county = counties_by_name.get(county_name.lower())
 			else:
 				results.append({**row_result, "status": "error", "errors": {"county": ["Provide county_id or county_name."]}})
 				failed_count += 1
@@ -9418,6 +9475,12 @@ class AdminSchoolViewSet(viewsets.ModelViewSet):
 		results = []
 		created_count = 0
 		failed_count = 0
+		(
+			counties_by_id,
+			counties_by_name,
+			districts_by_id,
+			districts_by_county_and_name,
+		) = _bulk_geography_indexes(rows)
 
 		for row_index, row in enumerate(rows, start=2):
 			row_result = {"row": row_index}
@@ -9442,7 +9505,7 @@ class AdminSchoolViewSet(viewsets.ModelViewSet):
 					results.append({**row_result, "status": "error", "errors": {"district_id": ["Invalid integer."]}})
 					failed_count += 1
 					continue
-				district = District.objects.select_related('county').filter(id=district_id).first()
+				district = districts_by_id.get(district_id)
 			else:
 				if not district_name:
 					results.append({**row_result, "status": "error", "errors": {"district": ["Provide district_id or district_name."]}})
@@ -9457,9 +9520,9 @@ class AdminSchoolViewSet(viewsets.ModelViewSet):
 						results.append({**row_result, "status": "error", "errors": {"county_id": ["Invalid integer."]}})
 						failed_count += 1
 						continue
-					county = County.objects.filter(id=county_id).first()
+					county = counties_by_id.get(county_id)
 				elif county_name:
-					county = County.objects.filter(name__iexact=county_name).first()
+					county = counties_by_name.get(county_name.lower())
 				else:
 					results.append({**row_result, "status": "error", "errors": {"county": ["Provide county_id or county_name when using district_name."]}})
 					failed_count += 1
@@ -9470,7 +9533,7 @@ class AdminSchoolViewSet(viewsets.ModelViewSet):
 					failed_count += 1
 					continue
 
-				district = District.objects.select_related('county').filter(county=county, name__iexact=district_name).first()
+				district = districts_by_county_and_name.get((county.id, district_name.lower()))
 
 			if not district:
 				results.append({**row_result, "status": "error", "errors": {"district": ["District not found."]}})
@@ -9623,24 +9686,40 @@ class AdminDashboardViewSet(viewsets.ViewSet):
 		"""
 		now = timezone.now()
 		current_year = now.year
-		current_month = now.month
-		prev_year = current_year if current_month > 1 else current_year - 1
-		prev_month = current_month - 1 if current_month > 1 else 12
-
-		def _month_counts(qs, year, month, date_field='created_at'):
-			filter_kwargs = {
-				f"{date_field}__year": year,
-				f"{date_field}__month": month,
-			}
-			return qs.filter(**filter_kwargs).count()
+		current_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+		if current_start.month == 12:
+			next_start = current_start.replace(year=current_start.year + 1, month=1)
+		else:
+			next_start = current_start.replace(month=current_start.month + 1)
+		if current_start.month == 1:
+			previous_start = current_start.replace(year=current_start.year - 1, month=12)
+		else:
+			previous_start = current_start.replace(month=current_start.month - 1)
 
 		def _summary_card(qs, *, date_field='created_at', base_filter=None):
 			base_qs = qs
 			if base_filter is not None:
 				base_qs = base_qs.filter(**base_filter)
-			total = base_qs.count()
-			current_created = _month_counts(base_qs, current_year, current_month, date_field)
-			prev_created = _month_counts(base_qs, prev_year, prev_month, date_field)
+			counts = base_qs.aggregate(
+				total=Count('pk'),
+				current_created=Count(
+					'pk',
+					filter=Q(**{
+						f'{date_field}__gte': current_start,
+						f'{date_field}__lt': next_start,
+					}),
+				),
+				previous_created=Count(
+					'pk',
+					filter=Q(**{
+						f'{date_field}__gte': previous_start,
+						f'{date_field}__lt': current_start,
+					}),
+				),
+			)
+			total = counts['total']
+			current_created = counts['current_created']
+			prev_created = counts['previous_created']
 			if prev_created > 0:
 				change_pct = ((current_created - prev_created) / prev_created) * 100.0
 			elif current_created > 0:
@@ -9675,21 +9754,36 @@ class AdminDashboardViewSet(viewsets.ViewSet):
 			),
 		}
 
-		# Lessons chart: monthly breakdown for current year
-		lessons_chart_points = []
-		for month in range(1, 13):
-			month_qs = LessonResource.objects.filter(
-				created_at__year=current_year,
-				created_at__month=month,
+		# Lessons chart: one grouped query for the full year rather than three
+		# count queries for each month.
+		year_start = current_start.replace(month=1)
+		next_year_start = year_start.replace(year=current_year + 1)
+		monthly_rows = (
+			LessonResource.objects
+			.filter(created_at__gte=year_start, created_at__lt=next_year_start)
+			.annotate(month_bucket=TruncMonth('created_at'))
+			.values('month_bucket')
+			.annotate(
+				submitted=Count('pk'),
+				approved=Count('pk', filter=Q(status=StatusEnum.APPROVED.value)),
+				rejected=Count('pk', filter=Q(status=StatusEnum.REJECTED.value)),
 			)
-			lessons_chart_points.append(
-				{
-					"period": datetime(current_year, month, 1).strftime("%b"),
-					"submitted": month_qs.count(),
-					"approved": month_qs.filter(status=StatusEnum.APPROVED.value).count(),
-					"rejected": month_qs.filter(status=StatusEnum.REJECTED.value).count(),
-				}
-			)
+			.order_by('month_bucket')
+		)
+		monthly_counts = {
+			row['month_bucket'].month: row
+			for row in monthly_rows
+			if row['month_bucket'] is not None
+		}
+		lessons_chart_points = [
+			{
+				"period": datetime(current_year, month, 1).strftime("%b"),
+				"submitted": monthly_counts.get(month, {}).get('submitted', 0),
+				"approved": monthly_counts.get(month, {}).get('approved', 0),
+				"rejected": monthly_counts.get(month, {}).get('rejected', 0),
+			}
+			for month in range(1, 13)
+		]
 
 		lessons_chart = {
 			"granularity": "month",
@@ -10112,7 +10206,12 @@ class AdminSystemReportViewSet(viewsets.ViewSet):
 class AdminStudentViewSet(viewsets.ReadOnlyModelViewSet):
 	"""Admin-only read and moderation access to all students."""
 
-	queryset = Student.objects.select_related('profile', 'school').prefetch_related('guardians__profile').all().order_by('profile__name')
+	queryset = (
+		Student.objects
+		.select_related('profile', 'school')
+		.prefetch_related(Prefetch('guardians', queryset=Parent.objects.select_related('profile')))
+		.order_by('profile__name')
+	)
 	serializer_class = AdminStudentListSerializer
 	permission_classes = [permissions.IsAuthenticated, IsAdminRole, permissions.IsAdminUser]
 	filter_backends = [filters.SearchFilter, filters.OrderingFilter]
@@ -10290,7 +10389,12 @@ class AdminTeacherViewSet(viewsets.ReadOnlyModelViewSet):
 class AdminParentViewSet(viewsets.ReadOnlyModelViewSet):
 	"""Admin-only read access to all parents with summary fields."""
 
-	queryset = Parent.objects.select_related('profile').prefetch_related('wards').all().order_by('profile__name')
+	queryset = (
+		Parent.objects
+		.select_related('profile')
+		.annotate(linked_students_count=Count('wards', distinct=True))
+		.order_by('profile__name')
+	)
 	serializer_class = AdminParentListSerializer
 	permission_classes = [permissions.IsAuthenticated, IsAdminRole, permissions.IsAdminUser]
 	filter_backends = [filters.SearchFilter, filters.OrderingFilter]

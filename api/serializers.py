@@ -461,16 +461,16 @@ class AdminStudentListSerializer(serializers.Serializer):
 
     def to_representation(self, instance):
         # instance is a Student object
-        from accounts.models import Parent
-
         profile = getattr(instance, "profile", None)
         school = getattr(instance, "school", None)
 
-        # Collect parent names from the guardians relationship
-        parent_qs = getattr(instance, "guardians", None)
+        # The admin queryset prefetches guardians with their profiles. Calling
+        # select_related() here would create a fresh query for every student and
+        # bypass that prefetch cache.
+        parent_manager = getattr(instance, "guardians", None)
         parent_names = []
-        if parent_qs is not None:
-            for parent in parent_qs.select_related("profile").all():
+        if parent_manager is not None:
+            for parent in parent_manager.all():
                 parent_profile = getattr(parent, "profile", None)
                 if parent_profile and getattr(parent_profile, "name", None):
                     parent_names.append(parent_profile.name)
@@ -504,8 +504,10 @@ class AdminParentListSerializer(serializers.Serializer):
         user_status = "DELETED" if getattr(profile, "deleted", False) else (
             "ACTIVE" if getattr(profile, "is_active", False) else "INACTIVE"
         )
-        students_qs = getattr(instance, "wards", None)
-        count = students_qs.count() if students_qs is not None else 0
+        count = getattr(instance, "linked_students_count", None)
+        if count is None:
+            students_manager = getattr(instance, "wards", None)
+            count = students_manager.count() if students_manager is not None else 0
         linked_label = f"{count} Student" if count == 1 else f"{count} Students"
         return {
             "name": getattr(profile, "name", None) if profile else None,

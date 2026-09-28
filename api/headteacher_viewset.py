@@ -177,12 +177,10 @@ class HeadTeacherViewSet(TeacherViewSet):
 		if len(stories) != len(set(story_ids)):
 			return Response({"detail": "One or more stories are outside your school scope."}, status=403)
 
-		updated = 0
-		for story in stories:
-			if not story.is_published:
-				story.is_published = True
-				story.save(update_fields=['is_published', 'updated_at'])
-				updated += 1
+		updated = Story.objects.filter(id__in=story_ids, is_published=False).update(
+			is_published=True,
+			updated_at=timezone.now(),
+		)
 
 		return Response({
 			"detail": "Stories published.",
@@ -366,7 +364,7 @@ class HeadTeacherViewSet(TeacherViewSet):
 		if deny:
 			return deny
 		school_id = request.user.teacher.school_id
-		qs = Subject.objects.filter(teachers__school_id=school_id).distinct().order_by('name')
+		qs = Subject.objects.filter(teachers__school_id=school_id).prefetch_related('teachers').distinct().order_by('name')
 		return _paginated_serializer_response(request, qs, SubjectSerializer)
 
 	@extend_schema(description="List topics for subjects taught in the head teacher's school.", responses={200: TopicSerializer(many=True)})
@@ -432,7 +430,7 @@ class HeadTeacherViewSet(TeacherViewSet):
 		if deny:
 			return deny
 		teacher_ids = self._school_teacher_ids(request)
-		qs = LessonAssessment.objects.filter(given_by_id__in=teacher_ids).select_related('lesson').order_by('-created_at')
+		qs = LessonAssessment.objects.filter(given_by_id__in=teacher_ids).select_related('lesson__subject').order_by('-created_at')
 		if request.query_params.get('ai_only') in {'1', 'true', 'True'}:
 			qs = qs.filter(ai_recommended=True)
 		if request.query_params.get('targeted_only') in {'1', 'true', 'True'}:

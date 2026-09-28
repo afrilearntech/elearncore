@@ -1,7 +1,9 @@
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.core.cache import cache
 from django.core.management import call_command
+from django.db import connection
 from django.test import TestCase
+from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 from datetime import timedelta
 from io import StringIO
@@ -73,6 +75,128 @@ class AdminGeographyBulkUploadTests(TestCase):
 		resp = self.client.post('/api-v1/admin/schools/bulk-create/', data={'file': upload}, format='multipart')
 		self.assertEqual(resp.status_code, 200)
 		self.assertEqual(School.objects.filter(name='Afrilearn Academy', district=district).count(), 1)
+
+
+class QueryOptimizationRegressionTests(TestCase):
+	def setUp(self):
+		cache.clear()
+		self.client = APIClient()
+		self.admin = User.objects.create_superuser(
+			phone='231770880000',
+			name='Performance Admin',
+			email='performance-admin@example.com',
+			password='pass',
+		)
+		self.county = County.objects.create(name='Performance County', status=StatusEnum.APPROVED.value)
+		self.district = District.objects.create(
+			county=self.county,
+			name='Performance District',
+			status=StatusEnum.APPROVED.value,
+		)
+		self.school = School.objects.create(
+			district=self.district,
+			name='Performance School',
+			status=StatusEnum.APPROVED.value,
+		)
+		self.teacher_user = User.objects.create_user(
+			phone='231770880001',
+			name='Performance Teacher',
+			email='performance-teacher@example.com',
+			password='pass',
+			role=UserRole.TEACHER.value,
+		)
+		self.teacher = Teacher.objects.create(
+			profile=self.teacher_user,
+			school=self.school,
+			status=StatusEnum.APPROVED.value,
+		)
+
+	def _create_student_with_parent(self, suffix):
+		student_user = User.objects.create_user(
+			phone=f'231770881{suffix:03d}',
+			name=f'Performance Student {suffix}',
+			email=f'performance-student-{suffix}@example.com',
+			password='pass',
+			role=UserRole.STUDENT.value,
+		)
+		student = Student.objects.create(
+			profile=student_user,
+			school=self.school,
+			grade=StudentLevel.GRADE3.value,
+			status=StatusEnum.APPROVED.value,
+		)
+		parent_user = User.objects.create_user(
+			phone=f'231770882{suffix:03d}',
+			name=f'Performance Parent {suffix}',
+			email=f'performance-parent-{suffix}@example.com',
+			password='pass',
+			role=UserRole.PARENT.value,
+		)
+		parent = Parent.objects.create(profile=parent_user)
+		parent.wards.add(student)
+		return student, parent
+
+	def _query_count(self, url):
+		with CaptureQueriesContext(connection) as captured:
+			response = self.client.get(url)
+		self.assertEqual(response.status_code, 200)
+		return len(captured), response
+
+	def test_admin_student_and_parent_lists_have_constant_query_counts(self):
+		self.client.force_authenticate(user=self.admin)
+		self._create_student_with_parent(1)
+		student_queries_before, _ = self._query_count('/api-v1/admin/students/?page_size=100')
+		parent_queries_before, _ = self._query_count('/api-v1/admin/parents/?page_size=100')
+
+		for suffix in range(2, 8):
+			self._create_student_with_parent(suffix)
+
+		student_queries_after, student_response = self._query_count('/api-v1/admin/students/?page_size=100')
+		parent_queries_after, parent_response = self._query_count('/api-v1/admin/parents/?page_size=100')
+		self.assertEqual(student_queries_after, student_queries_before)
+		self.assertEqual(parent_queries_after, parent_queries_before)
+		self.assertEqual(len(response_items(student_response)), 7)
+		self.assertEqual(len(response_items(parent_response)), 7)
+
+	def test_admin_dashboard_uses_bounded_aggregate_queries(self):
+		self.client.force_authenticate(user=self.admin)
+		student, _ = self._create_student_with_parent(10)
+		assessment = GeneralAssessment.objects.create(
+			title='Performance Assessment',
+			given_by=self.teacher,
+			marks=10,
+			grade=student.grade,
+			status=StatusEnum.APPROVED.value,
+		)
+		GeneralAssessmentGrade.objects.create(assessment=assessment, student=student, score=8)
+
+		query_count, response = self._query_count('/api-v1/admin/dashboard/')
+		self.assertLessEqual(query_count, 12)
+		self.assertEqual(len(response.json()['lessons_chart']['points']), 12)
+		self.assertEqual(response.json()['high_learners'][0]['student_id'], student.id)
+
+	def test_relation_heavy_lists_have_constant_query_counts(self):
+		self._create_student_with_parent(20)
+		self.client.force_authenticate(user=self.teacher_user)
+		student_queries_before, _ = self._query_count('/api-v1/teacher/students/?page_size=100')
+
+		for suffix in range(21, 26):
+			self._create_student_with_parent(suffix)
+		student_queries_after, response = self._query_count('/api-v1/teacher/students/?page_size=100')
+		self.assertEqual(student_queries_after, student_queries_before)
+		self.assertEqual(response_items(response)[0]['school']['county_name'], self.county.name)
+
+		self.client.force_authenticate(user=self.admin)
+		for suffix in range(3):
+			subject = Subject.objects.create(
+				name=f'Performance Subject {suffix}',
+				grade=StudentLevel.GRADE3.value,
+				status=StatusEnum.APPROVED.value,
+			)
+			subject.teachers.add(self.teacher)
+		subject_queries, response = self._query_count('/api-v1/content/subjects/?page_size=100')
+		self.assertLessEqual(subject_queries, 3)
+		self.assertTrue(all(item['teacher_count'] == 1 for item in response_items(response)))
 
 
 class SyncEndpointsTests(TestCase):
