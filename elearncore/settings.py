@@ -363,10 +363,12 @@ ANYMAIL = {'RESEND_API_KEY': RESEND_API_KEY}
 EMAIL_BACKEND = os.getenv('EMAIL_BACKEND') or (
     'anymail.backends.resend.EmailBackend'
     if RESEND_API_KEY
-    else 'django.core.mail.backends.console.EmailBackend'
+    else (
+        'django.core.mail.backends.dummy.EmailBackend'
+        if IS_PRODUCTION
+        else 'django.core.mail.backends.console.EmailBackend'
+    )
 )
-if IS_PRODUCTION and not RESEND_API_KEY:
-    raise ImproperlyConfigured('RESEND_API_KEY is required in production.')
 DEFAULT_FROM_EMAIL = os.getenv(
     'DEFAULT_FROM_EMAIL',
     os.getenv(
