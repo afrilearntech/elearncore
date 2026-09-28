@@ -15,7 +15,8 @@ class AIRecommendation(TimestampedModel):
 	message = models.CharField(max_length=500)
 
 	def __str__(self) -> str:
-		return f"Rec for {self.student.user.name} -> {self.lesson.title}"
+		student_name = getattr(getattr(self.student, 'profile', None), 'name', None) or f"Student {self.student_id}"
+		return f"Rec for {student_name} -> {self.lesson.title}"
 
 
 class AIAbuseReport(TimestampedModel):
