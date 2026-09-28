@@ -1,0 +1,9 @@
+
+# Create least-privilege runtime directories. Never expose assets directly through Nginx.
+sudo install -d -o elearn -g elearn /srv/elearncore/staticfiles /srv/elearncore/assets
+sudo chmod 0750 /srv/elearncore/assets
+
+# Enable the application service after validating /etc/elearncore.env.
+sudo systemctl daemon-reload
+sudo systemctl enable --now elearncore-daphne
+sudo systemctl status elearncore-daphne --no-pager

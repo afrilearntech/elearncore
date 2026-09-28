@@ -1,0 +1,27 @@
+# Systemd service for Daphne serving elearncore ASGI app
+
+[Unit]
+Description=Daphne server for elearncore (ASGI + WebSockets)
+After=network.target
+
+[Service]
+User=elearn
+Group=elearn
+WorkingDirectory=/srv/elearncore
+Environment="DJANGO_SETTINGS_MODULE=elearncore.settings"
+Environment="PYTHONUNBUFFERED=1"
+EnvironmentFile=/etc/elearncore.env
+
+# Path to your virtualenv's python and daphne
+ExecStart=/srv/elearncore/.venv/bin/daphne -b 127.0.0.1 -p 8001 elearncore.asgi:application
+
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/srv/elearncore/staticfiles /srv/elearncore/assets
+
+[Install]
+WantedBy=multi-user.target

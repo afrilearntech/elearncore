@@ -1,0 +1,28 @@
+# Example alternative to the Daphne service.
+# Install as /etc/systemd/system/elearncore-uvicorn.service.
+
+[Unit]
+Description=eLearn Core ASGI (uvicorn) service
+After=network.target
+
+[Service]
+User=elearn
+Group=elearn
+WorkingDirectory=/srv/elearncore
+EnvironmentFile=/etc/elearncore.env
+ExecStart=/srv/elearncore/.venv/bin/python -m uvicorn elearncore.asgi:application \
+  --host 127.0.0.1 \
+  --port 8001 \
+  --proxy-headers \
+  --forwarded-allow-ips="*" \
+  --workers 4
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/srv/elearncore/staticfiles /srv/elearncore/assets
+
+[Install]
+WantedBy=multi-user.target
