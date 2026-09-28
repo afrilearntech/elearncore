@@ -1640,7 +1640,14 @@ class ParentViewSet(viewsets.ViewSet):
 		# Below 60 F
 		return "F", "Fail"
 
-	def _child_ranking_context(self, child: Student, *, timeframe: str, window: int = 2) -> dict:
+	def _child_ranking_context(
+		self,
+		child: Student,
+		*,
+		timeframe: str,
+		window: int = 2,
+		leaderboard_payload: dict | None = None,
+	) -> dict:
 		child_profile = getattr(child, 'profile', None)
 		child_payload = {
 			'student_db_id': child.id,
@@ -1667,18 +1674,20 @@ class ParentViewSet(viewsets.ViewSet):
 			'school_name': getattr(school, 'name', None),
 			'grade': child.grade,
 		}
-		qs = Student.objects.filter(
-			school_id=child.school_id,
-			grade=child.grade,
-			status=StatusEnum.APPROVED.value,
-		)
-		total_students = qs.count()
-		payload = _build_student_leaderboard_response(
-			qs,
-			scope=scope,
-			limit=total_students,
-			timeframe=timeframe,
-		)
+		if leaderboard_payload is None:
+			qs = Student.objects.filter(
+				school_id=child.school_id,
+				grade=child.grade,
+				status=StatusEnum.APPROVED.value,
+			)
+			leaderboard_payload = _build_student_leaderboard_response(
+				qs,
+				scope=scope,
+				limit=2_147_483_647,
+				timeframe=timeframe,
+			)
+		payload = leaderboard_payload
+		total_students = payload.get('total_students', 0)
 		entries = payload.get('leaderboard', [])
 
 		child_index = None
@@ -1732,7 +1741,35 @@ class ParentViewSet(viewsets.ViewSet):
 			return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
 
 		children = list(parent.wards.select_related('profile', 'school__district__county').all())
-		contexts = [self._child_ranking_context(child, timeframe=timeframe) for child in children]
+		cohort_payloads = {}
+		contexts = []
+		for child in children:
+			cohort_key = (child.school_id, child.grade)
+			payload = None
+			if child.school_id and child.grade:
+				payload = cohort_payloads.get(cohort_key)
+				if payload is None:
+					payload = _build_student_leaderboard_response(
+						Student.objects.filter(
+							school_id=child.school_id,
+							grade=child.grade,
+							status=StatusEnum.APPROVED.value,
+						),
+						scope={
+							'kind': 'school_grade',
+							'school_id': child.school_id,
+							'school_name': getattr(child.school, 'name', None),
+							'grade': child.grade,
+						},
+						limit=2_147_483_647,
+						timeframe=timeframe,
+					)
+					cohort_payloads[cohort_key] = payload
+			contexts.append(self._child_ranking_context(
+				child,
+				timeframe=timeframe,
+				leaderboard_payload=payload,
+			))
 		return Response({'timeframe': timeframe, 'children': contexts})
 
 	@extend_schema(
@@ -1796,7 +1833,7 @@ class ParentViewSet(viewsets.ViewSet):
 
 		# Children list
 		children_payload = []
-		students = parent.wards.select_related('profile', 'school').all()
+		students = list(parent.wards.select_related('profile', 'school').all())
 		for stu in students:
 			children_payload.append({
 				"name": getattr(stu.profile, 'name', None),
@@ -1812,21 +1849,23 @@ class ParentViewSet(viewsets.ViewSet):
 		for stu in students:
 			student_map[stu.id] = (getattr(stu.profile, 'name', None), stu.student_id)
 
-			# General assessment grades with subject via assessment.title/grade scope is not subject-specific.
-			# For now we won't include these in subject-based overview.
-
-			# Lesson assessment grades -> subject via lesson.subject
-			lesson_grades = (
-				LessonAssessmentGrade.objects
-				.select_related('lesson_assessment__lesson__subject')
-				.filter(student=stu)
+		# General assessments are not subject-specific, so the overview uses one
+		# batched lesson-grade query for all children.
+		lesson_grades = (
+			LessonAssessmentGrade.objects
+			.select_related('lesson_assessment__lesson__subject')
+			.filter(student_id__in=student_map)
+		)
+		for grade_record in lesson_grades:
+			subject = getattr(
+				getattr(getattr(grade_record.lesson_assessment, 'lesson', None), 'subject', None),
+				'name',
+				None,
 			)
-			for g in lesson_grades:
-				subject = getattr(getattr(getattr(g.lesson_assessment, 'lesson', None), 'subject', None), 'name', None)
-				if not subject:
-					continue
-				key = (stu.id, subject)
-				grades_by_key.setdefault(key, []).append(float(g.score))
+			if not subject:
+				continue
+			key = (grade_record.student_id, subject)
+			grades_by_key.setdefault(key, []).append(float(grade_record.score))
 
 		grades_overview = []
 		for (student_id, subject_name), scores in grades_by_key.items():
@@ -2042,7 +2081,7 @@ class ParentViewSet(viewsets.ViewSet):
 					"due_date": la.due_at,
 					"ai_recommended": bool(getattr(la, 'ai_recommended', False)),
 					"is_targeted": bool(getattr(la, 'is_targeted', False)),
-					"target_student_id": getattr(la.target_student, 'id', None),
+					"target_student_id": la.target_student_id,
 				})
 
 		# General assessments: not subject-specific in the model; we keep subject as None
@@ -2083,7 +2122,7 @@ class ParentViewSet(viewsets.ViewSet):
 					"due_date": ga.due_at,
 					"ai_recommended": bool(getattr(ga, 'ai_recommended', False)),
 					"is_targeted": bool(getattr(ga, 'is_targeted', False)),
-					"target_student_id": getattr(ga.target_student, 'id', None),
+					"target_student_id": ga.target_student_id,
 				})
 
 		return Response(_paginate_payload(
@@ -3105,7 +3144,7 @@ class ContentViewSet(viewsets.ViewSet):
 				"given_by_id": ga.given_by_id,
 				"ai_recommended": bool(getattr(ga, 'ai_recommended', False)),
 				"is_targeted": bool(getattr(ga, 'is_targeted', False)),
-				"target_student_id": getattr(ga.target_student, 'id', None),
+				"target_student_id": ga.target_student_id,
 			}
 			for ga in general_qs
 		]
@@ -3126,7 +3165,7 @@ class ContentViewSet(viewsets.ViewSet):
 				"given_by_id": la.given_by_id,
 				"ai_recommended": bool(getattr(la, 'ai_recommended', False)),
 				"is_targeted": bool(getattr(la, 'is_targeted', False)),
-				"target_student_id": getattr(la.target_student, 'id', None),
+				"target_student_id": la.target_student_id,
 			}
 			for la in lesson_qs
 		]
@@ -10002,8 +10041,13 @@ class AdminSystemReportViewSet(viewsets.ViewSet):
 
 		date_filter = {"created_at__gte": period_start, "created_at__lt": period_end}
 
-		# Top summary cards
-		users_created = User.objects.filter(**date_filter).count()
+		# Aggregate status/role breakdowns once per table.
+		user_counts = User.objects.filter(**date_filter).aggregate(
+			total=Count('pk'),
+			content_creators=Count('pk', filter=Q(role=UserRole.CONTENTCREATOR.value)),
+			content_validators=Count('pk', filter=Q(role=UserRole.CONTENTVALIDATOR.value)),
+		)
+		users_created = user_counts['total']
 		students_created = Student.objects.filter(**date_filter).count()
 		teachers_created = Teacher.objects.filter(**date_filter).count()
 		schools_created = School.objects.filter(**date_filter).count()
@@ -10017,20 +10061,29 @@ class AdminSystemReportViewSet(viewsets.ViewSet):
 
 		# Detailed row (one row for the selected period)
 		parents_created = Parent.objects.filter(**date_filter).count()
-		subjects_created = Subject.objects.filter(**date_filter).count()
-		lessons_created = LessonResource.objects.filter(**date_filter).count()
+		subject_counts = Subject.objects.filter(**date_filter).aggregate(
+			total=Count('pk'),
+			approved=Count('pk', filter=Q(status=StatusEnum.APPROVED.value)),
+			pending=Count('pk', filter=Q(status=StatusEnum.PENDING.value)),
+		)
+		lesson_counts = LessonResource.objects.filter(**date_filter).aggregate(
+			total=Count('pk'),
+			approved=Count('pk', filter=Q(status=StatusEnum.APPROVED.value)),
+			pending=Count('pk', filter=Q(status=StatusEnum.PENDING.value)),
+		)
+		subjects_created = subject_counts['total']
+		lessons_created = lesson_counts['total']
 
-		from content.models import AssessmentSolution
-
-		submissions_total = AssessmentSolution.objects.filter(
+		submission_counts = AssessmentSolution.objects.filter(
 			submitted_at__gte=period_start,
 			submitted_at__lt=period_end,
-		).count()
-		submissions_graded = AssessmentSolution.objects.filter(
-			submitted_at__gte=period_start,
-			submitted_at__lt=period_end,
-			grade__isnull=False,
-		).count()
+		).aggregate(
+			total=Count('pk'),
+			graded=Count('pk', filter=Q(grade__isnull=False)),
+			pending=Count('pk', filter=Q(grade__isnull=True)),
+		)
+		submissions_total = submission_counts['total']
+		submissions_graded = submission_counts['graded']
 
 		detailed = [
 			{
@@ -10049,37 +10102,16 @@ class AdminSystemReportViewSet(viewsets.ViewSet):
 
 		# Content statistics for the period
 		content_stats = {
-			"content_creators": User.objects.filter(
-				role=UserRole.CONTENTCREATOR.value,
-				**date_filter,
-			).count(),
-			"content_validators": User.objects.filter(
-				role=UserRole.CONTENTVALIDATOR.value,
-				**date_filter,
-			).count(),
-			"approved_subjects": Subject.objects.filter(
-				status=StatusEnum.APPROVED.value,
-				**date_filter,
-			).count(),
-			"pending_subjects": Subject.objects.filter(
-				status=StatusEnum.PENDING.value,
-				**date_filter,
-			).count(),
-			"approved_lessons": LessonResource.objects.filter(
-				status=StatusEnum.APPROVED.value,
-				**date_filter,
-			).count(),
-			"pending_lessons": LessonResource.objects.filter(
-				status=StatusEnum.PENDING.value,
-				**date_filter,
-			).count(),
+			"content_creators": user_counts['content_creators'],
+			"content_validators": user_counts['content_validators'],
+			"approved_subjects": subject_counts['approved'],
+			"pending_subjects": subject_counts['pending'],
+			"approved_lessons": lesson_counts['approved'],
+			"pending_lessons": lesson_counts['pending'],
 			"total_games": GameModel.objects.filter(**date_filter).count(),
 		}
 
 		# Activity statistics for the period
-		from content.models import GeneralAssessment, LessonAssessment
-		from content.models import Activity as ContentActivity
-
 		new_students = students_created
 		new_teachers = teachers_created
 		new_parents = parents_created
@@ -10094,11 +10126,7 @@ class AdminSystemReportViewSet(viewsets.ViewSet):
 			+ LessonAssessment.objects.filter(**date_filter).count()
 		)
 
-		pending_submissions = AssessmentSolution.objects.filter(
-			submitted_at__gte=period_start,
-			submitted_at__lt=period_end,
-			grade__isnull=True,
-		).count()
+		pending_submissions = submission_counts['pending']
 
 		activity_stats = {
 			"new_users": users_created,

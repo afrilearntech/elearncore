@@ -198,6 +198,71 @@ class QueryOptimizationRegressionTests(TestCase):
 		self.assertLessEqual(subject_queries, 3)
 		self.assertTrue(all(item['teacher_count'] == 1 for item in response_items(response)))
 
+	def test_parent_dashboard_and_leaderboard_batch_children(self):
+		parent_user = User.objects.create_user(
+			phone='231770883000',
+			name='Performance Family',
+			email='performance-family@example.com',
+			password='pass',
+			role=UserRole.PARENT.value,
+		)
+		parent = Parent.objects.create(profile=parent_user)
+		subject = Subject.objects.create(
+			name='Performance Family Subject',
+			grade=StudentLevel.GRADE3.value,
+			status=StatusEnum.APPROVED.value,
+		)
+		lesson = LessonResource.objects.create(
+			subject=subject,
+			title='Performance Family Lesson',
+			type=ContentType.VIDEO.value,
+			status=StatusEnum.APPROVED.value,
+			resource='lesson_resources/performance-family.mp4',
+		)
+		assessment = LessonAssessment.objects.create(
+			lesson=lesson,
+			given_by=self.teacher,
+			title='Performance Family Quiz',
+			marks=10,
+			status=StatusEnum.APPROVED.value,
+		)
+		student, _ = self._create_student_with_parent(30)
+		parent.wards.add(student)
+		LessonAssessmentGrade.objects.create(
+			lesson_assessment=assessment,
+			student=student,
+			score=8,
+		)
+
+		self.client.force_authenticate(user=parent_user)
+		dashboard_queries_before, _ = self._query_count('/api-v1/parent/dashboard/')
+		leaderboard_queries_before, _ = self._query_count('/api-v1/parent/leaderboard/')
+
+		for suffix in range(31, 36):
+			student, _ = self._create_student_with_parent(suffix)
+			parent.wards.add(student)
+			LessonAssessmentGrade.objects.create(
+				lesson_assessment=assessment,
+				student=student,
+				score=8,
+			)
+
+		dashboard_queries_after, dashboard_response = self._query_count('/api-v1/parent/dashboard/')
+		leaderboard_queries_after, leaderboard_response = self._query_count('/api-v1/parent/leaderboard/')
+		self.assertEqual(dashboard_queries_after, dashboard_queries_before)
+		self.assertEqual(leaderboard_queries_after, leaderboard_queries_before)
+		self.assertEqual(len(dashboard_response.json()['children']), 6)
+		self.assertEqual(len(leaderboard_response.json()['children']), 6)
+
+	def test_admin_system_report_uses_bounded_aggregate_queries(self):
+		self.client.force_authenticate(user=self.admin)
+		now = timezone.now()
+		query_count, response = self._query_count(
+			f'/api-v1/admin/system-reports/?year={now.year}&month={now.month}'
+		)
+		self.assertLessEqual(query_count, 12)
+		self.assertEqual(response.json()['period'], f'{now.year:04d}-{now.month:02d}')
+
 
 class SyncEndpointsTests(TestCase):
 	def setUp(self):
