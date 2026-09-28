@@ -1,25 +1,33 @@
-import array
-
+import logging
 import requests
 
 from elearncore import settings
 
-import array
-def send_sms(message: str, recipients: array.array, sender: str = settings.SENDER_ID):
-    '''Sends an SMS to the specified recipients'''
+logger = logging.getLogger(__name__)
+
+
+def send_sms(message: str, recipients, sender: str = settings.SENDER_ID):
+    """Send an SMS with bounded network time and explicit error handling."""
+    if not settings.ARKESEL_API_KEY:
+        raise RuntimeError("ARKESEL_SMS_API_KEY is not configured")
     header = {"api-key": settings.ARKESEL_API_KEY, 'Content-Type': 'application/json',
               'Accept': 'application/json'}
-    SEND_SMS_URL = "https://sms.arkesel.com/api/v2/sms/send"
+    send_sms_url = "https://sms.arkesel.com/api/v2/sms/send"
     payload = {
         "sender": sender,
         "message": message,
-        "recipients": recipients
-    } 
+        "recipients": list(recipients),
+    }
+    response = requests.post(
+        send_sms_url,
+        headers=header,
+        json=payload,
+        timeout=(5, 15),
+    )
+    response.raise_for_status()
     try:
-        response = requests.post(SEND_SMS_URL, headers=header, json=payload)
-    except Exception as e:
-        print(f"Error: {e}")
-        return False
-    else:
-        print(response.json())
-        return response.json()
+        result = response.json()
+    except ValueError as exc:
+        raise RuntimeError("SMS provider returned invalid JSON") from exc
+    logger.info("SMS accepted by provider for %d recipient(s)", len(payload["recipients"]))
+    return result
