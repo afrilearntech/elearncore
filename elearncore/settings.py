@@ -204,6 +204,14 @@ MEDIA_ROOT = BASE_DIR / "assets"
 ENVIRONMENT = os.getenv('ENVIRONMENT', 'LOCAL').upper()
 if os.getenv('DO_SPACES_BUCKET') and IS_PRODUCTION:
     DEFAULT_FILE_STORAGE = 'storages.backends.s3boto3.S3Boto3Storage'
+    STORAGES = {
+        'default': {
+            'BACKEND': 'storages.backends.s3.S3Storage',
+        },
+        'staticfiles': {
+            'BACKEND': 'django.contrib.staticfiles.storage.StaticFilesStorage',
+        },
+    }
 
     AWS_ACCESS_KEY_ID = os.getenv('DO_SPACES_KEY') or os.getenv('AWS_ACCESS_KEY_ID')
     AWS_SECRET_ACCESS_KEY = os.getenv('DO_SPACES_SECRET') or os.getenv('AWS_SECRET_ACCESS_KEY')
