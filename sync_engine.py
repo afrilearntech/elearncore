@@ -533,6 +533,33 @@ def perform_upsync(*, session: requests.Session, state: dict, media_root: Path) 
         cursors[resource] = cutoff_iso
         save_state(state)
 
+    def _apply_canonical_uuid_mappings(results) -> None:
+        mappings = {
+            str(item.get("client_sync_uuid")): str(item.get("server_sync_uuid"))
+            for item in (results or [])
+            if isinstance(item, dict)
+            and item.get("status") == "ok"
+            and item.get("client_sync_uuid")
+            and item.get("server_sync_uuid")
+            and item.get("client_sync_uuid") != item.get("server_sync_uuid")
+        }
+        if not mappings:
+            return
+        users_by_uuid = {
+            str(user.sync_uuid): user
+            for user in User.objects.filter(sync_uuid__in=mappings)
+        }
+        for client_uuid, server_uuid in mappings.items():
+            user = users_by_uuid.get(client_uuid)
+            if user is None:
+                continue
+            try:
+                user.sync_uuid = server_uuid
+                user.save(update_fields=["sync_uuid", "updated_at"])
+            except Exception:
+                # Best-effort; if this fails, the next run will retry.
+                pass
+
     log(f"Upsync cutoff: {cutoff_iso}")
 
     # --- students (identity prerequisite)
@@ -586,39 +613,13 @@ def perform_upsync(*, session: requests.Session, state: dict, media_root: Path) 
             if len(batch) >= batch_size:
                 resp = _post_batch("students", batch)
                 student_errors += int(resp.get("errors") or 0)
-                # Apply canonical UUID mappings.
-                for r in (resp.get("results") or []):
-                    if not isinstance(r, dict) or r.get("status") != "ok":
-                        continue
-                    c_uuid = r.get("client_sync_uuid")
-                    s_uuid = r.get("server_sync_uuid")
-                    if c_uuid and s_uuid and c_uuid != s_uuid:
-                        try:
-                            user = User.objects.filter(sync_uuid=c_uuid).first()
-                            if user is not None:
-                                user.sync_uuid = s_uuid
-                                user.save(update_fields=["sync_uuid", "updated_at"])
-                        except Exception:
-                            # Best-effort; if this fails, the next run will retry.
-                            pass
+                _apply_canonical_uuid_mappings(resp.get("results"))
                 batch = []
 
         if batch:
             resp = _post_batch("students", batch)
             student_errors += int(resp.get("errors") or 0)
-            for r in (resp.get("results") or []):
-                if not isinstance(r, dict) or r.get("status") != "ok":
-                    continue
-                c_uuid = r.get("client_sync_uuid")
-                s_uuid = r.get("server_sync_uuid")
-                if c_uuid and s_uuid and c_uuid != s_uuid:
-                    try:
-                        user = User.objects.filter(sync_uuid=c_uuid).first()
-                        if user is not None:
-                            user.sync_uuid = s_uuid
-                            user.save(update_fields=["sync_uuid", "updated_at"])
-                    except Exception:
-                        pass
+            _apply_canonical_uuid_mappings(resp.get("results"))
 
     except requests.exceptions.HTTPError as e:
         # Backwards-compatible: allow old servers without upsync routes.
@@ -1125,6 +1126,7 @@ def sync():
         Question,
         Option,
     )
+    from django.db.models import Q  # noqa: WPS433
     from django.utils.dateparse import parse_date, parse_datetime  # noqa: WPS433
     from django.utils import timezone  # noqa: WPS433
 
@@ -1295,6 +1297,22 @@ def sync():
                 skipped = 0
                 errors = 0
 
+                sync_uuids = {
+                    (it.get("sync_uuid") or "").strip()
+                    for it in items
+                    if isinstance(it, dict) and (it.get("sync_uuid") or "").strip()
+                }
+                phones = {
+                    (it.get("phone") or "").strip()
+                    for it in items
+                    if isinstance(it, dict) and (it.get("phone") or "").strip()
+                }
+                existing_users = list(
+                    User.objects.filter(Q(sync_uuid__in=sync_uuids) | Q(phone__in=phones))
+                )
+                users_by_uuid = {str(user.sync_uuid): user for user in existing_users}
+                users_by_phone = {user.phone: user for user in existing_users}
+
                 for it in items:
                     if not isinstance(it, dict):
                         continue
@@ -1308,14 +1326,18 @@ def sync():
                         continue
 
                     try:
-                        user = User.objects.filter(sync_uuid=sync_uuid).first()
+                        user = users_by_uuid.get(sync_uuid)
                         if user is None:
                             # Best-effort fallback by phone (handles legacy local rows).
-                            user = User.objects.filter(phone=phone).first()
+                            user = users_by_phone.get(phone)
 
                         if user is None:
                             user = User(sync_uuid=sync_uuid)
+                            old_uuid = None
+                            old_phone = None
                         else:
+                            old_uuid = str(getattr(user, "sync_uuid", "") or "")
+                            old_phone = getattr(user, "phone", None)
                             if str(getattr(user, "sync_uuid", "") or "") != sync_uuid:
                                 user.sync_uuid = sync_uuid
 
@@ -1336,6 +1358,12 @@ def sync():
                         user.is_superuser = False
 
                         user.save()
+                        if old_uuid and users_by_uuid.get(old_uuid) is user:
+                            users_by_uuid.pop(old_uuid, None)
+                        if old_phone and users_by_phone.get(old_phone) is user:
+                            users_by_phone.pop(old_phone, None)
+                        users_by_uuid[str(user.sync_uuid)] = user
+                        users_by_phone[user.phone] = user
                     except Exception as e:
                         errors += 1
                         log(f"student_users: failed upsert for {phone or sync_uuid}: {e}")
@@ -1353,6 +1381,32 @@ def sync():
                 skipped = 0
                 errors = 0
 
+                profile_sync_uuids = {
+                    (it.get("profile_sync_uuid") or "").strip()
+                    for it in items
+                    if isinstance(it, dict) and (it.get("profile_sync_uuid") or "").strip()
+                }
+                users_by_uuid = {
+                    str(user.sync_uuid): user
+                    for user in User.objects.filter(sync_uuid__in=profile_sync_uuids)
+                }
+                students_by_profile_id = {
+                    student.profile_id: student
+                    for student in Student.objects.filter(profile_id__in=[
+                        user.id for user in users_by_uuid.values()
+                    ])
+                }
+                incoming_student_ids = {
+                    (it.get("student_id") or "").strip()
+                    for it in items
+                    if isinstance(it, dict) and (it.get("student_id") or "").strip()
+                }
+                student_id_owners = dict(
+                    Student.objects
+                    .filter(student_id__in=incoming_student_ids)
+                    .values_list("student_id", "id")
+                )
+
                 for it in items:
                     if not isinstance(it, dict):
                         continue
@@ -1363,7 +1417,7 @@ def sync():
                         continue
 
                     try:
-                        user = User.objects.filter(sync_uuid=profile_sync_uuid).first()
+                        user = users_by_uuid.get(profile_sync_uuid)
                         if user is None:
                             skipped += 1
                             continue
@@ -1373,14 +1427,14 @@ def sync():
                         remote_max = _to_int(it.get("max_login_streak")) or 0
                         remote_last = _parse_date(it.get("last_login_activity_date"))
 
-                        student = Student.objects.filter(profile=user).first()
+                        student = students_by_profile_id.get(user.id)
 
                         if student is None:
                             incoming_student_id = (it.get("student_id") or "").strip() or None
                             if incoming_student_id:
                                 # `student_id` is derived from the DB PK (e.g., STU0000022) and
                                 # can collide across different offline boxes. Keep it best-effort.
-                                if Student.objects.filter(student_id=incoming_student_id).exists():
+                                if incoming_student_id in student_id_owners:
                                     log(
                                         f"students: dropping remote student_id {incoming_student_id} "
                                         "due to local collision"
@@ -1402,18 +1456,27 @@ def sync():
                                 status=(it.get("status") or "") or StatusEnum.APPROVED.value,
                                 moderation_comment=it.get("moderation_comment") or "",
                             )
+                            students_by_profile_id[user.id] = student
+                            if student.student_id:
+                                student_id_owners[student.student_id] = student.id
                             continue
 
                         # Canonical student profile fields.
                         incoming_student_id = (it.get("student_id") or "").strip() or None
+                        old_student_id_to_replace = None
+                        student_id_changed = False
                         if incoming_student_id and incoming_student_id != (getattr(student, "student_id", None) or None):
-                            if Student.objects.filter(student_id=incoming_student_id).exclude(pk=student.pk).exists():
+                            owner_id = student_id_owners.get(incoming_student_id)
+                            if owner_id is not None and owner_id != student.pk:
                                 log(
                                     f"students: ignoring remote student_id {incoming_student_id} "
                                     "due to local collision"
                                 )
                             else:
+                                old_student_id = getattr(student, "student_id", None)
                                 student.student_id = incoming_student_id
+                                old_student_id_to_replace = old_student_id
+                                student_id_changed = True
 
                         incoming_grade = it.get("grade")
                         if incoming_grade is not None:
@@ -1451,6 +1514,10 @@ def sync():
                                 student.max_login_streak = max(local_max, int(remote_max), student.current_login_streak)
 
                         student.save()
+                        if old_student_id_to_replace and student_id_owners.get(old_student_id_to_replace) == student.pk:
+                            student_id_owners.pop(old_student_id_to_replace, None)
+                        if student_id_changed:
+                            student_id_owners[incoming_student_id] = student.pk
                     except Exception as e:
                         errors += 1
                         log(f"students: failed upsert for {profile_sync_uuid}: {e}")

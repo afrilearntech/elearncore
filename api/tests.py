@@ -2892,6 +2892,53 @@ class UpSyncEndpointsTests(TestCase):
 		existing_user.refresh_from_db()
 		self.assertEqual(str(existing_user.sync_uuid), canonical_uuid)
 
+	def test_upsync_batches_prerequisite_reads(self):
+		student_items = [
+			{
+				'sync_uuid': str(uuid.uuid4()),
+				'phone': f'23177066600{index}',
+				'name': f'Batch Student {index}',
+				'school_id': self.school.id,
+				'grade': StudentLevel.GRADE3.value,
+			}
+			for index in range(5)
+		]
+		with CaptureQueriesContext(connection) as student_queries:
+			student_response = self.client.post(
+				'/api-v1/upsync/students/',
+				{'items': student_items},
+				format='json',
+			)
+		self.assertEqual(student_response.status_code, 200)
+		self.assertEqual(student_response.json()['created'], 5)
+		student_selects = [
+			query for query in student_queries
+			if query['sql'].lstrip().upper().startswith('SELECT')
+		]
+		self.assertLessEqual(len(student_selects), 2, [query['sql'] for query in student_selects])
+
+		solution_items = [
+			{
+				'student_sync_uuid': item['sync_uuid'],
+				'assessment_id': self.general_assessment.id,
+				'solution': f'Batch answer {index}',
+			}
+			for index, item in enumerate(student_items)
+		]
+		with CaptureQueriesContext(connection) as solution_queries:
+			solution_response = self.client.post(
+				'/api-v1/upsync/general-assessment-solutions/',
+				{'items': solution_items},
+				format='json',
+			)
+		self.assertEqual(solution_response.status_code, 200)
+		self.assertEqual(solution_response.json()['created'], 5)
+		solution_selects = [
+			query for query in solution_queries
+			if query['sql'].lstrip().upper().startswith('SELECT')
+		]
+		self.assertLessEqual(len(solution_selects), 3)
+
 	def test_upsync_taken_lessons_is_idempotent_and_awards_video_points(self):
 		student_user = User.objects.create_user(
 			phone='231770333333',

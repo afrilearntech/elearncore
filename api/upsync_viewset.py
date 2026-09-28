@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 
 from django.db import transaction
-from django.db.models import F
+from django.db.models import F, Q
 from django.utils import timezone
 from rest_framework import serializers, status, viewsets
 from rest_framework.decorators import action
@@ -105,8 +105,62 @@ class UpSyncViewSet(viewsets.ViewSet):
             raise ValueError('student not found in sync service school')
         return student
 
-    def _eligible_general_assessment(self, student, assessment_id):
-        assessment = GeneralAssessment.objects.filter(pk=assessment_id, status=StatusEnum.APPROVED.value).first()
+    def _scoped_student_index(self, request, items):
+        sync_uuids = {
+            item.get('student_sync_uuid')
+            for item in items
+            if item.get('student_sync_uuid') is not None
+        }
+        users = (
+            User.objects
+            .filter(sync_uuid__in=sync_uuids, student__school_id=request.user.sync_school_id)
+            .select_related('student')
+        )
+        return {user.sync_uuid: user.student for user in users}
+
+    @staticmethod
+    def _student_from_index(student_index, sync_uuid):
+        student = student_index.get(sync_uuid)
+        if student is None:
+            raise ValueError('student not found in sync service school')
+        return student
+
+    @staticmethod
+    def _general_assessment_index(items):
+        assessment_ids = {
+            item.get('assessment_id')
+            for item in items
+            if item.get('assessment_id') is not None
+        }
+        return GeneralAssessment.objects.filter(
+            pk__in=assessment_ids,
+            status=StatusEnum.APPROVED.value,
+        ).in_bulk()
+
+    @staticmethod
+    def _lesson_assessment_index(items):
+        assessment_ids = {
+            item.get('lesson_assessment_id')
+            for item in items
+            if item.get('lesson_assessment_id') is not None
+        }
+        return (
+            LessonAssessment.objects
+            .select_related('lesson__subject')
+            .filter(
+                pk__in=assessment_ids,
+                status=StatusEnum.APPROVED.value,
+                lesson__status=StatusEnum.APPROVED.value,
+                lesson__subject__status=StatusEnum.APPROVED.value,
+            )
+            .in_bulk()
+        )
+
+    def _eligible_general_assessment(self, student, assessment_id, *, assessment_index=None):
+        if assessment_index is None:
+            assessment = GeneralAssessment.objects.filter(pk=assessment_id, status=StatusEnum.APPROVED.value).first()
+        else:
+            assessment = assessment_index.get(assessment_id)
         if assessment is None:
             raise ValueError('approved assessment not found')
         if assessment.grade and assessment.grade != student.grade:
@@ -115,25 +169,41 @@ class UpSyncViewSet(viewsets.ViewSet):
             raise ValueError('assessment targets a different student')
         return assessment
 
-    def _eligible_lesson_assessment(self, student, assessment_id):
-        assessment = (
-            LessonAssessment.objects
-            .select_related('lesson__subject')
-            .filter(
-                pk=assessment_id,
-                status=StatusEnum.APPROVED.value,
-                lesson__status=StatusEnum.APPROVED.value,
-                lesson__subject__status=StatusEnum.APPROVED.value,
-                lesson__subject__grade=student.grade,
+    def _eligible_lesson_assessment(
+        self,
+        student,
+        assessment_id,
+        *,
+        assessment_index=None,
+        progression_cache=None,
+    ):
+        if assessment_index is None:
+            assessment = (
+                LessonAssessment.objects
+                .select_related('lesson__subject')
+                .filter(
+                    pk=assessment_id,
+                    status=StatusEnum.APPROVED.value,
+                    lesson__status=StatusEnum.APPROVED.value,
+                    lesson__subject__status=StatusEnum.APPROVED.value,
+                )
+                .first()
             )
-            .first()
-        )
-        if assessment is None:
+        else:
+            assessment = assessment_index.get(assessment_id)
+        if assessment is None or assessment.lesson.subject.grade != student.grade:
             raise ValueError('approved lesson assessment not found for student grade')
         if assessment.is_targeted and assessment.target_student_id != student.id:
             raise ValueError('assessment targets a different student')
         from .viewsets import _build_student_lesson_progression
-        state = _build_student_lesson_progression(student)['states'].get(assessment.lesson_id)
+        if progression_cache is None:
+            progression = _build_student_lesson_progression(student)
+        else:
+            progression = progression_cache.get(student.id)
+            if progression is None:
+                progression = _build_student_lesson_progression(student)
+                progression_cache[student.id] = progression
+        state = progression['states'].get(assessment.lesson_id)
         if not state or state['is_locked']:
             raise ValueError('assessment lesson is locked for student')
         return assessment
@@ -151,6 +221,19 @@ class UpSyncViewSet(viewsets.ViewSet):
         results: list[dict] = []
         created = updated = mapped = errors = 0
 
+        client_uuids = {item.get('sync_uuid') for item in items if item.get('sync_uuid') is not None}
+        phones = {(item.get('phone') or '').strip() for item in items}
+        phones.discard('')
+        existing_users = list(
+            User.objects
+            .filter(Q(sync_uuid__in=client_uuids) | Q(phone__in=phones))
+            .select_related('student')
+        )
+        users_by_uuid = {user.sync_uuid: user for user in existing_users}
+        users_by_phone = {user.phone: user for user in existing_users}
+        approved_school = None
+        approved_school_loaded = False
+
         for it in items:
             client_uuid = it.get("sync_uuid")
             phone = (it.get("phone") or "").strip()
@@ -166,11 +249,12 @@ class UpSyncViewSet(viewsets.ViewSet):
                 with transaction.atomic():
                     if requested_school_id not in (None, school_id):
                         raise ValueError('school_id is outside sync service scope')
-                    user = User.objects.filter(sync_uuid=client_uuid).first()
+                    user = users_by_uuid.get(client_uuid)
                     canonical_uuid = None
+                    user_was_created = False
 
                     if user is None and phone:
-                        by_phone = User.objects.filter(phone=phone).first()
+                        by_phone = users_by_phone.get(phone)
                         if by_phone is not None:
                             # Central is canonical; map the client UUID to the server UUID.
                             user = by_phone
@@ -193,7 +277,7 @@ class UpSyncViewSet(viewsets.ViewSet):
                         user.set_unusable_password()
                         user.save()
                         canonical_uuid = user.sync_uuid
-                        created += 1
+                        user_was_created = True
                     else:
                         canonical_uuid = user.sync_uuid
 
@@ -225,17 +309,22 @@ class UpSyncViewSet(viewsets.ViewSet):
                             updated += 1
 
                     # Ensure student profile exists and is linked.
-                    student = getattr(user, "student", None)
+                    student = None if user_was_created else getattr(user, "student", None)
                     if student is None:
-                        school = School.objects.filter(pk=school_id, status=StatusEnum.APPROVED.value).first()
-                        if school is None:
+                        if not approved_school_loaded:
+                            approved_school = School.objects.filter(
+                                pk=school_id,
+                                status=StatusEnum.APPROVED.value,
+                            ).first()
+                            approved_school_loaded = True
+                        if approved_school is None:
                             raise ValueError('approved sync service school not found')
 
                         student_kwargs = {
                             "profile": user,
                             "status": StatusEnum.APPROVED.value,
                         }
-                        student_kwargs["school"] = school
+                        student_kwargs["school"] = approved_school
                         if grade:
                             student_kwargs["grade"] = grade
 
@@ -255,6 +344,11 @@ class UpSyncViewSet(viewsets.ViewSet):
                             student_update_fields.append("updated_at")
                             student.save(update_fields=student_update_fields)
 
+                    if user_was_created:
+                        users_by_uuid[user.sync_uuid] = user
+                        users_by_phone[user.phone] = user
+                        created += 1
+
                 results.append(
                     {
                         "status": "ok",
@@ -262,7 +356,7 @@ class UpSyncViewSet(viewsets.ViewSet):
                         "client_sync_uuid": str(client_uuid) if client_uuid else None,
                         "server_sync_uuid": str(canonical_uuid) if canonical_uuid else None,
                         "user_id": getattr(user, "id", None),
-                        "student_id": getattr(getattr(user, "student", None), "id", None),
+                        "student_id": getattr(student, "id", None),
                     }
                 )
             except Exception as exc:
@@ -300,6 +394,18 @@ class UpSyncViewSet(viewsets.ViewSet):
 
         results: list[dict] = []
         created = updated = errors = 0
+        students_by_uuid = self._scoped_student_index(request, items)
+        lesson_ids = {item.get('lesson_id') for item in items if item.get('lesson_id') is not None}
+        lessons_by_id = (
+            LessonResource.objects
+            .select_related('subject')
+            .filter(
+                pk__in=lesson_ids,
+                status=StatusEnum.APPROVED.value,
+                subject__status=StatusEnum.APPROVED.value,
+            )
+            .in_bulk()
+        )
 
         for it in items:
             student_uuid = it.get("student_sync_uuid")
@@ -308,15 +414,9 @@ class UpSyncViewSet(viewsets.ViewSet):
 
             try:
                 with transaction.atomic():
-                    student = self._scoped_student(request, student_uuid)
-
-                    lesson = LessonResource.objects.filter(
-                        pk=lesson_id,
-                        status=StatusEnum.APPROVED.value,
-                        subject__status=StatusEnum.APPROVED.value,
-                        subject__grade=student.grade,
-                    ).first()
-                    if lesson is None:
+                    student = self._student_from_index(students_by_uuid, student_uuid)
+                    lesson = lessons_by_id.get(lesson_id)
+                    if lesson is None or lesson.subject.grade != student.grade:
                         raise ValueError("approved lesson not found for student grade")
 
                     obj, was_created = TakeLesson.objects.get_or_create(student=student, lesson=lesson)
@@ -371,6 +471,12 @@ class UpSyncViewSet(viewsets.ViewSet):
 
         results: list[dict] = []
         created = updated = errors = 0
+        students_by_uuid = self._scoped_student_index(request, items)
+        game_ids = {item.get('game_id') for item in items if item.get('game_id') is not None}
+        games_by_id = GameModel.objects.filter(
+            pk__in=game_ids,
+            status=StatusEnum.APPROVED.value,
+        ).in_bulk()
 
         for it in items:
             student_uuid = it.get("student_sync_uuid")
@@ -379,14 +485,9 @@ class UpSyncViewSet(viewsets.ViewSet):
 
             try:
                 with transaction.atomic():
-                    student = self._scoped_student(request, student_uuid)
-
-                    game = GameModel.objects.filter(
-                        pk=game_id,
-                        status=StatusEnum.APPROVED.value,
-                        grade=student.grade,
-                    ).first()
-                    if game is None:
+                    student = self._student_from_index(students_by_uuid, student_uuid)
+                    game = games_by_id.get(game_id)
+                    if game is None or game.grade != student.grade:
                         raise ValueError("approved game not found for student grade")
 
                     obj, was_created = GamePlay.objects.get_or_create(student=student, game=game)
@@ -444,6 +545,7 @@ class UpSyncViewSet(viewsets.ViewSet):
 
         results: list[dict] = []
         updated = errors = 0
+        students_by_uuid = self._scoped_student_index(request, items)
 
         for it in items:
             student_uuid = it.get("student_sync_uuid")
@@ -453,7 +555,7 @@ class UpSyncViewSet(viewsets.ViewSet):
 
             try:
                 with transaction.atomic():
-                    student = self._scoped_student(request, student_uuid)
+                    student = self._student_from_index(students_by_uuid, student_uuid)
 
                     existing_last = getattr(student, "last_login_activity_date", None)
                     if existing_last is not None and last_day <= existing_last:
@@ -492,6 +594,9 @@ class UpSyncViewSet(viewsets.ViewSet):
                         max_login_streak=new_max,
                         updated_at=timezone.now(),
                     )
+                    student.last_login_activity_date = last_day
+                    student.current_login_streak = new_current
+                    student.max_login_streak = new_max
                     updated += 1
 
                 results.append(
@@ -536,6 +641,19 @@ class UpSyncViewSet(viewsets.ViewSet):
 
         results: list[dict] = []
         created = updated = errors = 0
+        students_by_uuid = self._scoped_student_index(request, items)
+        assessments_by_id = self._general_assessment_index(items)
+        existing_solutions = (
+            AssessmentSolution.objects
+            .filter(
+                assessment_id__in=assessments_by_id,
+                student_id__in={student.id for student in students_by_uuid.values()},
+            )
+            .order_by('id')
+        )
+        solutions_by_pair = {}
+        for solution in existing_solutions:
+            solutions_by_pair.setdefault((solution.assessment_id, solution.student_id), solution)
 
         for it in items:
             student_uuid = it.get("student_sync_uuid")
@@ -545,16 +663,14 @@ class UpSyncViewSet(viewsets.ViewSet):
 
             try:
                 with transaction.atomic():
-                    student = self._scoped_student(request, student_uuid)
-
-                    assessment = self._eligible_general_assessment(student, assessment_id)
-
-                    existing = (
-                        AssessmentSolution.objects
-                        .filter(assessment_id=assessment_id, student=student)
-                        .order_by("id")
-                        .first()
+                    student = self._student_from_index(students_by_uuid, student_uuid)
+                    assessment = self._eligible_general_assessment(
+                        student,
+                        assessment_id,
+                        assessment_index=assessments_by_id,
                     )
+
+                    existing = solutions_by_pair.get((assessment_id, student.id))
                     was_created = False
                     if existing is None:
                         existing = AssessmentSolution.objects.create(
@@ -563,6 +679,7 @@ class UpSyncViewSet(viewsets.ViewSet):
                             solution=solution_text or "",
                         )
                         was_created = True
+                        solutions_by_pair[(assessment_id, student.id)] = existing
                         created += 1
                         _award_student_points(student, ASSESSMENT_SUBMISSION_POINTS)
                     else:
@@ -621,6 +738,20 @@ class UpSyncViewSet(viewsets.ViewSet):
 
         results: list[dict] = []
         created = updated = errors = 0
+        students_by_uuid = self._scoped_student_index(request, items)
+        assessments_by_id = self._lesson_assessment_index(items)
+        progression_cache = {}
+        existing_solutions = (
+            LessonAssessmentSolution.objects
+            .filter(
+                lesson_assessment_id__in=assessments_by_id,
+                student_id__in={student.id for student in students_by_uuid.values()},
+            )
+            .order_by('id')
+        )
+        solutions_by_pair = {}
+        for solution in existing_solutions:
+            solutions_by_pair.setdefault((solution.lesson_assessment_id, solution.student_id), solution)
 
         for it in items:
             student_uuid = it.get("student_sync_uuid")
@@ -630,15 +761,15 @@ class UpSyncViewSet(viewsets.ViewSet):
 
             try:
                 with transaction.atomic():
-                    student = self._scoped_student(request, student_uuid)
-                    assessment = self._eligible_lesson_assessment(student, lesson_assessment_id)
-
-                    existing = (
-                        LessonAssessmentSolution.objects
-                        .filter(lesson_assessment_id=lesson_assessment_id, student=student)
-                        .order_by("id")
-                        .first()
+                    student = self._student_from_index(students_by_uuid, student_uuid)
+                    assessment = self._eligible_lesson_assessment(
+                        student,
+                        lesson_assessment_id,
+                        assessment_index=assessments_by_id,
+                        progression_cache=progression_cache,
                     )
+
+                    existing = solutions_by_pair.get((lesson_assessment_id, student.id))
                     was_created = False
                     if existing is None:
                         existing = LessonAssessmentSolution.objects.create(
@@ -647,6 +778,7 @@ class UpSyncViewSet(viewsets.ViewSet):
                             solution=solution_text or "",
                         )
                         was_created = True
+                        solutions_by_pair[(lesson_assessment_id, student.id)] = existing
                         created += 1
                         _award_student_points(student, ASSESSMENT_SUBMISSION_POINTS)
                     else:
@@ -795,6 +927,8 @@ class UpSyncViewSet(viewsets.ViewSet):
 
         results: list[dict] = []
         created = updated = errors = 0
+        students_by_uuid = self._scoped_student_index(request, items)
+        assessments_by_id = self._general_assessment_index(items)
 
         for it in items:
             student_uuid = it.get("student_sync_uuid")
@@ -804,8 +938,12 @@ class UpSyncViewSet(viewsets.ViewSet):
 
             try:
                 with transaction.atomic():
-                    student = self._scoped_student(request, student_uuid)
-                    assessment = self._eligible_general_assessment(student, assessment_id)
+                    student = self._student_from_index(students_by_uuid, student_uuid)
+                    assessment = self._eligible_general_assessment(
+                        student,
+                        assessment_id,
+                        assessment_index=assessments_by_id,
+                    )
                     if score < 0 or score > float(assessment.marks):
                         raise ValueError('score must be between 0 and assessment marks')
 
@@ -865,6 +1003,9 @@ class UpSyncViewSet(viewsets.ViewSet):
 
         results: list[dict] = []
         created = updated = errors = 0
+        students_by_uuid = self._scoped_student_index(request, items)
+        assessments_by_id = self._lesson_assessment_index(items)
+        progression_cache = {}
 
         for it in items:
             student_uuid = it.get("student_sync_uuid")
@@ -874,8 +1015,13 @@ class UpSyncViewSet(viewsets.ViewSet):
 
             try:
                 with transaction.atomic():
-                    student = self._scoped_student(request, student_uuid)
-                    assessment = self._eligible_lesson_assessment(student, lesson_assessment_id)
+                    student = self._student_from_index(students_by_uuid, student_uuid)
+                    assessment = self._eligible_lesson_assessment(
+                        student,
+                        lesson_assessment_id,
+                        assessment_index=assessments_by_id,
+                        progression_cache=progression_cache,
+                    )
                     if score < 0 or score > float(assessment.marks):
                         raise ValueError('score must be between 0 and assessment marks')
 
