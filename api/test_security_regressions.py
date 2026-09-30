@@ -1,3 +1,4 @@
+from collections import Counter
 from datetime import timedelta
 
 from django.core.files.uploadedfile import SimpleUploadedFile
@@ -61,6 +62,70 @@ class PublicContentSecurityTests(TestCase):
         self.assertEqual([item['id'] for item in items], [approved.id])
         self.assertNotIn('correct_answer', items[0])
         self.assertNotIn('status', items[0])
+
+
+class StudentGamePlaySecurityTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create(
+            phone='231770810099',
+            name='Game Student',
+            role=UserRole.STUDENT.value,
+        )
+        self.game = GameModel.objects.create(
+            name='Describe the image',
+            type='WORD_PUZZLE',
+            grade=StudentLevel.GRADE2.value,
+            correct_answer='Dog',
+            status=Status.APPROVED.value,
+        )
+        self.draft = GameModel.objects.create(
+            name='Draft Game',
+            type='WORD_PUZZLE',
+            grade=StudentLevel.GRADE2.value,
+            correct_answer='Hidden',
+            status=Status.DRAFT.value,
+        )
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.user)
+
+    def test_play_returns_board_without_ordered_answer(self):
+        response = self.client.get(f'/api-v1/games/{self.game.id}/play/')
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload['game_id'], self.game.id)
+        self.assertEqual(payload['answer_length'], 3)
+        self.assertNotIn('correct_answer', payload)
+        self.assertNotIn('answer', payload)
+        pool_counts = Counter(payload['letter_pool'])
+        for character, count in Counter('DOG').items():
+            self.assertGreaterEqual(pool_counts[character], count)
+
+    def test_check_answer_only_reveals_answer_after_success(self):
+        incorrect = self.client.post(
+            f'/api-v1/games/{self.game.id}/check-answer/',
+            {'answer': 'cat'},
+            format='json',
+        )
+        self.assertEqual(incorrect.status_code, 200)
+        self.assertFalse(incorrect.json()['correct'])
+        self.assertNotIn('correct_answer', incorrect.json())
+
+        correct = self.client.post(
+            f'/api-v1/games/{self.game.id}/check-answer/',
+            {'answer': 'd-o g'},
+            format='json',
+        )
+        self.assertEqual(correct.status_code, 200)
+        self.assertTrue(correct.json()['correct'])
+        self.assertEqual(correct.json()['correct_answer'], 'Dog')
+
+    def test_gameplay_requires_authentication_and_approved_game(self):
+        anonymous = APIClient().get(f'/api-v1/games/{self.game.id}/play/')
+        self.assertEqual(anonymous.status_code, 401)
+
+        draft = self.client.get(f'/api-v1/games/{self.draft.id}/play/')
+        self.assertEqual(draft.status_code, 404)
 
 
 @override_settings(SELF_SERVICE_REGISTRATION_ENABLED=False)

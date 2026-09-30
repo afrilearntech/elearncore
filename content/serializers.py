@@ -486,3 +486,7 @@ class GamePublicSerializer(GameSerializer):
 	class Meta(GameSerializer.Meta):
 		fields = ['id', 'name', 'instructions', 'description', 'hint', 'type', 'image', 'grade']
 		read_only_fields = fields
+
+
+class GameAnswerCheckSerializer(serializers.Serializer):
+	answer = serializers.CharField(max_length=200, trim_whitespace=False)

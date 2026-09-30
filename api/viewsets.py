@@ -68,6 +68,7 @@ from content.serializers import (
 	QuestionUpdateSerializer,
 	GameSerializer,
 	GamePublicSerializer,
+	GameAnswerCheckSerializer,
 	StoryListSerializer,
 	StoryDetailSerializer,
 	StoryUpdateSerializer,
@@ -127,7 +128,8 @@ from .uploads import (
 	parse_bounded_csv,
 	validate_solution_upload,
 )
-from .throttles import AIGenerationThrottle
+from .gameplay import build_game_letter_pool, normalize_game_answer
+from .throttles import AIGenerationThrottle, GameAnswerThrottle
 from messsaging.services import send_sms
 from messsaging.invitations import queue_account_invitation
 from messsaging.tasks import send_account_notifications_task
@@ -2477,6 +2479,8 @@ class GameViewSet(viewsets.ModelViewSet):
 	ordering_fields = ['created_at', 'updated_at', 'name']
 
 	def get_permissions(self):
+		if self.action in {'play', 'check_answer'}:
+			return [permissions.IsAuthenticated()]
 		# Students (and anonymous) can list/retrieve, but writes are restricted
 		if self.request.method in permissions.SAFE_METHODS:
 			return [permissions.IsAuthenticatedOrReadOnly()]
@@ -2513,6 +2517,41 @@ class GameViewSet(viewsets.ModelViewSet):
 				description=f"Created game '{game.name}'",
 				metadata={"game_id": game.id, "game_type": game.type},
 			)
+
+	@action(detail=True, methods=['get'], url_path='play')
+	def play(self, request, pk=None):
+		game = self.get_object()
+		normalized_answer, letter_pool = build_game_letter_pool(game.correct_answer)
+		if not normalized_answer:
+			return Response(
+				{'detail': 'This game does not have a usable answer configured.'},
+				status=status.HTTP_409_CONFLICT,
+			)
+		return Response({
+			'game_id': game.id,
+			'answer_length': len(normalized_answer),
+			'letter_pool': letter_pool,
+		})
+
+	@action(
+		detail=True,
+		methods=['post'],
+		url_path='check-answer',
+		throttle_classes=[GameAnswerThrottle],
+	)
+	def check_answer(self, request, pk=None):
+		game = self.get_object()
+		serializer = GameAnswerCheckSerializer(data=request.data)
+		serializer.is_valid(raise_exception=True)
+		attempt = normalize_game_answer(serializer.validated_data['answer'])
+		correct = bool(attempt) and attempt == normalize_game_answer(game.correct_answer)
+		response = {
+			'correct': correct,
+			'detail': 'Great job!' if correct else 'Not quite. Try again.',
+		}
+		if correct:
+			response['correct_answer'] = game.correct_answer
+		return Response(response)
 
 	def list(self, request, *args, **kwargs):
 		"""List games and, for students, include a played/new status.
